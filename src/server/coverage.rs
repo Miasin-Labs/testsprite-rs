@@ -125,6 +125,35 @@ pub fn format_report(report: &CoverageReport) -> String {
     out
 }
 
+/// Sanitize a surface id into a Mermaid-safe node id.
+fn mermaid_node_id(idx: usize, _surface_id: &str) -> String {
+    format!("n{idx}")
+}
+
+/// Render the coverage map as a Mermaid `graph` (a fenced ```mermaid block that
+/// renders natively in GitHub/markdown — no browser needed). Covered surface is
+/// green, uncovered red, so the architectural gap is visible at a glance.
+///
+/// This is the high-value use of mermaid here: the Coverage Guard *emits* a
+/// diagram of declared-vs-exercised surface. (If a PNG is ever wanted, the
+/// browser executor's Playwright/Chromium rail can rasterize the same block.)
+pub fn mermaid_diagram(declared: &[String], case_texts: &[String]) -> String {
+    let mut out = String::from("```mermaid\ngraph LR\n  SUT[System Under Test]\n");
+    for (i, surface_id) in declared.iter().enumerate() {
+        let node = mermaid_node_id(i, surface_id);
+        let covered = case_texts.iter().any(|t| case_touches(surface_id, t));
+        let label = surface_id.replace('"', "'");
+        let mark = if covered { "✓" } else { "✗" };
+        out.push_str(&format!("  SUT --> {node}[\"{mark} {label}\"]\n"));
+        let cls = if covered { "covered" } else { "uncovered" };
+        out.push_str(&format!("  class {node} {cls};\n"));
+    }
+    out.push_str("  classDef covered fill:#d4edda,stroke:#28a745;\n");
+    out.push_str("  classDef uncovered fill:#f8d7da,stroke:#dc3545;\n");
+    out.push_str("```\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

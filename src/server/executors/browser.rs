@@ -64,16 +64,22 @@ fn smoke_template(url: &str) -> String {
 
 /// Write the script to a temp file and run it with Node. Playwright resolves
 /// the cached Chromium automatically via PLAYWRIGHT_BROWSERS_PATH / its default.
+///
+/// `node` resolves `require('playwright')` via `NODE_PATH`: if the caller set it
+/// we honour it; otherwise we auto-detect a global install (handles the common
+/// case where Playwright is only installed in a global `node_modules`).
 async fn run_node_script(script: &str) -> Outcome {
     let dir = std::env::temp_dir();
     let file = dir.join(format!("ts_pw_{}.js", Uuid::new_v4()));
     if let Err(e) = tokio::fs::write(&file, script).await {
         return Outcome::fail(format!("could not write script: {e}"), script.to_string());
     }
-    let out = tokio::process::Command::new("node")
-        .arg(&file)
-        .output()
-        .await;
+    let mut cmd = tokio::process::Command::new("node");
+    cmd.arg(&file);
+    if let Some(node_path) = resolve_node_path() {
+        cmd.env("NODE_PATH", node_path);
+    }
+    let out = cmd.output().await;
     if let Err(e) = tokio::fs::remove_file(&file).await {
         tracing::debug!("could not remove temp script {file:?}: {e}");
     }
@@ -85,4 +91,30 @@ async fn run_node_script(script: &str) -> Outcome {
         }
         Err(e) => Outcome::fail(format!("node failed to launch: {e}"), script.to_string()),
     }
+}
+
+/// Where `node` should look for `require('playwright')`. Honours an explicit
+/// `PLAYWRIGHT_NODE_PATH`/`NODE_PATH`, else probes common global install roots.
+fn resolve_node_path() -> Option<String> {
+    if let Ok(p) = std::env::var("PLAYWRIGHT_NODE_PATH") {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(p) = std::env::var("NODE_PATH") {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    for root in [
+        format!("{home}/.npm-global/lib/node_modules"),
+        "/usr/local/lib/node_modules".to_string(),
+        "/usr/lib/node_modules".to_string(),
+    ] {
+        if std::path::Path::new(&root).join("playwright").exists() {
+            return Some(root);
+        }
+    }
+    None
 }
