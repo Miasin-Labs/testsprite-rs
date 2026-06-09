@@ -197,4 +197,18 @@ mod tests {
         assert!(!report.has_findings());
         assert_eq!(report.percent() as u32, 100);
     }
+
+    #[test]
+    fn mermaid_diagram_marks_covered_and_uncovered_robust() {
+        let declared = vec!["GET /health".to_string(), "POST /api/todos".to_string()];
+        let cases = vec!["test GET /health".to_string()];
+        let diagram = mermaid_diagram(&declared, &cases);
+        assert!(diagram.starts_with("```mermaid"));
+        assert!(diagram.contains("graph LR"));
+        // covered element marked ✓, uncovered marked ✗
+        assert!(diagram.contains("✓ GET /health"));
+        assert!(diagram.contains("✗ POST /api/todos"));
+        assert!(diagram.contains("classDef covered"));
+        assert!(diagram.contains("classDef uncovered"));
+    }
 }

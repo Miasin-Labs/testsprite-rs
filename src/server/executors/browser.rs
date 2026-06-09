@@ -96,25 +96,19 @@ async fn run_node_script(script: &str) -> Outcome {
 /// Where `node` should look for `require('playwright')`. Honours an explicit
 /// `PLAYWRIGHT_NODE_PATH`/`NODE_PATH`, else probes common global install roots.
 fn resolve_node_path() -> Option<String> {
-    if let Ok(p) = std::env::var("PLAYWRIGHT_NODE_PATH") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
-    if let Ok(p) = std::env::var("NODE_PATH") {
-        if !p.is_empty() {
+    for var in ["PLAYWRIGHT_NODE_PATH", "NODE_PATH"] {
+        if let Ok(p) = std::env::var(var)
+            && !p.is_empty()
+        {
             return Some(p);
         }
     }
     let home = std::env::var("HOME").ok()?;
-    for root in [
+    [
         format!("{home}/.npm-global/lib/node_modules"),
         "/usr/local/lib/node_modules".to_string(),
         "/usr/lib/node_modules".to_string(),
-    ] {
-        if std::path::Path::new(&root).join("playwright").exists() {
-            return Some(root);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|root| std::path::Path::new(root).join("playwright").exists())
 }

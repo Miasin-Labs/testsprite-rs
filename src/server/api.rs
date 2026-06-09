@@ -327,11 +327,11 @@ async fn coverage_report(State(state): State<AppState>) -> impl IntoResponse {
         "hasGaps": report.has_findings(),
         "declared": report.declared,
         "covered": report.covered,
-        "hasGaps": report.has_findings(),
         "findings": report.findings.iter().map(|f| json!({
             "rule": f.rule, "message": f.message, "target": f.target,
         })).collect::<Vec<_>>(),
         "report": coverage::format_report(&report),
+        "mermaid": coverage::mermaid_diagram(&declared, &case_texts),
     }))
 }
 
