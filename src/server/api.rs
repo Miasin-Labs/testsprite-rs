@@ -17,22 +17,27 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::engine;
+use super::executors::{self, ExecCtx, TestKind};
 use super::llm::LlmClient;
-use super::store::{self, Runnable, Store};
+use super::store::{self, Store};
+use super::{coverage, engine};
 
 const LOCAL_USER_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
-    /// Maps a planned case id -> how to run it (deterministic spec or LLM Python).
-    pub plans: Arc<RwLock<HashMap<String, Runnable>>>,
-    /// Maps a planned case id -> the case JSON (for LLM code generation on /run).
+    /// Planned cases keyed by id. A case is JSON `{id,title,description,...}`;
+    /// deterministic cases embed a `spec`. This is the single source of truth —
+    /// no modality-specific branching lives here.
     pub cases: Arc<RwLock<HashMap<String, Value>>>,
-    /// The PRD most recently generated (LLM code-gen context).
+    /// The PRD most recently generated (executor codegen context).
     pub prd: Arc<RwLock<Value>>,
-    /// Where the local app under test listens (for direct execution).
+    /// The modality this backend instance serves; routes /run to one
+    /// [`executors::Executor`]. Selected at startup (`--kind`), overridable by a
+    /// `testKind` field in the run body.
+    pub kind: TestKind,
+    /// Target surface: HTTP/browser base URL, mcp command, or rust crate path.
     pub target_base: Arc<RwLock<Option<String>>>,
     /// Optional OpenAI client. When present, the backend behaves like the real
     /// cloud (LLM PRD/plan/code-gen). When absent, the deterministic engine runs.
@@ -40,12 +45,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(llm: Option<LlmClient>) -> Self {
+    pub fn new(llm: Option<LlmClient>, kind: TestKind) -> Self {
         Self {
             store: Store::new(),
-            plans: Arc::new(RwLock::new(HashMap::new())),
             cases: Arc::new(RwLock::new(HashMap::new())),
             prd: Arc::new(RwLock::new(json!({}))),
+            kind,
             target_base: Arc::new(RwLock::new(None)),
             llm,
         }
@@ -67,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mcp/frontend-test/generate-plan", post(frontend_plan))
         .route("/mcp/frontend-test/run", post(backend_run))
         .route("/mcp/project/test/{test_id}", get(get_test))
+        .route("/mcp/coverage", get(coverage_report))
         .route("/mcp/common/log", post(log_sink))
         .route("/mcp/common/log-batch", post(log_sink))
         .route("/mcp/common/generate-test-summary", post(test_summary))
@@ -164,98 +170,103 @@ async fn frontend_plan(
     (StatusCode::CREATED, Json(cases))
 }
 
-/// Build a plan from a PRD, storing per-case runnables (deterministic) or case
-/// JSON (LLM, code generated lazily on /run). Returns the client-facing cases.
+/// Build a plan from a PRD and store the cases (the single source of truth that
+/// `/run` and the coverage guard both read). LLM mode produces richer cases
+/// (incl. adversarial edge cases); deterministic mode synthesizes one case per
+/// endpoint with an embedded `spec`. Either way a case is just JSON.
 async fn build_plan(state: &AppState, prd: &Value) -> Vec<Value> {
     *state.prd.write().await = prd.clone();
 
-    if let Some(llm) = &state.llm {
-        if let Ok(plan) = llm.generate_plan(prd).await {
-            let mut cases_store = state.cases.write().await;
-            let mut out = Vec::new();
-            for case in &plan {
-                if let Some(id) = case.get("id").and_then(|v| v.as_str()) {
-                    cases_store.insert(id.to_string(), case.clone());
-                    out.push(case.clone());
-                }
+    let cases = match &state.llm {
+        Some(llm) => match llm.generate_plan(prd).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                tracing::warn!("LLM plan failed ({e}); using deterministic engine");
+                deterministic_cases(prd)
             }
-            return out;
-        }
-        tracing::warn!("LLM plan failed; using deterministic engine");
-    }
+        },
+        None => deterministic_cases(prd),
+    };
 
-    // Deterministic fallback.
+    let mut store = state.cases.write().await;
+    let mut out = Vec::new();
+    for case in cases {
+        if let Some(id) = case.get("id").and_then(|v| v.as_str()) {
+            store.insert(id.to_string(), case.clone());
+            out.push(case);
+        }
+    }
+    out
+}
+
+/// Deterministic cases: one per declared endpoint, with an embedded `spec` the
+/// HTTP executor runs directly (no LLM).
+fn deterministic_cases(prd: &Value) -> Vec<Value> {
     let cs = code_summary_from_prd(prd);
-    let plan = engine::plan_from_code_summary(&cs);
-    let mut plans = state.plans.write().await;
-    plan.iter()
+    engine::plan_from_code_summary(&cs)
+        .into_iter()
         .map(|c| {
-            plans.insert(c.id.clone(), Runnable::Spec(c.spec.clone()));
-            json!({ "id": c.id, "title": c.title, "description": c.description })
+            json!({
+                "id": c.id,
+                "title": c.title,
+                "description": c.description,
+                "spec": serde_json::to_value(&c.spec).unwrap_or(Value::Null),
+            })
         })
         .collect()
 }
 
 // --- run ---
 
-/// `POST /mcp/backend-test/run` — create test entities, kick off direct
-/// execution, return the test ids the client will poll.
+/// `POST /mcp/{backend,frontend}-test/run` — create RUNNING entities, dispatch
+/// every case through the modality executor, return the test ids to poll.
 async fn backend_run(State(state): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
     let project_id = Uuid::new_v4().to_string();
-    let base_url = resolve_base(&state, &body).await;
+    let target = resolve_base(&state, &body).await;
+    // Kind is fixed at startup but may be overridden per-run via `testKind`.
+    let kind = body
+        .get("testKind")
+        .and_then(|v| v.as_str())
+        .map(TestKind::parse)
+        .unwrap_or(state.kind);
 
-    // The client sends the (possibly filtered) testPlan back to us.
-    let plan = body
+    // The client sends back the (possibly filtered) testPlan; fall back to the
+    // full stored plan so the run still works even if it's empty.
+    let mut plan = body
         .get("testPlan")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let prd = state.prd.read().await.clone();
+    if plan.is_empty() {
+        plan = state.cases.read().await.values().cloned().collect();
+    }
 
-    let mut to_run: Vec<(String, Runnable)> = Vec::new();
+    let mut to_run: Vec<(String, Value)> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
     for case in &plan {
-        let case_id = case.get("id").and_then(|v| v.as_str()).unwrap_or("TC");
         let title = case.get("title").and_then(|v| v.as_str()).unwrap_or("test");
         let description = case
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let Some(runnable) = resolve_runnable(&state, case_id, case, &prd, &base_url).await else {
-            continue;
-        };
         let test_id = Uuid::new_v4().to_string();
         let entity =
             store::new_running_entity(&project_id, &test_id, LOCAL_USER_ID, title, description);
         state.store.insert(test_id.clone(), entity).await;
-        to_run.push((test_id.clone(), runnable));
+        to_run.push((test_id.clone(), case.clone()));
         ids.push(test_id);
     }
 
-    store::spawn_execution(state.store.clone(), base_url, to_run);
+    // One execution path for every modality: pick the executor for the kind,
+    // build the shared context, and let the store drive each case.
+    let executor = executors::for_kind(kind);
+    let ctx = ExecCtx {
+        target,
+        llm: state.llm.clone(),
+        prd: Arc::new(state.prd.read().await.clone()),
+    };
+    store::spawn_execution(state.store.clone(), executor, ctx, to_run);
     (StatusCode::CREATED, Json(json!({ "testIds": ids })))
-}
-
-/// Resolve how to run a case: a stored deterministic spec, or LLM-generated
-/// Python (generated on demand using the case + PRD).
-async fn resolve_runnable(
-    state: &AppState,
-    case_id: &str,
-    case: &Value,
-    prd: &Value,
-    base_url: &str,
-) -> Option<Runnable> {
-    if let Some(r) = state.plans.read().await.get(case_id) {
-        return Some(r.clone());
-    }
-    let llm = state.llm.as_ref()?;
-    match llm.generate_test_code(case, prd, base_url).await {
-        Ok(code) => Some(Runnable::Python(code)),
-        Err(e) => {
-            tracing::warn!("LLM code-gen failed for {case_id}: {e}");
-            None
-        }
-    }
 }
 
 /// Determine the app base URL: prefer the run payload's `endpoint`, then the
@@ -280,6 +291,48 @@ async fn get_test(State(state): State<AppState>, Path(test_id): Path<String>) ->
             Json(json!({ "error": "Test not found or no permission" })),
         ),
     }
+}
+
+// --- coverage guard ---
+
+/// `GET /mcp/coverage` — the Coverage Guard gate: declared surface vs. the cases
+/// that were planned + executed. Sibling to Slop Guard, but for test coverage.
+async fn coverage_report(State(state): State<AppState>) -> impl IntoResponse {
+    let prd = state.prd.read().await.clone();
+    let code_summary = code_summary_from_prd(&prd);
+    let declared = coverage::declared_surface(&code_summary);
+
+    // Coverage measures what was *executed*, not just planned: pull the test
+    // entities the store recorded (only run cases are present), and only count a
+    // surface element as covered when a PASSED test exercised it.
+    let case_texts: Vec<String> = state
+        .store
+        .all()
+        .await
+        .iter()
+        .filter(|e| e.get("testStatus").and_then(|s| s.as_str()) == Some("PASSED"))
+        .map(|e| {
+            format!(
+                "{} {} {}",
+                e.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                e.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                e.get("code").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        })
+        .collect();
+
+    let report = coverage::evaluate(&declared, &case_texts);
+    Json(json!({
+        "coveragePercent": report.percent(),
+        "hasGaps": report.has_findings(),
+        "declared": report.declared,
+        "covered": report.covered,
+        "hasGaps": report.has_findings(),
+        "findings": report.findings.iter().map(|f| json!({
+            "rule": f.rule, "message": f.message, "target": f.target,
+        })).collect::<Vec<_>>(),
+        "report": coverage::format_report(&report),
+    }))
 }
 
 // --- misc sinks ---

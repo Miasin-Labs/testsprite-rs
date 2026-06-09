@@ -151,6 +151,50 @@ impl LlmClient {
         let code = self.chat(&system, &user, false).await?;
         Ok(strip_code_fences(&code))
     }
+
+    /// Generate a self-contained Playwright (Node) script for a frontend case.
+    pub async fn generate_playwright(
+        &self,
+        case: &Value,
+        prd: &Value,
+        url: &str,
+    ) -> Result<String> {
+        let system = format!(
+            "You write a single self-contained Node script using `require('playwright')`. \
+             Launch chromium headless, open the page at {url}, exercise the UI flow / edge case \
+             described, and `process.exit(1)` with a console.error on failure (assertion fails, \
+             bad HTTP status, or any pageerror). Output ONLY JavaScript, no markdown fences.",
+        );
+        let user = format!(
+            "Test case:\n{}\n\nContext PRD:\n{}",
+            serde_json::to_string_pretty(case)?,
+            serde_json::to_string_pretty(prd)?
+        );
+        let code = self.chat(&system, &user, false).await?;
+        Ok(strip_code_fences(&code))
+    }
+
+    /// Generate a Rust integration `#[test]` for a case against a crate.
+    pub async fn generate_rust_test(
+        &self,
+        case: &Value,
+        prd: &Value,
+        crate_dir: &str,
+    ) -> Result<String> {
+        let system = format!(
+            "You write a single Rust integration test file for the crate at {crate_dir}. \
+             Use the crate's PUBLIC API only (it is a dependency of this test). Cover the \
+             edge/boundary/error path described with one or more `#[test]` functions and real \
+             assertions. Output ONLY Rust source, no markdown fences.",
+        );
+        let user = format!(
+            "Test case:\n{}\n\nContext PRD:\n{}",
+            serde_json::to_string_pretty(case)?,
+            serde_json::to_string_pretty(prd)?
+        );
+        let code = self.chat(&system, &user, false).await?;
+        Ok(strip_code_fences(&code))
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.

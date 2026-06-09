@@ -1,4 +1,5 @@
 /target
-/target
 /live
 /localtest
+/itest
+*.tgz

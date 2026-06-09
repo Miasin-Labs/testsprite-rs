@@ -10,7 +10,9 @@
 //! to push a `RequestTunnel`/open a data plane.
 
 pub mod api;
+pub mod coverage;
 pub mod engine;
+pub mod executors;
 pub mod llm;
 pub mod store;
 
@@ -26,13 +28,14 @@ use futures::{SinkExt, StreamExt};
 /// `~/.config/jfc/credentials.toml`), the backend behaves like the real cloud:
 /// the LLM generates the PRD, test plan, and Python test code. Otherwise it
 /// falls back to a deterministic engine driven by the code summary.
-pub async fn serve(port: u16, model: &str) -> Result<()> {
+pub async fn serve(port: u16, model: &str, kind: executors::TestKind) -> Result<()> {
     let llm = llm::LlmClient::from_env(model);
     let mode = match &llm {
         Some(c) => format!("LLM ({})", c.model),
         None => "deterministic (no OpenAI key found)".to_string(),
     };
-    let state = api::AppState::new(llm);
+    let mode = format!("{mode}, kind={kind:?}");
+    let state = api::AppState::new(llm, kind);
     let app = api::router(state).route("/ws", get(control_ws));
 
     let addr = format!("127.0.0.1:{port}");

@@ -105,13 +105,54 @@ testsprite-rs generate-code-and-execute
 - **LLM mode** (when an OpenAI key is found in `OPENAI_API_KEY` or
   `~/.config/jfc/credentials.toml` → `[openai].api_key`): the backend uses the
   model exactly like the real cloud — generates a structured **PRD** from the
-  code summary, a **test plan** (happy paths + error cases), and **executable
-  Python** (`requests`) per case, then runs `python3` against your app for real
-  pass/fail. Verified end-to-end: 8 LLM-authored tests generated and executed,
-  passing/failing on genuine assertions.
-- **Deterministic mode** (no key): derives the plan + Python directly from the
-  code summary's `api_endpoints` (`{method, path, body?, expect_status?}`),
-  asserting status codes. No model, no network beyond the app under test.
+  code summary, a **test plan** (happy paths + adversarial edge cases), and the
+  executable artifact per case, then runs it for real pass/fail. Verified
+  end-to-end: 8 LLM-authored tests generated and executed.
+- **Deterministic mode** (no key): derives the plan + checks directly from the
+  code summary's `api_endpoints` (`{method, path, body?, expect_status?}`).
+  No model, no network beyond the app under test.
+
+## Architecture: one pipeline, four modalities
+
+TestSprite ships backend, browser/E2E, and MCP testing. The realization from
+analyzing it: those are the **same pipeline** —
+`surface → plan(edge cases) → generate(artifact) → execute → report` — and only
+the *executor* (what the artifact runs against) changes. So that one varying
+thing is a trait (`server::executors::Executor`), not four parallel code paths.
+The planner, store, API, and Coverage Guard are all modality-agnostic and
+dispatch through it. Pick the modality with `--kind` (or a `testKind` field in
+the run body):
+
+| `--kind` | Executor | Artifact / target | Verified |
+|---|---|---|---|
+| `backend` | `executors/http.rs` | HTTP spec or LLM Python (`requests`) → app URL | ✅ live (3/3) |
+| `frontend` | `executors/browser.rs` | Playwright JS → cached Chromium | builds; node/pw present |
+| `mcp` | `executors/mcp.rs` | JSON-RPC `tools/call` edge payloads → stdio MCP server | ✅ live (own server) |
+| `rust` | `executors/rust.rs` | `#[test]` → `cargo test` in a target crate | builds |
+
+```bash
+testsprite-rs backend --kind mcp     # fuzz an MCP tool surface (jfc is a target)
+testsprite-rs backend --kind rust    # generate #[test]s + cargo test a crate
+testsprite-rs backend --kind frontend # Playwright E2E against a frontend URL
+```
+
+## Coverage Guard — the architectural-soundness gate
+
+Sibling to a Slop Guard: where Slop Guard asks "is this code slop?", Coverage
+Guard asks **"did the run actually exercise the surface you declared?"**. After a
+run, `GET /mcp/coverage` compares the declared surface (endpoints/tools from the
+code summary) against what *passing* tests actually touched, and reports
+untested surface + a coverage %:
+
+```json
+{ "coveragePercent": 66.7, "hasGaps": true, "covered": 2, "declared": 3,
+  "findings": [ { "rule": "uncovered_surface",
+                  "message": "`DELETE /api/secret` is declared but no test exercises it",
+                  "target": "DELETE /api/secret" } ] }
+```
+
+This catches the dominant AI-build failure mode: N features that each "pass" in
+isolation but leave declared surface unverified.
 
 The code summary may include `base_url` and per-endpoint `expect_status` to make
 the deterministic checks precise:
@@ -140,7 +181,9 @@ the deterministic checks precise:
 | `server/api.rs` | (the cloud) | local `api.testsprite.com` REST contract |
 | `server/llm.rs` | (the cloud LLM) | OpenAI PRD/plan/test-code generation |
 | `server/engine.rs` | (the cloud) | deterministic generator (no-LLM fallback) |
-| `server/store.rs` | (the sandbox) | test store + executor (HTTP spec or `python3`) |
+| `server/store.rs` | (the sandbox) | test store + single execution path via the `Executor` seam |
+| `server/executors/` | (the sandbox) | `Executor` trait + http / browser / mcp / rust impls |
+| `server/coverage.rs` | (the gate) | Coverage Guard — declared vs. exercised surface |
 | `server/mod.rs` | (control plane) | HTTP + accept-only control WebSocket |
 
 ## Endpoints
@@ -152,15 +195,20 @@ POST /mcp/backend-test/plan        {prdContent, targetScope}
 POST /mcp/frontend-test/generate-plan
 POST /mcp/{frontend,backend}-test/run   {testPlan, prdContent, endpoint, proxy, ...}
 GET  /mcp/project/test/{id}        poll a test entity
+GET  /mcp/coverage                 Coverage Guard report (declared vs. exercised)
 POST /api/tunnel/v2                {} -> {id, secret}
 GET  /api/tunnel/v2/version
 ```
 
 ## Status
 
-Builds clean (`cargo build`, `cargo clippy` — 0 warnings). The account check,
-MCP `initialize`/`tools/list`/`tools/call`, the tunnel, and a full backend
-`generate-code-and-execute` run were all verified live. Tunnel **v2** is
+Builds clean (`cargo build`, `cargo clippy` — 0 warnings; `cargo test` — 3
+pass). Verified live: the account check, MCP `initialize`/`tools/list`/
+`tools/call`, the tunnel, a full backend `generate-code-and-execute` run, the
+local backend (deterministic + LLM), the **mcp** executor against this binary's
+own MCP server, and the **Coverage Guard** flagging an untested endpoint (2/3,
+67%). The `frontend` (Playwright) and `rust` (`cargo test`) executors build and
+have deterministic fallbacks but were not run end-to-end here. Tunnel **v2** is
 implemented; v1 (legacy HMAC-challenge TCP tunnel) is detected and rejected.
 
 This is a research reimplementation for understanding the protocol; it is not

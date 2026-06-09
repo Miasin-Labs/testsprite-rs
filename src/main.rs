@@ -53,6 +53,9 @@ enum Command {
         /// OpenAI model for PRD/plan/test-code generation.
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
+        /// Testing modality: backend | frontend | mcp | rust.
+        #[arg(long, default_value = "backend")]
+        kind: String,
     },
 }
 
@@ -71,7 +74,9 @@ async fn main() -> Result<()> {
         Command::Serve => mcp::serve().await,
         Command::Account | Command::Check => run_account().await,
         Command::GenerateCodeAndExecute => run_console_execute().await,
-        Command::Backend { port, model } => server::serve(port, &model).await,
+        Command::Backend { port, model, kind } => {
+            server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
+        }
     }
 }
 

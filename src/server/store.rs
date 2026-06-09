@@ -13,16 +13,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::engine::{self, EndpointSpec};
-
-/// How a test case is executed. Deterministic mode runs an HTTP spec directly;
-/// LLM mode runs the model-generated Python file via `python3`.
-#[derive(Clone)]
-pub enum Runnable {
-    /// Deterministic: a single HTTP assertion (no external deps).
-    Spec(EndpointSpec),
-    /// LLM mode: self-contained Python test code to execute.
-    Python(String),
-}
+use super::executors::{ExecCtx, Executor};
 
 /// A stored test entity, shaped exactly like the client's `TestEntity`.
 #[derive(Clone)]
@@ -53,6 +44,17 @@ impl Store {
             .await
             .get(test_id)
             .map(|t| t.entity.clone())
+    }
+
+    /// All stored test entities (for the Coverage Guard: only entities that
+    /// actually ran are present here, vs. the full planned-case set).
+    pub async fn all(&self) -> Vec<Value> {
+        self.inner
+            .read()
+            .await
+            .values()
+            .map(|t| t.entity.clone())
+            .collect()
     }
 
     async fn set_status(&self, test_id: &str, status: &str, error: &str, code: &str) {
@@ -159,23 +161,24 @@ pub async fn execute_python(code: &str) -> (bool, String, String) {
     }
 }
 
-/// Spawn async execution of all cases, transitioning each entity on completion.
-pub fn spawn_execution(store: Store, base_url: String, cases: Vec<(String, Runnable)>) {
+/// Spawn async execution of all cases through one [`Executor`]. The store, API,
+/// and planner never branch on modality — the executor is the only seam. Each
+/// entity transitions RUNNING -> PASSED/FAILED as its case completes.
+pub fn spawn_execution(
+    store: Store,
+    executor: Arc<dyn Executor>,
+    ctx: ExecCtx,
+    cases: Vec<(String, Value)>,
+) {
     tokio::spawn(async move {
-        for (test_id, runnable) in cases {
-            let (ok, err, code, label) = match &runnable {
-                Runnable::Spec(spec) => {
-                    let (ok, err, code) = execute_spec(spec, &base_url).await;
-                    (ok, err, code, format!("{} {}", spec.method, spec.path))
-                }
-                Runnable::Python(py) => {
-                    let (ok, err, code) = execute_python(py).await;
-                    (ok, err, code, "python".to_string())
-                }
-            };
-            let status = if ok { "PASSED" } else { "FAILED" };
-            store.set_status(&test_id, status, &err, &code).await;
-            tracing::info!("local-exec: {test_id} {status} ({label})");
+        let label = executor.label();
+        for (test_id, case) in cases {
+            let outcome = executor.run(&case, &ctx).await;
+            let status = if outcome.passed { "PASSED" } else { "FAILED" };
+            store
+                .set_status(&test_id, status, &outcome.error, &outcome.code)
+                .await;
+            tracing::info!("local-exec[{label}]: {test_id} {status}");
         }
     });
 }
