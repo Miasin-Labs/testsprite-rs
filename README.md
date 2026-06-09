@@ -79,6 +79,48 @@ testsprite-rs generate-code-and-execute
 Register it with an MCP client by pointing the command at the built binary with
 `API_KEY` in the environment.
 
+## Local backend — run the whole thing with NO account / NO cloud
+
+`testsprite-rs backend` is a drop-in local reimplementation of
+`api.testsprite.com`: same endpoint contract, same control-WS handshake, but it
+runs entirely on your machine. Because the executor runs the generated tests
+directly against your local app, the reverse tunnel collapses to an accept-only
+control socket — no data plane needed.
+
+```bash
+# start the local backend (port 8787). Uses OpenAI if a key is available,
+# else a deterministic engine.
+testsprite-rs backend --port 8787 --model gpt-4o-mini
+
+# point the (unmodified) client at it — any API_KEY works, it's ignored:
+API_KEY=local \
+API_URL=http://127.0.0.1:8787 \
+TSEMCP_TUNNEL_CONTROL_URL=ws://127.0.0.1:8787/ws \
+TSEMCP_TUNNEL_VERSION=2 \
+testsprite-rs generate-code-and-execute
+```
+
+**Two intelligence modes:**
+
+- **LLM mode** (when an OpenAI key is found in `OPENAI_API_KEY` or
+  `~/.config/jfc/credentials.toml` → `[openai].api_key`): the backend uses the
+  model exactly like the real cloud — generates a structured **PRD** from the
+  code summary, a **test plan** (happy paths + error cases), and **executable
+  Python** (`requests`) per case, then runs `python3` against your app for real
+  pass/fail. Verified end-to-end: 8 LLM-authored tests generated and executed,
+  passing/failing on genuine assertions.
+- **Deterministic mode** (no key): derives the plan + Python directly from the
+  code summary's `api_endpoints` (`{method, path, body?, expect_status?}`),
+  asserting status codes. No model, no network beyond the app under test.
+
+The code summary may include `base_url` and per-endpoint `expect_status` to make
+the deterministic checks precise:
+
+```json
+{ "project_name": "app", "base_url": "http://localhost:8333",
+  "api_endpoints": [ {"method":"GET","path":"/health","expect_status":200} ] }
+```
+
 ## Module map (mirrors the original plugin)
 
 | Rust module | Original | Role |
@@ -95,6 +137,11 @@ Register it with an MCP client by pointing the command at the built binary with
 | `tunnel/mod.rs` | `tunnelClient/v2/index.ts` | version negotiation + proxy URL |
 | `tools/*` | `tools/*.ts` | the 8 MCP tools + orchestrator |
 | `mcp.rs` | `index.ts` | stdio JSON-RPC MCP server |
+| `server/api.rs` | (the cloud) | local `api.testsprite.com` REST contract |
+| `server/llm.rs` | (the cloud LLM) | OpenAI PRD/plan/test-code generation |
+| `server/engine.rs` | (the cloud) | deterministic generator (no-LLM fallback) |
+| `server/store.rs` | (the sandbox) | test store + executor (HTTP spec or `python3`) |
+| `server/mod.rs` | (control plane) | HTTP + accept-only control WebSocket |
 
 ## Endpoints
 

@@ -12,6 +12,7 @@ mod mcp;
 mod net;
 mod paths;
 mod report;
+mod server;
 mod tools;
 mod tunnel;
 mod types;
@@ -41,6 +42,18 @@ enum Command {
     /// Console execution path: read config.executionArgs and run the full
     /// tunnel → dispatch → poll → report flow. Mirrors the plugin CLI.
     GenerateCodeAndExecute,
+    /// Run a LOCAL stand-in for api.testsprite.com (no account needed).
+    /// Uses OpenAI (key from ~/.config/jfc/credentials.toml or OPENAI_API_KEY)
+    /// when available, else a deterministic engine. Point the client at it via
+    /// API_URL / TSEMCP_TUNNEL_CONTROL_URL.
+    Backend {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// OpenAI model for PRD/plan/test-code generation.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+    },
 }
 
 #[tokio::main]
@@ -58,6 +71,7 @@ async fn main() -> Result<()> {
         Command::Serve => mcp::serve().await,
         Command::Account | Command::Check => run_account().await,
         Command::GenerateCodeAndExecute => run_console_execute().await,
+        Command::Backend { port, model } => server::serve(port, &model).await,
     }
 }
 

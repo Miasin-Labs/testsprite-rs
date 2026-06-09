@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws", "multipart"] }
 bytes = "1.11.1"
 clap = { version = "4.6.1", features = ["derive"] }
 futures = "0.3.32"
@@ -22,6 +22,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
+toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.23.3", features = ["v4"] }
