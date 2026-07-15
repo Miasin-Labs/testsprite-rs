@@ -115,6 +115,11 @@ enum Command {
         #[command(subcommand)]
         cmd: AgentCmd,
     },
+    /// Manage local re-verification schedules (group + cadence); emit crontab lines.
+    Schedule {
+        #[command(subcommand)]
+        cmd: ScheduleCmd,
+    },
     /// Run the Discord bot front-end for the agent (build with `--features discord`).
     #[cfg(feature = "discord")]
     Discord {
@@ -390,6 +395,7 @@ async fn main() -> Result<()> {
             std::process::exit(if regression { 1 } else { 0 });
         }
         Command::Agent { cmd } => run_agent(cmd).await,
+        Command::Schedule { cmd } => run_schedule(cmd).await,
         Command::Completions { shell } => {
             let mut cmd = <Cli as CommandFactory>::command();
             clap_complete::generate(shell, &mut cmd, "testsprite-rs", &mut std::io::stdout());
@@ -400,6 +406,95 @@ async fn main() -> Result<()> {
     }
 }
 
+#[derive(Subcommand)]
+enum ScheduleCmd {
+    /// Add or update a named schedule (group + cadence: hourly|daily|weekly|monthly).
+    Add {
+        /// Schedule name.
+        name: String,
+        /// The test group/list to run.
+        #[arg(long)]
+        group: String,
+        /// Cadence: hourly | daily | weekly | monthly.
+        #[arg(long, default_value = "daily")]
+        cadence: String,
+    },
+    /// List stored schedules.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a named schedule.
+    Remove {
+        /// Schedule name.
+        name: String,
+    },
+    /// Run a schedule's group now.
+    Run {
+        /// Schedule name.
+        name: String,
+    },
+    /// Emit crontab lines for all schedules (pipe to `crontab -`).
+    Crontab,
+}
+
+async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        ScheduleCmd::Add {
+            name,
+            group,
+            cadence,
+        } => {
+            local::schedule::add(&root, &name, &group, &cadence)?;
+            println!("scheduled '{name}' -> group '{group}' ({cadence})");
+            Ok(())
+        }
+        ScheduleCmd::List { json } => {
+            let schedules = local::schedule::list(&root)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&schedules)?);
+            } else if schedules.is_empty() {
+                println!("no schedules");
+            } else {
+                for s in &schedules {
+                    println!("{}  group={}  cadence={}", s.name, s.group, s.cadence);
+                }
+            }
+            Ok(())
+        }
+        ScheduleCmd::Remove { name } => {
+            if local::schedule::remove(&root, &name)? {
+                println!("removed schedule '{name}'");
+            } else {
+                println!("no schedule named '{name}'");
+            }
+            Ok(())
+        }
+        ScheduleCmd::Run { name } => {
+            let Some(s) = local::schedule::get(&root, &name)? else {
+                anyhow::bail!("no schedule named '{name}'");
+            };
+            let ids: Vec<String> = local::store::list(&root)
+                .await?
+                .into_iter()
+                .filter(|t| t.group() == Some(s.group.as_str()))
+                .map(|t| t.id)
+                .collect();
+            if ids.is_empty() {
+                println!("schedule '{name}': no tests in group '{}'", s.group);
+                return Ok(());
+            }
+            let code = local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None).await?;
+            std::process::exit(code);
+        }
+        ScheduleCmd::Crontab => {
+            let bin = std::env::current_exe()?.to_string_lossy().to_string();
+            print!("{}", local::schedule::crontab(&root, &bin)?);
+            Ok(())
+        }
+    }
+}
 async fn run_agent(cmd: AgentCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {

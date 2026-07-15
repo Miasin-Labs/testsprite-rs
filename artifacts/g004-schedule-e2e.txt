@@ -1,0 +1,11 @@
+G004 (c) local schedule — e2e 2026-07-15
+=========================================
+$ schedule add nightly --group smoke --cadence daily   => scheduled
+$ schedule add bad --cadence biweekly                  => Error: invalid cadence (lists hourly|daily|weekly|monthly)
+$ schedule list [--json]                                => nightly group=smoke cadence=daily
+$ schedule run nightly                                  => runs smoke group: s1,s2 PASS (2/2)
+$ schedule crontab                                      =>
+    0 9 * * * cd <root> && <bin> test run --group smoke  # testsprite-rs:nightly
+$ schedule remove nightly                               => removed; list empty
+
+schedule unit tests: 6/6. cargo test 59/59, clippy 0.
