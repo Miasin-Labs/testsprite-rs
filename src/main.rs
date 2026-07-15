@@ -8,6 +8,7 @@
 mod backend;
 mod config;
 mod envs;
+mod local;
 mod mcp;
 mod net;
 mod paths;
@@ -19,6 +20,7 @@ mod types;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -57,6 +59,55 @@ enum Command {
         #[arg(long, default_value = "backend")]
         kind: String,
     },
+    /// Local project lifecycle — no cloud (init / show).
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
+    /// Local test lifecycle — no cloud (add / list / run).
+    Test {
+        #[command(subcommand)]
+        cmd: TestCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Create testsprite_tests/project.json.
+    Init {
+        /// Modality: backend | frontend | mcp | rust.
+        #[arg(long = "type", default_value = "backend")]
+        kind: String,
+        /// Project name.
+        #[arg(long)]
+        name: String,
+        /// Target URL the tests run against (e.g. http://127.0.0.1:8080).
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Print the current project.json.
+    Show,
+}
+
+#[derive(Subcommand)]
+enum TestCmd {
+    /// Add a JSON test case from a file.
+    Add {
+        /// Path to a JSON test-plan file.
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// List stored test cases.
+    List,
+    /// Run stored tests locally through the executor seam (all, or only --id).
+    Run {
+        /// Run only this test id (repeatable); omit to run every test.
+        #[arg(long)]
+        id: Vec<String>,
+        /// Override the project's target URL for this run.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -77,6 +128,8 @@ async fn main() -> Result<()> {
         Command::Backend { port, model, kind } => {
             server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
         }
+        Command::Project { cmd } => run_project(cmd),
+        Command::Test { cmd } => run_test(cmd).await,
     }
 }
 
@@ -107,4 +160,38 @@ async fn run_console_execute() -> Result<()> {
         results.len()
     );
     Ok(())
+}
+
+fn run_project(cmd: ProjectCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        ProjectCmd::Init { kind, name, url } => {
+            let kind = server::executors::TestKind::parse(&kind);
+            let path = local::project::init(&root, kind, &name, url.as_deref())?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
+        ProjectCmd::Show => local::project::show(&root),
+    }
+}
+
+async fn run_test(cmd: TestCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        TestCmd::Add { file } => {
+            let id = local::store::add(&root, &file)?;
+            println!("added test {id}");
+            Ok(())
+        }
+        TestCmd::List => {
+            for t in local::store::list(&root)? {
+                println!("{}  {}", t.id, t.title);
+            }
+            Ok(())
+        }
+        TestCmd::Run { id, url } => {
+            let code = local::run::run(&root, &id, url.as_deref()).await?;
+            std::process::exit(code);
+        }
+    }
 }

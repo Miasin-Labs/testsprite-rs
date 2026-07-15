@@ -23,7 +23,7 @@ It is a research reimplementation, not affiliated with TestSprite. See
 
 ```bash
 cargo build            # edition 2024
-cargo test             # 4 unit tests (all in server/coverage.rs) — must stay green
+cargo test             # 10 unit tests (server/coverage.rs + src/local/) — must stay green
 cargo clippy --all-targets   # keep at 0 warnings (project standard)
 ```
 
@@ -36,6 +36,31 @@ testsprite-rs generate-code-and-execute# console: tunnel → dispatch → poll �
 testsprite-rs backend --port 8787 --model gpt-4o-mini --kind backend
 #   --kind ∈ { backend | frontend | mcp | rust }
 ```
+
+## Local test flow — no cloud, no key (`project` / `test`)
+
+The simplest way to use this tool: a local, JSON-driven `setup → add → run`
+lifecycle that reuses the `Executor` seam directly (no server, no tunnel). Full
+diagram + data model in [`docs/FLOW.md`](docs/FLOW.md).
+
+```bash
+testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:8080
+testsprite-rs test add --file plan.json      # → testsprite_tests/tests/<id>.json
+testsprite-rs test list
+testsprite-rs test run                        # all tests; --id <id> for a subset
+#   exit 0 if every test passed else 1; writes testsprite_tests/results/<id>.json
+```
+
+A test case is just JSON; the backend deterministic path needs no LLM:
+
+```json
+{ "title": "health 200", "kind": "backend",
+  "spec": { "method": "GET", "path": "/health", "expect_status": 200 } }
+```
+
+`test run` loads the project + each test and calls
+`executors::for_kind(kind).run(case, &ExecCtx{ target, llm: None, prd })` — the
+same seam the cloud path uses. Code: `src/local/{project,store,run}.rs`.
 
 ## Environment
 

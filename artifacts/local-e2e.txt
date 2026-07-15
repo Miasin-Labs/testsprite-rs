@@ -1,0 +1,16 @@
+### local flow e2e (final code)
+wrote /tmp/tsrs-e2e.hWQdwB/testsprite_tests/project.json
+-- test run (all): expect 1 PASS 1 FAIL, exit 1 --
+PASS  b207ae63-257a-4727-b33c-dd42e2f9bf4b  root returns 200
+FAIL  edb54ab4-db98-419c-9b21-331476bf8a0a  missing path expects 200 (must FAIL)
+      expected Some(200), got 404
+
+1/2 passed
+exit=1
+-- test run --id <passing>: expect exit 0 --
+PASS  b207ae63-257a-4727-b33c-dd42e2f9bf4b  root returns 200
+
+1/1 passed
+exit=0
+-- missing project.json diagnostic (run from clean dir) --
+Error: no project.json at /tmp/testsprite_tests/project.json; run `testsprite-rs project init` first
