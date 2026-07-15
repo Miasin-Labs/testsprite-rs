@@ -8,8 +8,8 @@
 //! [`Executor`] trait. A case is just JSON (`{id,title,description,spec?}`) so
 //! the planner, store, and API never need to know which modality is running.
 
-pub mod command;
 pub mod browser;
+pub mod command;
 pub mod http;
 pub mod mcp;
 pub mod rust;
@@ -149,10 +149,16 @@ mod clip_tests {
     fn keeps_root_cause_head_and_tail() {
         let input = format!("ROOT-CAUSE{}TRAILING-END", "M".repeat(400));
         let out = clip(&input, 40);
-        assert!(out.starts_with("ROOT-CAUSE"), "head (root cause) kept: {out}");
+        assert!(
+            out.starts_with("ROOT-CAUSE"),
+            "head (root cause) kept: {out}"
+        );
         assert!(out.ends_with("TRAILING-END"), "tail kept: {out}");
         assert!(out.contains("elided"), "marker present: {out}");
-        assert!(out.chars().count() < input.chars().count(), "actually bounded");
+        assert!(
+            out.chars().count() < input.chars().count(),
+            "actually bounded"
+        );
     }
 
     #[test]

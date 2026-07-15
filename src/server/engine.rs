@@ -5,9 +5,72 @@
 //! Output: a structured PRD, a test plan (`[{id,title,description}]`), an
 //! executable spec per case, and the Python (`requests`) test-code artifact.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+
+/// A range of response statuses that counts as a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Band {
+    /// 2xx/3xx only — the endpoint answered the request. The default: a route
+    /// that is missing (404), auth-walled (401/403), or rejects the call
+    /// (400/405) has NOT passed.
+    #[default]
+    Success,
+    /// 2xx/3xx plus 400/422 — the write band. A synthesized request body is a
+    /// guess, so the server validating and rejecting it still proves the route
+    /// exists and is wired. 401/403/404/405 remain failures.
+    Accepted,
+    /// Any status below 500. An explicit opt-in for callers that really do want
+    /// "did not 5xx" semantics; never a default, because it reports a missing
+    /// or auth-walled endpoint as green.
+    Any,
+}
+
+/// What counts as a pass for one endpoint check.
+///
+/// Wire form is backward compatible with the bare-integer field it replaces: a
+/// number (`"expect_status": 200`) is an exact match, a band name
+/// (`"expect_status": "accepted"`) is a range, and an absent field is
+/// [`Band::Success`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Expect {
+    Exact(u16),
+    Band(Band),
+}
+
+impl Default for Expect {
+    fn default() -> Self {
+        Expect::Band(Band::Success)
+    }
+}
+
+impl Expect {
+    /// True iff `status` counts as a pass under this expectation.
+    pub fn accepts(self, status: u16) -> bool {
+        match self {
+            Expect::Exact(want) => status == want,
+            Expect::Band(Band::Success) => (200..400).contains(&status),
+            Expect::Band(Band::Accepted) => {
+                (200..400).contains(&status) || matches!(status, 400 | 422)
+            }
+            Expect::Band(Band::Any) => status < 500,
+        }
+    }
+
+    /// Human phrasing of what was expected, for failure messages and plans.
+    pub fn describe(self) -> String {
+        match self {
+            Expect::Exact(s) => format!("a {s} response"),
+            Expect::Band(Band::Success) => "a 2xx/3xx response".to_string(),
+            Expect::Band(Band::Accepted) => "a 2xx/3xx response (or 400/422)".to_string(),
+            Expect::Band(Band::Any) => "a non-5xx response".to_string(),
+        }
+    }
+}
 
 /// One executable endpoint check derived from the code summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,7 +80,7 @@ pub struct EndpointSpec {
     #[serde(default)]
     pub body: Option<Value>,
     #[serde(default)]
-    pub expect_status: Option<u16>,
+    pub expect_status: Expect,
     #[serde(default)]
     pub headers: Option<Value>,
 }
@@ -35,11 +98,14 @@ fn read_endpoints(code_summary: &Value) -> Vec<EndpointSpec> {
     code_summary
         .get("api_endpoints")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(parse_endpoint).collect())
+        .map(|arr| arr.iter().filter_map(parse_endpoint_spec).collect())
         .unwrap_or_default()
 }
 
-fn parse_endpoint(v: &Value) -> Option<EndpointSpec> {
+/// Parse a JSON endpoint (`{method, path, ...}`) into an [`EndpointSpec`].
+/// Distinct from `tools::execute::parse_host_port`, which parses a URL string
+/// into `(host, port)`.
+fn parse_endpoint_spec(v: &Value) -> Option<EndpointSpec> {
     let method = v.get("method")?.as_str()?.to_uppercase();
     let path = v.get("path")?.as_str()?.to_string();
     Some(EndpointSpec {
@@ -48,8 +114,8 @@ fn parse_endpoint(v: &Value) -> Option<EndpointSpec> {
         body: v.get("body").cloned().filter(|b| !b.is_null()),
         expect_status: v
             .get("expect_status")
-            .and_then(|s| s.as_u64())
-            .map(|s| s as u16),
+            .and_then(|s| serde_json::from_value(s.clone()).ok())
+            .unwrap_or_default(),
         headers: v.get("headers").cloned().filter(Value::is_object),
     })
 }
@@ -89,10 +155,7 @@ pub fn plan_from_code_summary(code_summary: &Value) -> Vec<PlannedCase> {
         .enumerate()
         .map(|(i, spec)| {
             let id = format!("TC{:03}", i + 1);
-            let expect = spec
-                .expect_status
-                .map(|s| format!("a {s} response"))
-                .unwrap_or_else(|| "a non-5xx response".to_string());
+            let expect = spec.expect_status.describe();
             let title = format!("{} {} responds", spec.method, spec.path);
             let description = format!(
                 "Send a {} request to {} and verify {expect}.",
@@ -133,7 +196,14 @@ pub fn prd_from_code_summary(code_summary: &Value) -> Value {
     })
 }
 
-/// Generate the Python `requests` test-code artifact for a case.
+/// Generate the Python `requests` REPRODUCTION for a case.
+///
+/// This is not what runs: `execute_spec` performs the check with reqwest. This
+/// is a human-readable equivalent, recorded alongside the result and emitted by
+/// `test emit`. It is generated from the same spec, so it asserts the same
+/// thing — but any secret is a placeholder, so running it verbatim will not
+/// reproduce an authenticated call. The header says so rather than leaving the
+/// reader to discover it from a surprise 401.
 pub fn python_for(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, String>) -> String {
     let url = format!(
         "{}{}",
@@ -170,10 +240,30 @@ pub fn python_for(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, St
         (m, None) => format!("requests.request(\"{m}\", \"{url}\"{hdr}, timeout=30)"),
     };
     let assertion = match spec.expect_status {
-        Some(s) => format!("assert r.status_code == {s}, f\"expected {s}, got {{r.status_code}}\""),
-        None => "assert r.status_code < 500, f\"server error: {r.status_code}\"".to_string(),
+        Expect::Exact(s) => {
+            format!("assert r.status_code == {s}, f\"expected {s}, got {{r.status_code}}\"")
+        }
+        Expect::Band(Band::Success) => {
+            "assert 200 <= r.status_code < 400, f\"expected 2xx/3xx, got {r.status_code}\""
+                .to_string()
+        }
+        Expect::Band(Band::Accepted) => {
+            "assert 200 <= r.status_code < 400 or r.status_code in (400, 422), \\\n        f\"expected 2xx/3xx or 400/422, got {r.status_code}\""
+                .to_string()
+        }
+        Expect::Band(Band::Any) => {
+            "assert r.status_code < 500, f\"server error: {r.status_code}\"".to_string()
+        }
     };
-    format!("import requests\n\ndef {fn_name}():\n    r = {call}\n    {assertion}\n\n{fn_name}()\n")
+    let note = if hdrs.iter().any(|h| h.contains("<authToken>")) {
+        "# NOTE: reproduction of the check testsprite ran (the run itself uses reqwest).\n\
+         # The Authorization value is a placeholder — substitute a real token to run this.\n"
+    } else {
+        "# NOTE: reproduction of the check testsprite ran (the run itself uses reqwest).\n"
+    };
+    format!(
+        "{note}import requests\n\ndef {fn_name}():\n    r = {call}\n    {assertion}\n\n{fn_name}()\n"
+    )
 }
 
 /// Render a JSON value as a Python literal (dict/list/str/num/bool/None).
@@ -213,5 +303,71 @@ mod tests {
         );
         assert_eq!(concrete_path("/health", &vars), "/health");
         assert_eq!(concrete_path("/a/{x}", &HashMap::new()), "/a/1");
+    }
+
+    #[test]
+    fn absent_expectation_is_the_success_band_not_anything_under_500() {
+        // Regression: the default used to be `status < 500`, which reported a
+        // missing route (404), an auth wall (401/403), or a rejected request
+        // (400/405) as PASS. Every downstream signal — triage, flaky, gate —
+        // is a transformation of this boolean, so a lenient default here
+        // manufactures confident green over a wall of errors.
+        let spec: EndpointSpec =
+            serde_json::from_value(json!({"method": "GET", "path": "/todos"})).unwrap();
+        assert_eq!(spec.expect_status, Expect::Band(Band::Success));
+        for status in [200, 201, 204, 301, 302] {
+            assert!(spec.expect_status.accepts(status), "{status} should pass");
+        }
+        for status in [400, 401, 403, 404, 405, 422, 500, 502] {
+            assert!(!spec.expect_status.accepts(status), "{status} should fail");
+        }
+    }
+
+    #[test]
+    fn expectation_wire_form_accepts_exact_codes_and_band_names() {
+        let exact: EndpointSpec =
+            serde_json::from_value(json!({"method": "GET", "path": "/a", "expect_status": 204}))
+                .unwrap();
+        assert_eq!(exact.expect_status, Expect::Exact(204));
+        assert!(exact.expect_status.accepts(204));
+        assert!(!exact.expect_status.accepts(200));
+
+        let band: EndpointSpec = serde_json::from_value(
+            json!({"method": "POST", "path": "/a", "expect_status": "accepted"}),
+        )
+        .unwrap();
+        assert_eq!(band.expect_status, Expect::Band(Band::Accepted));
+        // The write band tolerates our synthesized body being rejected...
+        assert!(band.expect_status.accepts(400));
+        assert!(band.expect_status.accepts(422));
+        assert!(band.expect_status.accepts(201));
+        // ...but not a missing or auth-walled route.
+        for status in [401, 403, 404, 405, 500] {
+            assert!(!band.expect_status.accepts(status), "{status} should fail");
+        }
+    }
+
+    #[test]
+    fn the_lenient_band_survives_only_as_an_explicit_opt_in() {
+        let any: EndpointSpec =
+            serde_json::from_value(json!({"method": "GET", "path": "/a", "expect_status": "any"}))
+                .unwrap();
+        assert_eq!(any.expect_status, Expect::Band(Band::Any));
+        assert!(any.expect_status.accepts(404));
+        assert!(!any.expect_status.accepts(500));
+    }
+
+    #[test]
+    fn generated_python_asserts_the_same_band_the_executor_enforces() {
+        let vars = HashMap::new();
+        let spec = |e: Value| -> EndpointSpec {
+            serde_json::from_value(json!({"method": "GET", "path": "/a", "expect_status": e}))
+                .unwrap()
+        };
+        assert!(
+            python_for(&spec(json!("success")), "http://x", &vars)
+                .contains("200 <= r.status_code < 400")
+        );
+        assert!(python_for(&spec(json!(204)), "http://x", &vars).contains("== 204"));
     }
 }

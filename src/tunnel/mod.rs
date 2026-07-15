@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use client::{TunnelClient, TunnelOptions};
+pub use protocol::TunnelTarget;
 
 use crate::backend::BackendClient;
 use crate::envs;
@@ -23,11 +24,14 @@ impl Tunnel {
     /// Create a tunnel via `POST /api/tunnel/v2`, connect the control plane, and
     /// return a handle plus the credentialed proxy URL.
     ///
+    /// `target` is the local app being exposed, and is the ONLY host:port the
+    /// control plane may direct us to dial — see [`TunnelTarget`].
+    ///
     /// Mirrors `TunnelClientWrapper.start`: when the tunnel version isn't pinned
     /// via env (`TSEMCP_TUNNEL_VERSION`), ask the backend which version to use.
     /// Only v2 is implemented here; v1 (the legacy HMAC-challenge TCP tunnel) is
     /// rejected explicitly rather than silently mishandled.
-    pub async fn start(backend: &BackendClient) -> Result<Self> {
+    pub async fn start(backend: &BackendClient, target: TunnelTarget) -> Result<Self> {
         let pinned = envs::tunnel::version();
         let version = if pinned == 0 {
             backend.tunnel_version().await.unwrap_or(2)
@@ -55,6 +59,7 @@ impl Tunnel {
             control_url: envs::tunnel::control_url(),
             tunnel_addr: envs::tunnel::data_address(),
             heartbeat: Duration::from_millis(10_000),
+            target,
         };
         let client = Arc::new(TunnelClient::new(opts));
         client.start().await?;

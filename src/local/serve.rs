@@ -68,9 +68,18 @@ mod tests {
 
     #[test]
     fn parses_host_and_port() {
-        assert_eq!(host_port("http://127.0.0.1:8080"), ("127.0.0.1".into(), 8080));
-        assert_eq!(host_port("http://localhost:9200/api"), ("localhost".into(), 9200));
-        assert_eq!(host_port("https://example.com"), ("example.com".into(), 443));
+        assert_eq!(
+            host_port("http://127.0.0.1:8080"),
+            ("127.0.0.1".into(), 8080)
+        );
+        assert_eq!(
+            host_port("http://localhost:9200/api"),
+            ("localhost".into(), 9200)
+        );
+        assert_eq!(
+            host_port("https://example.com"),
+            ("example.com".into(), 443)
+        );
         assert_eq!(host_port("http://host"), ("host".into(), 80));
     }
 }

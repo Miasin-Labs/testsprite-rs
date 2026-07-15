@@ -11,10 +11,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use super::store;
 use crate::server::executors::TestKind;
 use crate::server::llm::LlmClient;
-
-use super::store;
 
 /// Result of a generate run: the persisted PRD id (when a PRD was produced) and
 /// the stored test-case ids.
@@ -157,11 +156,7 @@ pub async fn generate_cover(root: &Path, path: &Path, model: &str) -> anyhow::Re
 
 /// Code Diff Mode: generate a test for each function CHANGED since `since` that
 /// no stored test already covers. No PRD (functions → cases directly).
-pub async fn generate_changed(
-    root: &Path,
-    since: &str,
-    model: &str,
-) -> anyhow::Result<GenSummary> {
+pub async fn generate_changed(root: &Path, since: &str, model: &str) -> anyhow::Result<GenSummary> {
     let changed = crate::local::changed::changed_surface(root, since)?;
     let targets = crate::local::changed::uncovered_changed_units(root, &changed).await?;
     if targets.is_empty() {

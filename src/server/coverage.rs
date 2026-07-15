@@ -74,16 +74,80 @@ pub fn declared_surface(code_summary: &Value) -> Vec<String> {
     out
 }
 
+/// True iff `path` occurs in `text` as a COMPLETE path rather than the prefix of
+/// a longer one, so `/todos` does not match `/todos/1` and the root path `/`
+/// does not match every URL that merely contains a slash.
+fn path_mentioned(path: &str, text: &str) -> bool {
+    let is_path_char =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '{' | '}');
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(path) {
+        let idx = start + rel;
+        let end = idx + path.len();
+        // A path never continues leftward through another slash ("http://").
+        let before_ok = !text[..idx].ends_with('/');
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .map(|c| !is_path_char(c))
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+/// True iff `method` occurs in `text` as a whole word — `get` must match
+/// `requests.get(` and `GET /todos` but NOT the `get` inside `target`.
+fn method_mentioned(method: &str, text: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(method) {
+        let idx = start + rel;
+        let end = idx + method.len();
+        let before_ok = text[..idx]
+            .chars()
+            .next_back()
+            .map(|c| !is_word(c))
+            .unwrap_or(true);
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .map(|c| !is_word(c))
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
 /// Decide whether an executed case (its title/description/code) touches a given
-/// surface element. Cheap substring match on the surface's distinctive token
-/// (the path or tool name).
+/// surface element.
+///
+/// Both the METHOD and the path must be evidenced. Matching the path alone —
+/// which is what this did before — marks `POST /todos` covered because some
+/// `GET /todos` test mentions the path, and reduces the root route `GET /` to
+/// the token `/`, which every URL in every case contains. Half the surface then
+/// reports covered on the strength of the other half's tests.
 fn case_touches(surface_id: &str, case_text: &str) -> bool {
-    let token = surface_id
-        .strip_prefix("tool:")
-        .map(|t| t.to_string())
-        .or_else(|| surface_id.split_whitespace().nth(1).map(|p| p.to_string()))
-        .unwrap_or_else(|| surface_id.to_string());
-    !token.is_empty() && case_text.contains(&token)
+    let text = case_text.to_lowercase();
+
+    if let Some(tool) = surface_id.strip_prefix("tool:") {
+        return !tool.is_empty() && text.contains(&tool.to_lowercase());
+    }
+
+    let Some((method, path)) = surface_id.split_once(char::is_whitespace) else {
+        return !surface_id.is_empty() && text.contains(&surface_id.to_lowercase());
+    };
+    let (method, path) = (method.trim().to_lowercase(), path.trim().to_lowercase());
+    if method.is_empty() || path.is_empty() {
+        return false;
+    }
+    path_mentioned(&path, &text) && method_mentioned(&method, &text)
 }
 
 /// Build a coverage report: which declared surface elements were exercised by
@@ -192,10 +256,78 @@ mod tests {
     #[test]
     fn evaluate_full_coverage_no_findings_normal() {
         let declared = vec!["GET /health".to_string()];
-        let cases = vec!["hit /health".to_string()];
+        let cases = vec!["hit /health with requests.get(\"http://x/health\")".to_string()];
         let report = evaluate(&declared, &cases);
         assert!(!report.has_findings());
         assert_eq!(report.percent() as u32, 100);
+    }
+
+    #[test]
+    fn a_case_that_names_no_method_covers_no_method() {
+        // Which method did "hit /health" exercise? Unknowable — and answering
+        // "all of them" is exactly the bug. Generated cases always carry the
+        // method in their title or generated code, so this only withholds
+        // credit where credit genuinely cannot be established.
+        let declared = vec!["GET /health".to_string()];
+        assert_eq!(evaluate(&declared, &["hit /health".to_string()]).covered, 0);
+    }
+
+    #[test]
+    fn a_get_test_does_not_cover_the_post_on_the_same_path() {
+        // Regression: the surface token was the path alone, so any test
+        // mentioning /api/todos marked EVERY method on it covered.
+        let declared = vec!["GET /api/todos".to_string(), "POST /api/todos".to_string()];
+        let cases = vec![
+            "GET /api/todos responds — send GET /api/todos and verify a 2xx/3xx response.\n\
+             requests.get(\"http://127.0.0.1:8080/api/todos\", timeout=30)"
+                .to_string(),
+        ];
+        let report = evaluate(&declared, &cases);
+        assert_eq!(report.covered, 1, "only the GET is exercised");
+        assert_eq!(
+            report.findings[0].target.as_deref(),
+            Some("POST /api/todos")
+        );
+    }
+
+    #[test]
+    fn the_root_route_is_not_covered_by_every_url_containing_a_slash() {
+        // Regression: "GET /" tokenized to "/", so any case text with a slash
+        // in it — i.e. all of them — marked the root route covered.
+        let declared = vec!["GET /".to_string()];
+        let cases = vec![
+            "GET /api/todos responds\nrequests.get(\"http://127.0.0.1:8080/api/todos\", timeout=30)"
+                .to_string(),
+        ];
+        let report = evaluate(&declared, &cases);
+        assert_eq!(report.covered, 0);
+
+        // A test that really does hit the root still counts.
+        let cases = vec![
+            "GET / responds\nrequests.get(\"http://127.0.0.1:8080/\", timeout=30)".to_string(),
+        ];
+        assert_eq!(evaluate(&declared, &cases).covered, 1);
+    }
+
+    #[test]
+    fn a_longer_path_does_not_cover_its_prefix() {
+        let declared = vec!["GET /todos".to_string()];
+        let cases = vec![
+            "GET /todos/{id} responds\nrequests.get(\"http://x/todos/1\", timeout=30)".to_string(),
+        ];
+        assert_eq!(evaluate(&declared, &cases).covered, 0);
+    }
+
+    #[test]
+    fn the_word_target_does_not_evidence_the_get_method() {
+        // `target` contains `get`; a whole-word check is what keeps a POST-only
+        // case from claiming the GET surface.
+        let declared = vec!["GET /todos".to_string()];
+        let cases = vec![
+            "POST /todos against the target\nrequests.request(\"POST\", \"http://x/todos\")"
+                .to_string(),
+        ];
+        assert_eq!(evaluate(&declared, &cases).covered, 0);
     }
 
     #[test]

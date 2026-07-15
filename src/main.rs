@@ -20,9 +20,10 @@ mod tools;
 mod tunnel;
 mod types;
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -39,6 +40,16 @@ struct Cli {
 enum Command {
     /// Run as a stdio MCP server (default when no subcommand is given).
     Serve,
+    /// Make a repo testsprite-rs-aware for coding agents: install the onboard +
+    /// verify skills into .claude/skills/ (local, no cloud, no account).
+    Setup {
+        /// Repo to set up (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Overwrite existing skill files instead of leaving them untouched.
+        #[arg(long)]
+        force: bool,
+    },
     /// Diagnose the local environment (LLM key, cargo, coverage, node/playwright, docker, gh, python).
     Doctor {
         /// Emit a DoctorReport JSON object ({checks:[{name,status,detail}]}) instead of text.
@@ -75,8 +86,11 @@ enum Command {
         /// Print a single JSON object instead of a human-readable report.
         #[arg(long)]
         json: bool,
-        /// Report structural units NOT referenced by any stored test yet,
-        /// instead of the full report.
+        /// Report structural units nothing covers yet, instead of the full
+        /// report. Prefers real execution data (cargo llvm-cov); where that is
+        /// unavailable it falls back to matching function NAMES against stored
+        /// tests and labels the report `evidence: named` — a worklist, not a
+        /// measurement. Don't chase it to zero.
         #[arg(long)]
         gaps: bool,
     },
@@ -88,6 +102,35 @@ enum Command {
         /// OpenAI model for spec-less LLM execution and failure analysis.
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
+    },
+    /// The regression loop in one call: (optionally) generate tests for changed
+    /// functions, run the suite, triage the failures, and surface one actionable
+    /// result. Exit 1 unless green (nothing failed or left unverified).
+    Loop {
+        /// Run only the tests affected by changes since --since (else the whole
+        /// suite); on an unattributable change, runs everything rather than
+        /// reporting an empty success.
+        #[arg(long)]
+        changed: bool,
+        /// Git ref to diff against for --changed (default: HEAD = uncommitted).
+        #[arg(long)]
+        since: Option<String>,
+        /// Before running, generate tests for changed functions that no stored
+        /// test covers yet (needs an OpenAI key; only acts with --changed).
+        #[arg(long)]
+        generate: bool,
+        /// OpenAI model for generation, spec-less execution, and failure analysis.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        /// On failure, also write a fix recommendation to testsprite_tests/fixes/.
+        #[arg(long)]
+        fix: bool,
+        /// Start the target app (via `project set-start`) before running.
+        #[arg(long)]
+        serve: bool,
+        /// Print a single JSON CycleReport instead of human lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Emit CI config — a GitHub Actions workflow that runs the gate on every PR.
     Ci {
@@ -162,9 +205,7 @@ enum PrdCmd {
         json: bool,
     },
     /// Show a PRD's requirements + test plan (omit id for the latest).
-    Show {
-        id: Option<String>,
-    },
+    Show { id: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -386,6 +427,12 @@ enum TestCmd {
         #[arg(long)]
         title: String,
     },
+    /// Delete a stored test and its run history (storing is an upsert, so
+    /// without this the suite only ever grows).
+    Delete {
+        #[arg()]
+        id: String,
+    },
     /// Group failing tests by root cause (failureKind) — fix causes, not symptoms.
     Triage {
         #[arg(long)]
@@ -409,11 +456,23 @@ enum TestCmd {
         runs: usize,
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
+        /// Start the target app before each replay; without it a backend test
+        /// with nothing listening scores every run blocked ("inconclusive").
+        #[arg(long)]
+        serve: bool,
         #[arg(long)]
         json: bool,
     },
     /// Show a test's full run history (append-only runs table, newest first).
     History {
+        #[arg()]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show prior definitions of a test, newest first — what it asserted before
+    /// an automated rewrite (`rerun --heal`) replaced it.
+    Revisions {
         #[arg()]
         id: String,
         #[arg(long)]
@@ -443,6 +502,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => mcp::serve().await,
+        Command::Setup { path, force } => {
+            let root = path.unwrap_or(std::env::current_dir()?);
+            let code = local::setup::setup(&root, force)?;
+            std::process::exit(code);
+        }
         Command::Doctor { json } => std::process::exit(local::doctor::doctor(json)?),
         Command::Account | Command::Check => run_account().await,
         Command::GenerateCodeAndExecute => run_console_execute().await,
@@ -463,6 +527,27 @@ async fn main() -> Result<()> {
         Command::Gate { url, model } => {
             let root = std::env::current_dir()?;
             let code = local::gate::gate(&root, url.as_deref(), &model).await?;
+            std::process::exit(code);
+        }
+        Command::Loop {
+            changed,
+            since,
+            generate,
+            model,
+            fix,
+            serve,
+            json,
+        } => {
+            let root = std::env::current_dir()?;
+            let opts = local::cycle::CycleOpts {
+                changed,
+                since: since.as_deref(),
+                generate,
+                model: &model,
+                fix,
+                serve,
+            };
+            let code = local::cycle::cycle_report(&root, opts, json).await?;
             std::process::exit(code);
         }
         Command::Test { cmd } => run_test(cmd).await,
@@ -486,7 +571,10 @@ async fn main() -> Result<()> {
                     local::visual::REGRESSION_THRESHOLD
                 );
             } else {
-                println!("OK (within threshold {:.4})", local::visual::REGRESSION_THRESHOLD);
+                println!(
+                    "OK (within threshold {:.4})",
+                    local::visual::REGRESSION_THRESHOLD
+                );
             }
             std::process::exit(if regression { 1 } else { 0 });
         }
@@ -581,8 +669,18 @@ async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
                 println!("schedule '{name}': no tests in group '{}'", s.group);
                 return Ok(());
             }
-            let code =
-                local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None, 1, false).await?;
+            let code = local::run::run(
+                &root,
+                &ids,
+                None,
+                "gpt-4o-mini",
+                false,
+                false,
+                None,
+                1,
+                false,
+            )
+            .await?;
             std::process::exit(code);
         }
         ScheduleCmd::Crontab => {
@@ -769,8 +867,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 }
                 "ndjson" => {
                     for t in &tests {
-                        let row =
-                            serde_json::json!({ "id": t.id, "title": t.title, "kind": kind_str(t) });
+                        let row = serde_json::json!({ "id": t.id, "title": t.title, "kind": kind_str(t) });
                         println!("{}", serde_json::to_string(&row)?);
                     }
                 }
@@ -794,15 +891,25 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             let ids = if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
                 let cs = local::changed::changed_surface(&root, since)?;
-                let affected = local::changed::affected_test_ids(&root, &cs).await?;
-                if affected.is_empty() {
-                    println!(
-                        "no stored tests affected by changes since {since} ({} function(s) changed)",
-                        cs.units.len()
-                    );
-                    return Ok(());
+                match local::changed::select(&root, &cs).await? {
+                    local::changed::Selection::NoChanges => {
+                        println!("no source changes since {since} — nothing to verify");
+                        return Ok(());
+                    }
+                    local::changed::Selection::Affected(ids) => ids,
+                    local::changed::Selection::Unattributable { changed_units } => {
+                        // Not "nothing to do" — "I cannot tell". Reporting success
+                        // here would greenlight an unverified change, so fall back
+                        // to the full suite instead.
+                        eprintln!(
+                            "warning: {changed_units} function(s) changed since {since} but no \
+                             stored test could be attributed to them (tests are matched by \
+                             function-name mention, which cannot see through spec/command \
+                             tests) — running the full suite instead of reporting success"
+                        );
+                        Vec::new()
+                    }
                 }
-                affected
             } else {
                 match group.as_deref() {
                     Some(g) => {
@@ -880,9 +987,14 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 let since = since.as_deref().unwrap_or("HEAD");
                 let out = local::generate::generate_changed(&root, since, &model).await?;
                 if out.test_ids.is_empty() {
-                    println!("no changed functions need new tests (nothing changed, or all covered)");
+                    println!(
+                        "no changed functions need new tests (nothing changed, or all covered)"
+                    );
                 } else {
-                    println!("generated {} test(s) for changed functions", out.test_ids.len());
+                    println!(
+                        "generated {} test(s) for changed functions",
+                        out.test_ids.len()
+                    );
                     for id in &out.test_ids {
                         println!("  {id}");
                     }
@@ -935,6 +1047,33 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             println!("renamed {id} -> {title}");
             Ok(())
         }
+        TestCmd::Delete { id } => {
+            if local::store::delete(&root, &id).await? {
+                println!("deleted {id}");
+                Ok(())
+            } else {
+                anyhow::bail!("no test {id}")
+            }
+        }
+        TestCmd::Revisions { id, json } => {
+            let revs = local::store::revisions(&root, &id).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&revs)?);
+            } else if revs.is_empty() {
+                println!("no prior revisions of {id}");
+            } else {
+                for r in &revs {
+                    let title = r["body"]["title"].as_str().unwrap_or("");
+                    println!(
+                        "rev {}  {}  [{}]  {title}",
+                        r["revId"],
+                        r["createdAt"].as_str().unwrap_or(""),
+                        r["reason"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            Ok(())
+        }
         TestCmd::Triage { json } => {
             let code = local::triage::triage_report(&root, json).await?;
             std::process::exit(code);
@@ -954,14 +1093,21 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Import { file } => {
             let body = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
-            let tests: Vec<serde_json::Value> = serde_json::from_str(&body)
-                .with_context(|| format!("{} is not a JSON array of test objects", file.display()))?;
+            let tests: Vec<serde_json::Value> = serde_json::from_str(&body).with_context(|| {
+                format!("{} is not a JSON array of test objects", file.display())
+            })?;
             let ids = local::store::import_values(&root, &tests).await?;
             println!("imported {} test(s)", ids.len());
             Ok(())
         }
-        TestCmd::Flaky { id, runs, model, json } => {
-            let code = local::flaky::flaky_report(&root, &id, runs, &model, json).await?;
+        TestCmd::Flaky {
+            id,
+            runs,
+            model,
+            serve,
+            json,
+        } => {
+            let code = local::flaky::flaky_report(&root, &id, runs, &model, serve, json).await?;
             std::process::exit(code);
         }
         TestCmd::History { id, json } => {

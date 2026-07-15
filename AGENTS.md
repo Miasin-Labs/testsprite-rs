@@ -328,23 +328,23 @@ Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
 | `test create --plan-from plan.json` | create FE test | `POST /tests` | ❌ |
 | `test create-batch --plans jsonl\|--plan-from-dir` | batch FE (≤50) | `POST /tests/batch` | ❌ |
 | `test list --project [--status]` | list tests | `GET /tests` | 🟡 (`test list [--group] [--output text\|json\|csv\|ndjson]`) |
-| `test get <id>` | detail | `GET /tests/{id}` | ❌ |
-| `test update <id>` | edit metadata | `PATCH /tests/{id}` | ❌ |
-| `test delete <id> --confirm` / `delete-batch` / `delete --all` | delete | `DELETE /tests/{id}` | ❌ |
+| `test get <id>` | detail | `GET /tests/{id}` | ❌ (`store::load_one` exists internally; no CLI verb yet — trivial local add) |
+| `test update <id>` | edit metadata | `PATCH /tests/{id}` | 🟡 (`test rename` for title; no general metadata edit yet) |
+| `test delete <id> --confirm` / `delete-batch` / `delete --all` | delete | `DELETE /tests/{id}` | ✅ (`test delete <id>` + MCP `testsprite_delete_test`; also drops its runs + revisions) |
 | `test plan put <id> --steps` | replace FE steps | `PUT /tests/{id}/plan-steps` | ❌ |
 | `test code get\|put <id> --code-file --expected-version` | BE code (etag concurrency) | `…/code` | ❌ |
 | `test steps <id>` | recorded steps | `GET /tests/{id}/steps` | ❌ |
 | `test result <id> [--history]` | latest/historical result | `…/result` | 🟡 (`test history <id> [--json]` — local append-only runs; + MCP `testsprite_run_history`) |
-| `test run <id> [--target-url --wait]` | run one | trigger + poll | 🟡 (batch-only) |
+| `test run <id> [--target-url --wait]` | run one | trigger + poll | ✅ (`test run --id <id>` — synchronous, local; `--url` overrides target, no `--wait` needed) |
 | `test run --all --project` | wave-ordered BE batch | batch | 🟡 (local dep waves: `produces`/`needs`/`category:teardown` order `test run`; `--group`) |
-| `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | 🟡 (`test rerun [--failed]`) |
-| `test wait <run-id…>` | attach to dispatched run(s) | poll | 🟡 (internal) |
-| `test artifact get <run-id> --out` | download failure bundle | artifact | ❌ |
-| `test failure get\|summary <id>` | agent-facing root-cause bundle | `…/failure/*` | ❌ |
-| `test diff <runA> <runB>` | isolate regression | — | ❌ |
-| `test lint` | OFFLINE plan/steps validation | — | ❌ |
-| `test scaffold --type backend` | emit starter test | — | 🟡 (engine synthesizes) |
-| `test flaky <id>` | replay N, stability score | — | ❌ |
+| `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | 🟡 (`test rerun [--failed] [--heal]`) |
+| `test wait <run-id…>` | attach to dispatched run(s) | poll | 🟡 (n/a — local runs are synchronous, nothing to attach to) |
+| `test artifact get <run-id> --out` | download failure bundle | artifact | ❌ (the data is local — run history + `analysis.cause` + `fixes/<id>.md`; no single bundle verb) |
+| `test failure get\|summary <id>` | agent-facing root-cause bundle | `…/failure/*` | 🟡 (`test triage` clusters by root cause; `test run --json` carries `failureKind`+`cause`) |
+| `test diff <runA> <runB>` | isolate regression | — | ✅ (`test diff <idA> <idB> [--json]`) |
+| `test lint` | OFFLINE plan/steps validation | — | ✅ (`test lint [--json]`) |
+| `test scaffold --type backend` | emit starter test | — | ✅ (`test scaffold --type backend\|frontend [--json]`) |
+| `test flaky <id>` | replay N, stability score | — | ✅ (`test flaky <id> [--runs N] [--serve]` + MCP `testsprite_flaky`) |
 
 Contract details to match for true 1:1:
 
@@ -374,20 +374,29 @@ Keep the strengths this repo has that the official CLI lacks:
 3. **Multi-modality Executor seam** — `backend|frontend|mcp|rust` behind one
    trait; extend, don't fork.
 4. **Single native binary** — no node runtime, no 3-dep bundle.
+5. **One-call regression loop** (`testsprite-rs loop`, MCP `testsprite_loop`) —
+   generate-if-changed → run → triage → surface in one call, returning one
+   actionable report (`{selection,total,passed,failed,blocked,failures,clusters,
+   next_action,green}`); exit 1 unless green. No official equivalent.
+6. **Local skills install** (`testsprite-rs setup`) — writes the onboard/verify
+   agent skills into `.claude/skills/`, no cloud/account. The local `agent
+   install`.
 
 "Even-better parity" roadmap (in order):
 
-- **P0 command shell** — imperative `testsprite-rs <group> <cmd>` (clap
-  subcommands mirroring the table) *alongside* the MCP server, one shared client.
-- **P0 V3 client** — a `backend.rs` sibling targeting `/v3/*` (orgs, projects,
-  tests, runs) + the exit-code/status contract above.
-- **P1 test lifecycle** — `test {create,list,get,run,rerun,wait,result,artifact}`
-  with wave scheduling.
-- **P1 offline verbs** — `test lint` / `test scaffold` / `coverage`: pure-local,
-  no account — the real differentiator.
-- **P2 agent/doctor** — `agent install` (ship this `AGENTS.md` + skills),
-  `doctor` env checks.
-- **P2 resources/integrations** — GitHub/Linear/Slack ingestion where it fits.
+- **P0 command shell** — ✅ imperative `testsprite-rs <group> <cmd>` shipped
+  *alongside* the MCP server, one shared client.
+- **P0 V3 client** — ❌ a `backend.rs` sibling targeting `/v3/*` (orgs, projects,
+  tests, runs) + the exit-code/status contract above. The main remaining gap,
+  and a deliberate one: it's cloud-account surface, against the local-first goal.
+- **P1 test lifecycle** — 🟡 mostly LOCAL and done (`test add`/`store_test`,
+  `list`, `run --id`, `history`, `delete`, `diff`, `flaky`, `rerun`); small local
+  gaps remain: `test get <id>` (detail) and general `test update <id>`.
+- **P1 offline verbs** — ✅ `test lint`, `test scaffold`, `coverage` all shipped
+  (pure-local, no account — the real differentiator).
+- **P2 agent/doctor** — ✅ `setup` installs the skills; `doctor` (+`--json`) env
+  checks shipped.
+- **P2 resources/integrations** — ❌ GitHub/Linear/Slack ingestion where it fits.
 
 > Maintenance constraint: the official `agent` installer enforces a **32 KiB
 > AGENTS.md budget** for Codex (`AGENTS_MD_CODEX_BUDGET_BYTES`). Keep this file

@@ -135,7 +135,9 @@ impl LlmClient {
             produce a concise PRD as JSON with keys: meta{project,prepared_by}, product_overview \
             (string), core_goals (string[]), features (array of {name, description, \
             user_flows:string[]}). Infer sensibly from whatever is present. Respond with JSON only.";
-        let out = self.chat(system, &format!("Document:\n{doc}"), true).await?;
+        let out = self
+            .chat(system, &format!("Document:\n{doc}"), true)
+            .await?;
         serde_json::from_str(&out).context("normalized PRD was not valid JSON")
     }
 
@@ -175,7 +177,11 @@ impl LlmClient {
         Ok(strip_code_fences(&code))
     }
 
-    /// Generate a self-contained Playwright (Node) script for a frontend case.
+    /// Generate the BODY of a Playwright test — the statements that exercise the
+    /// flow, nothing else. An executor-owned harness (see `browser::wrap_script`)
+    /// launches the browser, performs the initial navigation to `url`, captures
+    /// the screenshot, and closes — so the screenshot is deterministic and does
+    /// not depend on the model remembering to call it.
     pub async fn generate_playwright(
         &self,
         case: &Value,
@@ -183,10 +189,14 @@ impl LlmClient {
         url: &str,
     ) -> Result<String> {
         let system = format!(
-            "You write a single self-contained Node script using `require('playwright')`. \
-             Launch chromium headless, open the page at {url}, exercise the UI flow / edge case \
-             described, and `process.exit(1)` with a console.error on failure (assertion fails, \
-             bad HTTP status, or any pageerror). Output ONLY JavaScript, no markdown fences.",
+            "You write the BODY of a Playwright test — ONLY the statements that exercise the UI \
+             flow / edge case described. A `page` (Playwright Page) already exists and is \
+             navigated to {url}; an outer harness owns launching the browser, the initial \
+             navigation, the screenshot, and closing. Operate on `page` (click, fill, \
+             waitForSelector, check text/values) and `throw new Error(<why>)` on any failure. Do \
+             NOT `require('playwright')`, launch a browser, navigate initially, screenshot, or \
+             close the browser. Output ONLY JavaScript statements, no function wrapper, no \
+             markdown fences.",
         );
         let user = format!(
             "Test case:\n{}\n\nContext PRD:\n{}",
@@ -226,28 +236,64 @@ impl LlmClient {
             \"cause\":\"one-sentence root cause\",\"fix\":\"one concrete fix\"}.";
         let user = format!(
             "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}",
-            serde_json::to_string_pretty(case)?, code, error
+            serde_json::to_string_pretty(case)?,
+            code,
+            error
         );
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("failure analysis was not valid JSON")
     }
 
     /// Propose the smallest fix to the CODE UNDER TEST that would make this case
-    /// pass — returns `{explanation, patch}` where `patch` is a unified-diff hunk
-    /// a coding agent can apply. The autonomous fix-recommendation output.
-    pub async fn propose_fix(&self, case: &Value, code: &str, error: &str) -> Result<Value> {
-        let system = "You are TestSprite's autonomous fix engine. Given a failing test case, the \
-            test code that ran, and the failure output, propose the SMALLEST change to the code \
-            UNDER TEST (never the test) that would make it pass. Respond with JSON only: \
-            {\"explanation\":\"what to change and why, 1-3 sentences\",\"patch\":\"a unified-diff \
-            hunk (--- a/file, +++ b/file, @@, +/- lines) a coding agent can apply; best-effort when \
-            the exact file is unknown, but always a concrete diff\"}.";
-        let user = format!(
-            "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}",
-            serde_json::to_string_pretty(case)?,
-            code,
-            error
-        );
+    /// pass — returns `{explanation, patch}`.
+    ///
+    /// When `source` is `Some` (the failure pointed at real repo files and the
+    /// caller read them), the model is asked for a REAL unified diff grounded in
+    /// that source, which the caller then verifies with `git apply --check`.
+    /// When `None`, it produces an illustrative sketch a human applies by hand —
+    /// the engine cannot know real paths/line numbers, and `store::write_fix`
+    /// labels the two cases differently so a sketch is never mistaken for a
+    /// ready-to-apply patch.
+    pub async fn propose_fix(
+        &self,
+        case: &Value,
+        code: &str,
+        error: &str,
+        source: Option<&str>,
+    ) -> Result<Value> {
+        let system = if source.is_some() {
+            "You are TestSprite's fix engine. You are given the failing test case, the test code, \
+             the failure output, AND the ACTUAL source at the referenced locations (line-numbered). \
+             Propose the SMALLEST change to the code UNDER TEST (never the test) that makes it pass, \
+             as a REAL unified diff grounded in the provided source. Respond with JSON only: \
+             {\"explanation\":\"what to change and why, 1-3 sentences\",\"patch\":\"a unified diff \
+             (--- a/<path>, +++ b/<path>, @@ hunks) using the EXACT paths and line numbers from the \
+             provided source so it applies with `git apply`\"}."
+        } else {
+            "You are TestSprite's fix-recommendation engine. Given a failing test case, the test \
+             code that ran, and the failure output, propose the SMALLEST change to the code UNDER \
+             TEST (never the test) that would make it pass. You do NOT have the repository, so you \
+             cannot know exact file paths or line numbers. Respond with JSON only: \
+             {\"explanation\":\"what to change and why, 1-3 sentences\",\"patch\":\"an ILLUSTRATIVE \
+             code sketch of the change (diff-style is fine) — a guide a human applies by hand, NOT \
+             a patch that will git apply, since the real file/line context is unknown\"}."
+        };
+        let user = match source {
+            Some(src) => format!(
+                "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}\n\n\
+                 Actual source at the referenced locations:\n{}",
+                serde_json::to_string_pretty(case)?,
+                code,
+                error,
+                src
+            ),
+            None => format!(
+                "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}",
+                serde_json::to_string_pretty(case)?,
+                code,
+                error
+            ),
+        };
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("fix proposal was not valid JSON")
     }
@@ -263,7 +309,9 @@ impl LlmClient {
             case JSON object only.";
         let user = format!(
             "Failing case:\n{}\n\nGenerated code:\n{}\n\nFailure:\n{}",
-            serde_json::to_string_pretty(case)?, code, error
+            serde_json::to_string_pretty(case)?,
+            code,
+            error
         );
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("healed case was not valid JSON")
@@ -277,11 +325,16 @@ impl LlmClient {
             {name,file,branches}, produce one test case per function that exercises its inputs/outputs \
             and every control-flow branch. Respond with JSON only: {\"plan\":[{\"id\":\"TC001\",\
             \"title\":...,\"description\":\"what to feed the function and assert, covering its branches\"}]}.";
-        let user = format!("Functions to cover:\n{}", serde_json::to_string_pretty(functions)?);
+        let user = format!(
+            "Functions to cover:\n{}",
+            serde_json::to_string_pretty(functions)?
+        );
         let out = self.chat(system, &user, true).await?;
         let v: Value = serde_json::from_str(&out).context("cover plan was not valid JSON")?;
         let plan = v.get("plan").cloned().unwrap_or(v);
-        plan.as_array().cloned().ok_or_else(|| anyhow!("cover plan was not an array"))
+        plan.as_array()
+            .cloned()
+            .ok_or_else(|| anyhow!("cover plan was not an array"))
     }
     /// Propose the next single conversational action: `generate`, `run`, or `none`.
     /// Returns the raw JSON `{assistant, action{kind,instruction?,cover?,ids?,summary}}`.
@@ -294,7 +347,9 @@ impl LlmClient {
             Respond JSON only: {\"assistant\":\"one or two sentences to the user\",\"action\":{\"kind\":\
             \"generate|run|none\",\"instruction\":\"...\",\"cover\":false,\"ids\":[],\"summary\":\
             \"imperative one-line description of what approving does\"}}.";
-        let user = format!("Conversation so far:\n{history}\n\nStored tests:\n{tests}\n\nUser: {user_msg}");
+        let user = format!(
+            "Conversation so far:\n{history}\n\nStored tests:\n{tests}\n\nUser: {user_msg}"
+        );
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("plan_action was not valid JSON")
     }

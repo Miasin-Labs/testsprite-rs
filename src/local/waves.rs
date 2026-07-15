@@ -4,7 +4,7 @@
 //! must run before consumers (read/update it), and teardown steps that must run
 //! last. A test declares `produces: [caps]` / `needs: [caps]` (capability
 //! strings) and optionally `category: "teardown"` in its JSON body. This module
-//! orders a run so every `needs` is satisfied by an earlier `produces`, with
+//! orders a run so every `needs` is satisfied by an earlier `produce`, with
 //! teardown tests appended at the end.
 //!
 //! The ordering is a stable topological sort (Kahn, emitting the earliest
@@ -108,8 +108,9 @@ fn topo_levels(indices: &[usize], tests: &[LocalTest]) -> Vec<Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn t(id: &str, extra: serde_json::Value) -> LocalTest {
         LocalTest {
@@ -155,7 +156,11 @@ mod tests {
 
     #[test]
     fn independent_tests_keep_input_order() {
-        let out = flat(vec![t("x", json!({})), t("y", json!({})), t("z", json!({}))]);
+        let out = flat(vec![
+            t("x", json!({})),
+            t("y", json!({})),
+            t("z", json!({})),
+        ]);
         assert_eq!(ids(&out), ["x", "y", "z"]);
     }
 
@@ -199,8 +204,11 @@ mod tests {
 
     #[test]
     fn waves_groups_independent_into_one_level() {
-        let (levels, teardown) =
-            waves(vec![t("x", json!({})), t("y", json!({})), t("z", json!({}))]);
+        let (levels, teardown) = waves(vec![
+            t("x", json!({})),
+            t("y", json!({})),
+            t("z", json!({})),
+        ]);
         assert_eq!(level_ids(&levels), vec![vec!["x", "y", "z"]]);
         assert!(teardown.is_empty());
     }

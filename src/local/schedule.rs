@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::ts_dir;
@@ -69,9 +69,7 @@ fn write_all(root: &Path, schedules: &[Schedule]) -> Result<()> {
 /// Upsert a schedule by name; bails on an invalid cadence.
 pub fn add(root: &Path, name: &str, group: &str, cadence: &str) -> Result<()> {
     if cadence_cron(cadence).is_none() {
-        bail!(
-            "invalid cadence {cadence:?}: expected one of hourly, daily, weekly, monthly"
-        );
+        bail!("invalid cadence {cadence:?}: expected one of hourly, daily, weekly, monthly");
     }
     let mut schedules = read_all(root)?;
     let entry = Schedule {
@@ -117,8 +115,9 @@ pub fn crontab(root: &Path, bin: &str) -> Result<String> {
     let schedules = list(root)?;
     let mut out = String::new();
     for s in &schedules {
-        let cron = cadence_cron(&s.cadence)
-            .with_context(|| format!("schedule {:?} has invalid cadence {:?}", s.name, s.cadence))?;
+        let cron = cadence_cron(&s.cadence).with_context(|| {
+            format!("schedule {:?} has invalid cadence {:?}", s.name, s.cadence)
+        })?;
         out.push_str(&format!(
             "{cron} cd {} && {} test run --group {}  # testsprite-rs:{}\n",
             sh_quote(&root.display().to_string()),
@@ -155,11 +154,14 @@ mod tests {
         let root = tmp_root();
         add(&root, "nightly", "smoke", "daily").unwrap();
         let all = list(&root).unwrap();
-        assert_eq!(all, vec![Schedule {
-            name: "nightly".to_string(),
-            group: "smoke".to_string(),
-            cadence: "daily".to_string(),
-        }]);
+        assert_eq!(
+            all,
+            vec![Schedule {
+                name: "nightly".to_string(),
+                group: "smoke".to_string(),
+                cadence: "daily".to_string(),
+            }]
+        );
 
         // Same name, different group -> upsert, not duplicate.
         add(&root, "nightly", "regression", "weekly").unwrap();

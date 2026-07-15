@@ -158,7 +158,7 @@ pub async fn run(args: ExecuteArgs) -> Result<Vec<TestEntity>> {
         .local_endpoint
         .clone()
         .ok_or_else(|| anyhow!("config has no localEndpoint"))?;
-    let (local_host, local_port) = parse_endpoint(&local_endpoint)?;
+    let (local_host, local_port) = parse_host_port(&local_endpoint)?;
 
     // Single-flight guard: refuse to run if a previous run is still in progress.
     let lock_path = paths.execution_lock();
@@ -183,7 +183,11 @@ pub async fn run(args: ExecuteArgs) -> Result<Vec<TestEntity>> {
 
     // 1. Open tunnel + verify connectivity.
     tracing::info!("starting tunnel...");
-    let tunnel = Tunnel::start(&backend).await?;
+    let tunnel = Tunnel::start(
+        &backend,
+        crate::tunnel::TunnelTarget::new(local_host.clone(), local_port),
+    )
+    .await?;
     tracing::info!("proxy: {}", redact(&tunnel.proxy_url));
 
     if !net::check_port_listening(&local_host, local_port, Duration::from_secs(2)).await {
@@ -197,7 +201,9 @@ pub async fn run(args: ExecuteArgs) -> Result<Vec<TestEntity>> {
     }
     match net::probe_through_tunnel(&local_endpoint, &tunnel.proxy_url).await {
         Ok(status) => tracing::info!("tunnel connectivity verified (status={status})"),
-        Err(e) => tracing::warn!("tunnel probe failed: {e}"),
+        // The reqwest error can echo the credentialed proxy URL; redact it so the
+        // secret never lands in logs.
+        Err(e) => tracing::warn!("tunnel probe failed: {}", redact(&e.to_string())),
     }
 
     // 2. Dispatch.
@@ -246,7 +252,10 @@ pub async fn run(args: ExecuteArgs) -> Result<Vec<TestEntity>> {
     Ok(results)
 }
 
-fn parse_endpoint(endpoint: &str) -> Result<(String, u16)> {
+/// Parse a URL/endpoint into `(host, port)`, defaulting the port by scheme
+/// (443 for https, else 80). Distinct from `engine::parse_endpoint_spec`, which
+/// parses a JSON endpoint into an `EndpointSpec`.
+fn parse_host_port(endpoint: &str) -> Result<(String, u16)> {
     let url = endpoint.trim_end_matches('/');
     let after = url.split("://").nth(1).unwrap_or(url);
     let authority = after.split('/').next().unwrap_or(after);
@@ -257,11 +266,27 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, u16)> {
     Ok((authority.to_string(), port))
 }
 
-/// Redact credentials in a proxy URL for logging.
-fn redact(url: &str) -> String {
-    match (url.split_once("://"), url.rsplit_once('@')) {
-        (Some((scheme, _)), Some((_, host))) => format!("{scheme}://[REDACTED]@{host}"),
-        _ => url.to_string(),
+/// Redact `user:pass@` credentials from any proxy URL appearing in `s`, whether
+/// `s` is the bare URL or an error message that embeds one. Only the URL's
+/// authority is touched, so surrounding text (and any path/query) is preserved.
+fn redact(s: &str) -> String {
+    let Some(scheme_end) = s.find("://") else {
+        return s.to_string();
+    };
+    let auth_start = scheme_end + 3;
+    // The authority ends at the first path/terminator char after `://`.
+    let auth_len = s[auth_start..]
+        .find(['/', ')', ' ', '"', '\'', '\\'])
+        .unwrap_or(s.len() - auth_start);
+    let authority = &s[auth_start..auth_start + auth_len];
+    match authority.rsplit_once('@') {
+        Some((_creds, host)) => format!(
+            "{}[REDACTED]@{}{}",
+            &s[..auth_start],
+            host,
+            &s[auth_start + auth_len..]
+        ),
+        None => s.to_string(),
     }
 }
 
@@ -290,4 +315,50 @@ pub fn mcp_next_action(project_path: &str, exe: &str) -> Value {
             }
         }),
     ])
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::{parse_host_port, redact};
+
+    #[test]
+    fn parse_host_port_defaults_the_port_by_scheme() {
+        assert_eq!(
+            parse_host_port("http://localhost:8080/x").unwrap(),
+            ("localhost".to_string(), 8080)
+        );
+        assert_eq!(
+            parse_host_port("https://api.example.com").unwrap(),
+            ("api.example.com".to_string(), 443)
+        );
+        assert_eq!(
+            parse_host_port("http://example.com").unwrap(),
+            ("example.com".to_string(), 80)
+        );
+    }
+
+    #[test]
+    fn strips_creds_from_a_bare_url() {
+        assert_eq!(
+            redact("http://id:secret@proxy.example:8080"),
+            "http://[REDACTED]@proxy.example:8080"
+        );
+    }
+
+    #[test]
+    fn strips_creds_from_a_url_embedded_in_an_error() {
+        assert_eq!(
+            redact("error sending request (http://id:secret@proxy:8080/): boom"),
+            "error sending request (http://[REDACTED]@proxy:8080/): boom"
+        );
+    }
+
+    #[test]
+    fn leaves_a_credential_free_string_untouched() {
+        assert_eq!(redact("connection refused"), "connection refused");
+        assert_eq!(
+            redact("http://proxy.example:8080"),
+            "http://proxy.example:8080"
+        );
+    }
 }

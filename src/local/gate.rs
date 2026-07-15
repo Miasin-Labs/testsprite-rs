@@ -13,7 +13,9 @@ use super::ts_dir;
 /// PR (via `gh`), and return `0` if every test passed, `1` otherwise. The
 /// exit code depends only on test results — `gh` failures never propagate.
 pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyhow::Result<i32> {
-    let results = crate::local::run::run_collect(root, &[], url_override, model, false, None, 1, false).await?;
+    let results =
+        crate::local::run::run_collect(root, &[], url_override, model, false, None, 1, false)
+            .await?;
 
     let total = results.len();
     let failed = results
@@ -34,9 +36,14 @@ pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyho
         "failed": failed,
         "results": results,
     });
-    std::fs::write(dir.join("gate-summary.json"), serde_json::to_string_pretty(&summary)?)?;
+    std::fs::write(
+        dir.join("gate-summary.json"),
+        serde_json::to_string_pretty(&summary)?,
+    )?;
 
-    println!("gate: {passed}/{total} passed ({failed} failed) — junit.xml + gate-summary.json written");
+    println!(
+        "gate: {passed}/{total} passed ({failed} failed) — junit.xml + gate-summary.json written"
+    );
 
     let body = comment_body(&results, total, passed, failed);
     try_gh_comment(root, &body);
@@ -119,13 +126,11 @@ fn try_gh_comment(root: &Path, body: &str) {
         .current_dir(root)
         .output();
     let on_pr = match pr_view {
-        Ok(o) if o.status.success() => {
-            String::from_utf8(o.stdout)
-                .ok()
-                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                .and_then(|v| v.get("number").and_then(Value::as_i64))
-                .is_some()
-        }
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("number").and_then(Value::as_i64))
+            .is_some(),
         _ => false,
     };
     if !on_pr {

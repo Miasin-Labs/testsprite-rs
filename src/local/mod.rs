@@ -7,21 +7,24 @@ pub mod apidoc;
 pub mod changed;
 pub mod ci;
 pub mod coverage;
+pub mod cycle;
 pub mod db;
 pub mod diff;
 pub mod doctor;
+pub mod fix_context;
 pub mod flaky;
 pub mod gate;
-pub mod lint;
 pub mod generate;
+pub mod lint;
 pub mod project;
-pub mod run;
 pub mod rerun;
-pub mod store;
-pub mod triage;
+pub mod run;
 pub mod scaffold;
 pub mod schedule;
 pub mod serve;
+pub mod setup;
+pub mod store;
+pub mod triage;
 pub mod verdict;
 pub mod visual;
 pub mod waves;
@@ -40,7 +43,11 @@ pub struct Project {
     pub kind: TestKind,
     #[serde(rename = "targetUrl", default, skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
-    #[serde(rename = "startCommand", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "startCommand",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub start_command: Option<String>,
 }
 
@@ -69,7 +76,9 @@ impl LocalTest {
     }
     /// Dependency-wave category; `Some("teardown")` runs last.
     pub fn category(&self) -> Option<&str> {
-        self.extra.get("category").and_then(serde_json::Value::as_str)
+        self.extra
+            .get("category")
+            .and_then(serde_json::Value::as_str)
     }
     /// Capabilities this test `produces` (for dependency-wave ordering).
     pub fn produces(&self) -> Vec<String> {

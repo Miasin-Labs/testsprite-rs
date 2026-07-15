@@ -46,6 +46,13 @@ write/extend the repo's own tests for them, then register a `kind:"command"` tes
 tests live in the repo (cargo/CI own them). Use kind backend/python only for
 black-box HTTP tests.
 
+`coverage_gaps` is a **worklist, not a scoreboard**. When it reports
+`evidence: "named"` it is matching function names against the text of stored
+tests, so it cannot see the repo's own cargo/pytest suite: a function you just
+covered properly will still appear. Don't chase it to zero, and never write a
+function's name into a test title or command string to make it go away — that
+moves the number without testing anything.
+
 **Auth:** for anything behind a login, provide test credentials (or have the test
 inject the auth header itself) — otherwise authenticated flows come back `blocked`,
 not `failed`, and you'll chase a phantom bug. Use a dedicated test user (e.g.

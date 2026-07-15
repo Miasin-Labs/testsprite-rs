@@ -11,9 +11,10 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The local TestSprite MCP tools: generate/run/store test cases, coverage,
-/// emit/rename/triage/flaky/history, plus the 3 conversational-agent tools.
-/// (Cloud tools that need a TestSprite account are intentionally not advertised.)
+/// The local TestSprite MCP tools: generate/run/store/list/delete test cases,
+/// the one-call `loop`, coverage, emit/rename/triage/flaky/history, plus the 3
+/// conversational-agent tools. (Cloud tools that need a TestSprite account are
+/// intentionally not advertised.)
 fn tool_list() -> Value {
     json!({
         "tools": [
@@ -23,14 +24,29 @@ fn tool_list() -> Value {
             { "name": "testsprite_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",
               "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean")]) },
+            { "name": "testsprite_loop",
+              "description": "The regression loop in ONE call — the agent-facing 'run the whole surface after every change and hand the breaks back'. Optionally generates tests for changed functions (generate:true + changed:true), runs the suite (the changed subset when changed:true, else all — and on an unattributable change it runs everything rather than reporting an empty green), triages failures into root-cause clusters, and returns one actionable report: {selection, total, passed, failed, blocked, failures:[{id,title,verdict,failureKind,cause}], clusters, next_action, green}. `blocked` (auth/network/infra) is counted apart from real `failed`. Prefer this over calling generate/run/triage separately.",
+              "inputSchema": obj_schema(&[("changed","boolean"),("since","string"),("generate","boolean"),("model","string"),("fix","boolean"),("serve","boolean")]) },
             { "name": "testsprite_store_test",
-              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
-              "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
+              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` ({method,path,expect_status?,body?,headers?}) for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
+              "inputSchema": json!({ "type": "object", "properties": {
+                  "title": {"type": "string"},
+                  "kind": {"type": "string", "enum": ["backend","frontend","mcp","rust","command"]},
+                  "description": {"type": "string"},
+                  "code": {"type": "string"},
+                  "spec": {"type": "object", "description": "HTTP assertion: {method, path, expect_status?, body?, headers?}. expect_status is an exact code (200) or a band: \"success\" (2xx/3xx, the default), \"accepted\" (2xx/3xx or 400/422, for writes with a synthesized body), or \"any\" (<500)."},
+              }}) },
+            { "name": "testsprite_list_tests",
+              "description": "List every stored test as {id,title,kind}. Use this to map the opaque ids other tools return back to what they actually are — no need to run anything or shell out to the CLI.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_delete_test",
+              "description": "Delete a stored test and its run history by id. Use it to prune duplicate/munged auto-generated cases; storing is an upsert, so without this the suite only grows.",
+              "inputSchema": obj_schema(&[("id","string")]) },
             { "name": "testsprite_coverage_gaps",
-              "description": "List functions in the code surface that NO stored test references yet — the uncovered set to generate next. Loop this until empty for full coverage.",
+              "description": "List functions in the code surface that no stored test references yet. NOTE: matching is by function-NAME mention in a stored test's text, not by execution — it cannot see your repo's own cargo/pytest tests, and a name-drop counts. Treat it as a to-write worklist, not a coverage measurement, and do not chase it to zero.",
               "inputSchema": obj_schema(&[("path","string")]) },
             { "name": "testsprite_emit_test",
-              "description": "Materialize a stored test's code into a repo file (e.g. crates/foo/tests/bar.rs) so cargo/CI own it — the repo-native alternative to ephemeral SQLite runs.",
+              "description": "Materialize a stored test into a repo file (e.g. crates/foo/tests/bar.rs, or tests/test_api.py for a spec case) so cargo/CI own it — the repo-native alternative to ephemeral SQLite runs. `command` tests cannot be emitted (their code is a shell line, not source).",
               "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
             { "name": "testsprite_rename_test",
               "description": "Rename a stored test's title. Use this to fix the munged/duplicate TC000 names auto-generation produces — give each test a meaningful, unique name.",
@@ -48,8 +64,8 @@ fn tool_list() -> Value {
               "description": "Group the failing tests by root cause (failureKind) into clusters so you fix the few underlying problems instead of N symptoms.",
               "inputSchema": obj_schema(&[]) },
             { "name": "testsprite_flaky",
-              "description": "Replay a stored test N times (default 5) and report a stability score; blocked/auth-failure runs are excluded, not scored as flaky.",
-              "inputSchema": obj_schema(&[("id","string"),("runs","number"),("model","string")]) },
+              "description": "Replay a stored test N times (default 5) and report a stability score; blocked runs (auth/network/infra) are excluded from the denominator, not scored as flaky. Set serve:true to start the target app first — otherwise a backend test with nothing listening scores every run blocked and reports \"inconclusive\".",
+              "inputSchema": obj_schema(&[("id","string"),("runs","number"),("model","string"),("serve","boolean")]) },
             { "name": "testsprite_run_history",
               "description": "Show a stored test's full run history (append-only): every recorded run newest-first with pass/fail, verdict, failureKind, and timestamp. Use it to spot regressions and intermittent failures over time.",
               "inputSchema": obj_schema(&[("id","string")]) },
@@ -107,9 +123,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                     .map(crate::server::executors::TestKind::parse);
                 crate::local::generate::generate(
                     &root,
-                    args.get("from").and_then(|v| v.as_str()).map(std::path::Path::new),
+                    args.get("from")
+                        .and_then(|v| v.as_str())
+                        .map(std::path::Path::new),
                     args.get("instruction").and_then(|v| v.as_str()),
-                    args.get("doc").and_then(|v| v.as_str()).map(std::path::Path::new),
+                    args.get("doc")
+                        .and_then(|v| v.as_str())
+                        .map(std::path::Path::new),
                     model,
                     kind,
                 )
@@ -125,22 +145,76 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let fix = args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
             let root = std::env::current_dir()?;
             let changed_mode = args.get("changed").and_then(|v| v.as_bool()) == Some(true);
+            let mut selection_note: Option<Value> = None;
             let ids: Vec<String> = if changed_mode {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
                 let cs = crate::local::changed::changed_surface(&root, since)?;
-                crate::local::changed::affected_test_ids(&root, &cs).await?
+                match crate::local::changed::select(&root, &cs).await? {
+                    crate::local::changed::Selection::NoChanges => {
+                        return Ok(json!({
+                            "results": [],
+                            "selection": "no_changes",
+                            "verified": true,
+                            "note": format!("no source changes since {since} — nothing to verify"),
+                        }));
+                    }
+                    crate::local::changed::Selection::Affected(ids) => ids,
+                    crate::local::changed::Selection::Unattributable { changed_units } => {
+                        // Do NOT return an empty green result: the agent would read
+                        // it as "my change is verified". Say so, and run everything.
+                        selection_note = Some(json!({
+                            "selection": "unattributable",
+                            "changedUnits": changed_units,
+                            "note": format!(
+                                "{changed_units} function(s) changed but no stored test \
+                                 mentions them; tests are matched by function-name mention, \
+                                 which cannot see through spec/command tests. Ran the full \
+                                 suite instead of reporting an empty success."
+                            ),
+                        }));
+                        Vec::new()
+                    }
+                }
             } else {
                 match args.get("id").and_then(|v| v.as_str()) {
                     Some(id) => vec![id.to_string()],
                     None => vec![],
                 }
             };
-            if changed_mode && ids.is_empty() {
-                return Ok(json!({ "results": [], "note": "no stored tests affected by the changes" }));
-            }
             let serve = args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false);
-            let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1, serve).await?;
-            Ok(json!({ "results": results }))
+            let results =
+                crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1, serve)
+                    .await?;
+            match selection_note {
+                Some(mut note) => {
+                    note["results"] = json!(results);
+                    Ok(note)
+                }
+                None => Ok(json!({ "results": results })),
+            }
+        }
+        "testsprite_loop" => {
+            let root = std::env::current_dir()?;
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let opts = crate::local::cycle::CycleOpts {
+                changed: args
+                    .get("changed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                since: args.get("since").and_then(|v| v.as_str()),
+                generate: args
+                    .get("generate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                model,
+                fix: args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false),
+                serve: args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false),
+            };
+            let report = crate::local::cycle::cycle(&root, opts).await?;
+            Ok(serde_json::to_value(report)?)
         }
         "testsprite_store_test" => {
             let root = std::env::current_dir()?;
@@ -164,6 +238,30 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             };
             let report = crate::local::coverage::gaps(&root, &scan).await?;
             Ok(serde_json::to_value(report)?)
+        }
+        "testsprite_list_tests" => {
+            let root = std::env::current_dir()?;
+            let tests = crate::local::store::list(&root).await?;
+            let rows: Vec<Value> = tests
+                .iter()
+                .map(|t| {
+                    json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "kind": t.kind.map(|k| format!("{k:?}").to_lowercase()),
+                    })
+                })
+                .collect();
+            Ok(json!({ "count": rows.len(), "tests": rows }))
+        }
+        "testsprite_delete_test" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            let deleted = crate::local::store::delete(&root, id).await?;
+            Ok(json!({ "id": id, "deleted": deleted }))
         }
         "testsprite_emit_test" => {
             let root = std::env::current_dir()?;
@@ -202,7 +300,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: message"))?;
             let conversation_id = args.get("conversation_id").and_then(|v| v.as_str());
-            let auto_approve = args.get("auto_approve").and_then(|v| v.as_bool()).unwrap_or(false);
+            let auto_approve = args
+                .get("auto_approve")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             crate::local::agent::message(&root, conversation_id, message, model, auto_approve).await
         }
         "testsprite_agent_approve" => {
@@ -219,7 +320,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .get("action_id")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: action_id"))?;
-            let approve = args.get("approve").and_then(|v| v.as_bool()).unwrap_or(true);
+            let approve = args
+                .get("approve")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             crate::local::agent::resolve(&root, conversation_id, action_id, approve, model).await
         }
         "testsprite_agent_history" => {
@@ -244,8 +348,9 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .get("model")
                 .and_then(|v| v.as_str())
                 .unwrap_or("gpt-4o-mini");
+            let serve = args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false);
             Ok(serde_json::to_value(
-                crate::local::flaky::flaky(&root, id, runs, model).await?,
+                crate::local::flaky::flaky(&root, id, runs, model, serve).await?,
             )?)
         }
         "testsprite_run_history" => {

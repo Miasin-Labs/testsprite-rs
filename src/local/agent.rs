@@ -1,7 +1,7 @@
 //! The conversational test agent: a threaded, DB-backed chat that proposes
 //! ONE action at a time (generate tests / run tests) which the caller must
 //! approve before it executes. Reuses the existing generate/run pipeline;
-//! this module is purely the conversation + approval loop on top of it.
+//! this module is purely the conversation and approval loop on top of it.
 
 use std::path::Path;
 
@@ -50,12 +50,11 @@ pub async fn message(
         .execute(&pool)
         .await?;
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY msg_id",
-    )
-    .bind(&conv_id)
-    .fetch_all(&pool)
-    .await?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY msg_id")
+            .bind(&conv_id)
+            .fetch_all(&pool)
+            .await?;
     let history: String = rows
         .iter()
         .rev()
@@ -73,10 +72,7 @@ pub async fn message(
     );
 
     let decision = decide(model, &history, user_msg, &tests).await;
-    let assistant_text = decision["assistant"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let assistant_text = decision["assistant"].as_str().unwrap_or("").to_string();
     let action = decision["action"].clone();
     let kind = action["kind"].as_str().unwrap_or("none").to_string();
 
@@ -183,8 +179,7 @@ fn deterministic_route(user_msg: &str, has_key: bool) -> Value {
     let assistant = if has_key {
         "Not sure that needs a test action — ask me to generate or run tests.".to_string()
     } else {
-        "No OpenAI key set — say 'generate <what>' or 'run' and I'll propose an action."
-            .to_string()
+        "No OpenAI key set — say 'generate <what>' or 'run' and I'll propose an action.".to_string()
     };
     json!({
         "assistant": assistant,
@@ -222,10 +217,12 @@ pub async fn resolve(
             .bind(action_id)
             .execute(&pool)
             .await?;
-        sqlx::query("INSERT INTO messages (conversation_id,role,content) VALUES (?,'assistant','Skipped.')")
-            .bind(conversation_id)
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO messages (conversation_id,role,content) VALUES (?,'assistant','Skipped.')",
+        )
+        .bind(conversation_id)
+        .execute(&pool)
+        .await?;
         return Ok(json!({
             "conversationId": conversation_id,
             "actionId": action_id,
@@ -240,7 +237,8 @@ pub async fn resolve(
             let out = if args["cover"].as_bool() == Some(true) {
                 generate::generate_cover(root, root, model).await?
             } else {
-                generate::generate(root, None, args["instruction"].as_str(), None, model, None).await?
+                generate::generate(root, None, args["instruction"].as_str(), None, model, None)
+                    .await?
             };
             let summary = format!("Generated {} test(s).", out.test_ids.len());
             (
@@ -334,8 +332,9 @@ pub async fn history(root: &Path, conversation_id: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     /// Serializes + neutralizes `OPENAI_API_KEY` / `HOME` (the two key
     /// sources `LlmClient::from_env` checks) for the lifetime of the guard,

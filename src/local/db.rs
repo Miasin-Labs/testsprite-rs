@@ -87,6 +87,17 @@ CREATE TABLE IF NOT EXISTS runs (
     analysis     TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Prior definitions of a test, kept so an automated rewrite (`rerun --heal`)
+-- can never be the only copy of what the test used to assert. `runs` records
+-- outcomes; this records the definition itself.
+CREATE TABLE IF NOT EXISTS test_revisions (
+    rev_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    test_id    TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS test_revisions_idx ON test_revisions (test_id, rev_id);
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
     title      TEXT NOT NULL DEFAULT '',

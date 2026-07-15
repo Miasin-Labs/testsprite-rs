@@ -10,7 +10,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{clip, ExecCtx, Executor, Outcome};
+use super::{ExecCtx, Executor, Outcome, clip};
 
 pub struct BrowserExecutor;
 
@@ -35,36 +35,64 @@ impl Executor for BrowserExecutor {
 }
 
 impl BrowserExecutor {
-    /// Build the Playwright JS for a case: LLM-authored when available, else a
-    /// deterministic smoke test (load the page, fail on console/page errors).
+    /// Build the Playwright JS for a case. The LLM (when available) writes only
+    /// the test BODY; the deterministic path uses an empty body (the harness
+    /// still checks the initial navigation + page errors). Either way the body
+    /// runs inside [`wrap_script`], which owns the browser lifecycle and the
+    /// screenshot — so a visual artifact is captured on the LLM path too, not
+    /// only the deterministic one.
     async fn script_for(&self, case: &Value, ctx: &ExecCtx) -> Result<String, String> {
-        if let Some(llm) = ctx.llm.as_ref() {
-            match llm.generate_playwright(case, &ctx.prd, &ctx.target).await {
-                Ok(s) => return Ok(s),
-                Err(e) => tracing::warn!("LLM playwright gen failed ({e}); using smoke template"),
-            }
-        }
         let browser = ctx.browser.as_deref().unwrap_or("chromium");
-        let shot_path = match &ctx.shots_dir {
-            Some(dir) => match tokio::fs::create_dir_all(dir).await {
-                Ok(()) => {
-                    let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
-                    Some(dir.join(format!("{id}-{browser}.png")))
-                }
+        let shot_path = shot_path(case, ctx, browser).await;
+        let body = match ctx.llm.as_ref() {
+            Some(llm) => match llm.generate_playwright(case, &ctx.prd, &ctx.target).await {
+                Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!("could not create shots dir {dir:?}: {e}");
-                    None
+                    tracing::warn!("LLM playwright gen failed ({e}); using smoke check");
+                    String::new()
                 }
             },
-            None => None,
+            None => String::new(),
         };
-        Ok(smoke_template(&ctx.target, browser, shot_path.as_deref()))
+        Ok(wrap_script(
+            &ctx.target,
+            browser,
+            shot_path.as_deref(),
+            &body,
+        ))
     }
 }
 
-/// Deterministic Playwright smoke test: navigate, assert a 2xx-3xx response and
-/// no uncaught page errors.
-fn smoke_template(url: &str, browser: &str, shot_path: Option<&std::path::Path>) -> String {
+/// Per-case screenshot destination under `ctx.shots_dir`, or `None` when no
+/// shots dir is configured or it cannot be created.
+async fn shot_path(case: &Value, ctx: &ExecCtx, browser: &str) -> Option<std::path::PathBuf> {
+    let dir = ctx.shots_dir.as_ref()?;
+    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+        tracing::warn!("could not create shots dir {dir:?}: {e}");
+        return None;
+    }
+    let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
+    Some(dir.join(format!("{id}-{browser}.png")))
+}
+
+/// Wrap a test `body` in a Playwright harness that OWNS the browser lifecycle
+/// and the screenshot, so a visual artifact is captured deterministically on
+/// every run — success or failure, LLM-authored or deterministic — instead of
+/// depending on the generated script to remember `page.screenshot`.
+///
+/// `body` is JS statements operating on the harness's `page` (empty for the
+/// deterministic smoke check). It runs inside an awaited async IIFE so generated
+/// code can't skip the harness's cleanup: a stray `return` exits only the inner
+/// function (not the whole run, which would leak the browser and the
+/// screenshot), a `const page` shadows locally instead of colliding, and a
+/// `throw` still propagates to the harness's try/catch. The screenshot runs
+/// AFTER the try/catch, so a failing body still leaves an artifact.
+fn wrap_script(
+    url: &str,
+    browser: &str,
+    shot_path: Option<&std::path::Path>,
+    body: &str,
+) -> String {
     // Headless Chromium under this executor's sandboxless environment needs
     // `--no-sandbox` or `page.screenshot()` fails with a protocol error.
     let launch_args = if browser == "chromium" {
@@ -74,7 +102,7 @@ fn smoke_template(url: &str, browser: &str, shot_path: Option<&std::path::Path>)
     };
     let screenshot_line = match shot_path {
         Some(p) => format!(
-            "  await page.screenshot({{ path: {:?}, fullPage: true }});\n",
+            "  try {{ await page.screenshot({{ path: {:?}, fullPage: true }}); }} catch (_) {{}}\n",
             p.display().to_string()
         ),
         None => String::new(),
@@ -86,18 +114,21 @@ fn smoke_template(url: &str, browser: &str, shot_path: Option<&std::path::Path>)
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
-  const resp = await page.goto({url:?}, {{ waitUntil: 'load', timeout: 20000 }});
-  const status = resp ? resp.status() : 0;
+  let failed = null;
+  try {{
+    const resp = await page.goto({url:?}, {{ waitUntil: 'load', timeout: 20000 }});
+    const status = resp ? resp.status() : 0;
+    if (status >= 400) throw new Error('bad status ' + status);
+    await (async () => {{
+{body}
+    }})();
+    if (errors.length) throw new Error('page errors: ' + errors.join('; '));
+  }} catch (e) {{ failed = e; }}
 {screenshot_line}  await browser.close();
-  if (status >= 400) {{ console.error('bad status ' + status); process.exit(1); }}
-  if (errors.length) {{ console.error('page errors: ' + errors.join('; ')); process.exit(1); }}
-  console.log('ok ' + status);
+  if (failed) {{ console.error(String(failed)); process.exit(1); }}
+  console.log('ok');
 }})().catch(e => {{ console.error(e); process.exit(1); }});
 "#,
-        browser = browser,
-        launch_args = launch_args,
-        url = url,
-        screenshot_line = screenshot_line,
     )
 }
 
@@ -213,7 +244,10 @@ async fn build_playwright_image(
 async fn run_node_script_docker(script: &str) -> Outcome {
     let dir = std::env::temp_dir().join(format!("ts_pw_{}", Uuid::new_v4()));
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return Outcome::fail(format!("could not create work dir: {e}"), script.to_string());
+        return Outcome::fail(
+            format!("could not create work dir: {e}"),
+            script.to_string(),
+        );
     }
     let file = dir.join("script.js");
     if let Err(e) = tokio::fs::write(&file, script).await {
@@ -228,8 +262,17 @@ async fn run_node_script_docker(script: &str) -> Outcome {
     let mount = format!("{}:/work", dir.display());
     let out = tokio::process::Command::new("docker")
         .args([
-            "run", "--rm", "--network", "host", "-v", mount.as_str(), "-w", "/work",
-            image.as_str(), "node", "/work/script.js",
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "-v",
+            mount.as_str(),
+            "-w",
+            "/work",
+            image.as_str(),
+            "node",
+            "/work/script.js",
         ])
         .output()
         .await;
@@ -268,4 +311,43 @@ fn resolve_node_path() -> Option<String> {
     ]
     .into_iter()
     .find(|root| std::path::Path::new(root).join("playwright").exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::wrap_script;
+
+    #[test]
+    fn wrap_script_always_screenshots_when_a_path_is_given() {
+        let s = wrap_script(
+            "http://localhost:3000",
+            "chromium",
+            Some(Path::new("/tmp/shots/tc1-chromium.png")),
+            "await page.click('#go');",
+        );
+        assert!(s.contains("page.screenshot("), "no screenshot in:\n{s}");
+        assert!(s.contains("/tmp/shots/tc1-chromium.png"));
+        // The generated body is embedded inside an isolating async IIFE, so a
+        // stray `return`/redeclaration in it can't skip the harness cleanup.
+        assert!(
+            s.contains("await (async () => {"),
+            "body not isolated:\n{s}"
+        );
+        assert!(s.contains("await page.click('#go');"));
+        // The screenshot runs AFTER the try/catch, so a failing body still
+        // leaves an artifact rather than skipping it.
+        let shot = s.find("page.screenshot(").unwrap();
+        let catch = s.find("catch (e) {").unwrap();
+        assert!(shot > catch, "screenshot must run after the try/catch");
+    }
+
+    #[test]
+    fn wrap_script_omits_screenshot_without_a_path() {
+        let s = wrap_script("http://localhost:3000", "chromium", None, "");
+        assert!(!s.contains("page.screenshot("));
+        // The harness still guards the initial navigation.
+        assert!(s.contains("bad status"));
+    }
 }

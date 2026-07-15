@@ -6,9 +6,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::server::executors::TestKind;
-
 use super::store;
+use crate::server::executors::TestKind;
 
 const VALIDATION_ERROR: i32 = 5;
 
@@ -142,13 +141,23 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
         }),
     }
 
+    // `expect_status` is either an exact code or a band name (see
+    // `server::engine::Expect`). Absent means the `success` band.
     if let Some(status) = spec.get("expect_status") {
-        match status.as_i64() {
-            Some(code) if (100..=599).contains(&code) => {}
-            _ => issues.push(Issue::Hard {
+        let ok = match status {
+            Value::Number(_) => status
+                .as_i64()
+                .is_some_and(|code| (100..=599).contains(&code)),
+            Value::String(s) => matches!(s.as_str(), "success" | "accepted" | "any"),
+            _ => false,
+        };
+        if !ok {
+            issues.push(Issue::Hard {
                 field: "expect_status",
-                msg: "spec.expect_status must be an integer in 100..=599".to_string(),
-            }),
+                msg: "spec.expect_status must be an integer in 100..=599 or one of \
+                      \"success\" | \"accepted\" | \"any\""
+                    .to_string(),
+            });
         }
     }
 

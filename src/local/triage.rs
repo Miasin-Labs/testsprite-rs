@@ -26,11 +26,18 @@ pub async fn triage(root: &Path) -> anyhow::Result<Vec<Cluster>> {
     // failure_kind -> (test_ids, sample_cause)
     let mut groups: BTreeMap<String, (Vec<String>, Option<String>)> = BTreeMap::new();
     for r in results {
-        let passed = r.get("passed").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let passed = r
+            .get("passed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         if passed {
             continue;
         }
-        let id = r.get("id").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let id = r
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let kind = r
             .get("failureKind")
             .and_then(serde_json::Value::as_str)
@@ -59,7 +66,11 @@ pub async fn triage(root: &Path) -> anyhow::Result<Vec<Cluster>> {
             sample_cause,
         })
         .collect();
-    clusters.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.failure_kind.cmp(&b.failure_kind)));
+    clusters.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.failure_kind.cmp(&b.failure_kind))
+    });
 
     Ok(clusters)
 }
@@ -109,7 +120,7 @@ pub async fn triage_report(root: &Path, json: bool) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::executors::Outcome;
+    use crate::server::executors::{Outcome, TestKind};
 
     #[tokio::test]
     async fn groups_failures_by_root_cause() {
@@ -122,26 +133,50 @@ mod tests {
         }
 
         // t1, t2 -> routing_404; t3 -> assertion.
-        store::write_result(&root, "t1", &Outcome::fail("expected Some(200), got 404", String::new()), None)
-            .await
-            .unwrap();
-        store::write_result(&root, "t2", &Outcome::fail("expected Some(200), got 404", String::new()), None)
-            .await
-            .unwrap();
-        store::write_result(&root, "t3", &Outcome::fail("AssertionError: 1 != 2", String::new()), None)
-            .await
-            .unwrap();
+        store::write_result(
+            &root,
+            "t1",
+            &Outcome::fail("expected Some(200), got 404", String::new()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
+        store::write_result(
+            &root,
+            "t2",
+            &Outcome::fail("expected Some(200), got 404", String::new()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
+        store::write_result(
+            &root,
+            "t3",
+            &Outcome::fail("AssertionError: 1 != 2", String::new()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
 
         let clusters = triage(&root).await.unwrap();
         assert_eq!(clusters.len(), 2);
 
-        let routing = clusters.iter().find(|c| c.failure_kind == "routing_404").unwrap();
+        let routing = clusters
+            .iter()
+            .find(|c| c.failure_kind == "routing_404")
+            .unwrap();
         assert_eq!(routing.count, 2);
         let mut ids = routing.test_ids.clone();
         ids.sort();
         assert_eq!(ids, vec!["t1".to_string(), "t2".to_string()]);
 
-        let assertion = clusters.iter().find(|c| c.failure_kind == "assertion").unwrap();
+        let assertion = clusters
+            .iter()
+            .find(|c| c.failure_kind == "assertion")
+            .unwrap();
         assert_eq!(assertion.count, 1);
         assert_eq!(assertion.test_ids, vec!["t3".to_string()]);
 
@@ -154,9 +189,15 @@ mod tests {
         store::add_value(&root, serde_json::json!({"id": "ok1", "title": "OK"}))
             .await
             .unwrap();
-        store::write_result(&root, "ok1", &Outcome::pass(String::new()), None)
-            .await
-            .unwrap();
+        store::write_result(
+            &root,
+            "ok1",
+            &Outcome::pass(String::new()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
 
         let clusters = triage(&root).await.unwrap();
         assert!(clusters.is_empty());

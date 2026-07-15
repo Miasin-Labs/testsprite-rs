@@ -124,25 +124,22 @@ const SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", "testsprite_tests
 /// language, counting control-flow branch nodes inside each function body.
 pub fn structural_surface(root: &Path) -> anyhow::Result<Vec<Unit>> {
     let mut units = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() == 0 {
-                return true;
-            }
-            let is_hidden = e
-                .file_name()
-                .to_str()
-                .map(|s| s != "." && s.starts_with('.'))
-                .unwrap_or(false);
-            let is_skipped = e
-                .file_name()
-                .to_str()
-                .map(|s| SKIP_DIRS.contains(&s))
-                .unwrap_or(false);
-            !is_hidden && !is_skipped
-        })
-    {
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        let is_hidden = e
+            .file_name()
+            .to_str()
+            .map(|s| s != "." && s.starts_with('.'))
+            .unwrap_or(false);
+        let is_skipped = e
+            .file_name()
+            .to_str()
+            .map(|s| SKIP_DIRS.contains(&s))
+            .unwrap_or(false);
+        !is_hidden && !is_skipped
+    }) {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -184,6 +181,7 @@ fn units_in_file(root: &Path, path: &Path, lang: Lang, src: &str) -> anyhow::Res
     let mut units = Vec::new();
     let function_kinds = lang.function_kinds();
     let branch_kinds = lang.branch_kinds();
+    let file_is_tests = file_is_test_file(lang, &rel);
     visit(tree.root_node(), &mut |node| {
         if !function_kinds.contains(&node.kind()) {
             return;
@@ -193,6 +191,12 @@ fn units_in_file(root: &Path, path: &Path, lang: Lang, src: &str) -> anyhow::Res
             .and_then(|n| n.utf8_text(bytes).ok())
             .unwrap_or("<anonymous>")
             .to_string();
+        // Test functions are not testable surface. Counting them asks the caller
+        // to write tests for their tests, and inflates the denominator with code
+        // that exists only to exercise the real code.
+        if file_is_tests || is_test_unit(lang, node, &name, src) {
+            return;
+        }
         let line = node.start_position().row + 1;
         let branches = count_branches(node, function_kinds, branch_kinds);
         units.push(Unit {
@@ -203,6 +207,75 @@ fn units_in_file(root: &Path, path: &Path, lang: Lang, src: &str) -> anyhow::Res
         });
     });
     Ok(units)
+}
+
+/// Whole files that exist to test other files.
+fn file_is_test_file(lang: Lang, rel: &str) -> bool {
+    let base = rel.rsplit('/').next().unwrap_or(rel);
+    match lang {
+        Lang::Rust => rel.starts_with("tests/") || rel.contains("/tests/"),
+        Lang::Python => base.starts_with("test_") || base.ends_with("_test.py"),
+        Lang::Go => base.ends_with("_test.go"),
+        Lang::JavaScript | Lang::TypeScript => {
+            base.contains(".test.") || base.contains(".spec.") || rel.contains("__tests__/")
+        }
+    }
+}
+
+/// Text of the attributes attached to `node`, whether the grammar models them as
+/// children or as preceding siblings.
+fn attribute_text(node: Node, src: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "attribute_item" {
+            out.push_str(child.utf8_text(src.as_bytes()).unwrap_or(""));
+            out.push('\n');
+        }
+    }
+    let mut sib = node.prev_sibling();
+    while let Some(s) = sib {
+        match s.kind() {
+            "attribute_item" => {
+                out.push_str(s.utf8_text(src.as_bytes()).unwrap_or(""));
+                out.push('\n');
+            }
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+        sib = s.prev_sibling();
+    }
+    out
+}
+
+/// Is this function test code rather than testable surface?
+fn is_test_unit(lang: Lang, node: Node, name: &str, src: &str) -> bool {
+    match lang {
+        Lang::Rust => {
+            // `#[test]`, `#[tokio::test]`, `#[bench]`, ...
+            if attribute_text(node, src).contains("test") {
+                return true;
+            }
+            // Anything inside a `#[cfg(test)] mod tests { .. }`.
+            let mut cur = node.parent();
+            while let Some(n) = cur {
+                if n.kind() == "mod_item" {
+                    let mod_name = n
+                        .child_by_field_name("name")
+                        .and_then(|x| x.utf8_text(src.as_bytes()).ok())
+                        .unwrap_or("");
+                    if mod_name == "tests" || attribute_text(n, src).contains("cfg(test)") {
+                        return true;
+                    }
+                }
+                cur = n.parent();
+            }
+            false
+        }
+        Lang::Python => name.starts_with("test_"),
+        Lang::Go => name.starts_with("Test") || name.starts_with("Benchmark"),
+        Lang::JavaScript | Lang::TypeScript => false,
+    }
 }
 
 /// Depth-first walk of `node` and every descendant, invoking `f` on each.
@@ -231,26 +304,81 @@ fn count_branches(node: Node, function_kinds: &[&str], branch_kinds: &[&str]) ->
     count
 }
 
-/// If `root` has a Cargo.toml, run `cargo llvm-cov --summary-only` and parse
-/// the overall function% and line%. Best-effort: any failure (missing
-/// Cargo.toml, missing tool, non-zero exit, unparsable output) returns
-/// `Ok(None)` rather than aborting the caller.
-pub fn rust_llvm_cov(root: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+/// Run `cargo llvm-cov --json` and return the parsed export, or `None` when it
+/// cannot run at all (no Cargo.toml, tool missing, build/link failure,
+/// unparsable output).
+///
+/// Deliberately WITHOUT `--summary-only`: that flag strips the per-function
+/// array, which is the only real answer to "did this function execute?".
+fn llvm_cov_export(root: &Path) -> Option<serde_json::Value> {
     if !root.join("Cargo.toml").exists() {
-        return Ok(None);
+        return None;
     }
     let output = std::process::Command::new("cargo")
-        .args(["llvm-cov", "--summary-only", "--json"])
+        .args(["llvm-cov", "--json"])
         .current_dir(root)
-        .output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return Ok(None),
-    };
-    let Ok(text) = String::from_utf8(output.stdout) else {
-        return Ok(None);
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        tracing::debug!(
+            "cargo llvm-cov failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next_back()
+                .unwrap_or("")
+        );
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()
+}
+
+/// The bare function name from an llvm symbol like
+/// `testsprite_rs::local::coverage::mentions` or a monomorphized
+/// `core::ops::function::FnOnce::call_once<..>`.
+fn bare_symbol_name(symbol: &str) -> &str {
+    let no_generics = symbol.split_once('<').map(|(a, _)| a).unwrap_or(symbol);
+    no_generics
+        .rsplit("::")
+        .next()
+        .unwrap_or(no_generics)
+        .trim()
+}
+
+/// Names of functions a coverage run observed EXECUTING at least once.
+///
+/// `None` when llvm-cov could not produce per-function data — the caller must
+/// then say so rather than silently reporting a weaker signal as if it were
+/// this one.
+pub fn rust_executed_functions(root: &Path) -> Option<std::collections::HashSet<String>> {
+    let value = llvm_cov_export(root)?;
+    let functions = value
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|d| d.get("functions"))
+        .and_then(|f| f.as_array())?;
+    let mut executed = std::collections::HashSet::new();
+    for f in functions {
+        let count = f
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        if let Some(name) = f.get("name").and_then(serde_json::Value::as_str) {
+            executed.insert(bare_symbol_name(name).to_string());
+        }
+    }
+    Some(executed)
+}
+
+/// If `root` has a Cargo.toml, run `cargo llvm-cov` and parse the overall
+/// function% and line%. Best-effort: any failure (missing Cargo.toml, missing
+/// tool, non-zero exit, unparsable output) returns `Ok(None)` rather than
+/// aborting the caller.
+pub fn rust_llvm_cov(root: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(value) = llvm_cov_export(root) else {
         return Ok(None);
     };
     let totals = value
@@ -297,10 +425,7 @@ pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
         let entry = by_lang.entry(lang).or_insert((0, 0, 0));
         entry.1 += 1; // functions
         entry.2 += u.branches; // branches
-        files_seen
-            .entry(lang)
-            .or_default()
-            .insert(u.file.as_str());
+        files_seen.entry(lang).or_default().insert(u.file.as_str());
     }
     for (lang, files) in &files_seen {
         by_lang.entry(lang).or_insert((0, 0, 0)).0 = files.len();
@@ -354,7 +479,9 @@ pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
         }
         None => {
             println!();
-            println!("Rust coverage (cargo llvm-cov): unavailable (no Cargo.toml or llvm-cov run failed)");
+            println!(
+                "Rust coverage (cargo llvm-cov): unavailable (no Cargo.toml or llvm-cov run failed)"
+            );
         }
     }
 
@@ -375,7 +502,9 @@ fn lang_label_for_file(file: &str) -> &'static str {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    Lang::from_extension(ext).map(Lang::label).unwrap_or("other")
+    Lang::from_extension(ext)
+        .map(Lang::label)
+        .unwrap_or("other")
 }
 
 /// Best-effort list of functions to treat as coverage targets: for non-Rust
@@ -394,15 +523,35 @@ fn uncovered_names(units: &[Unit], rust_summary: Option<&serde_json::Value>) -> 
         .collect()
 }
 
-/// Cross-reference the structural surface against every STORED test: a unit
-/// is "covered" iff its name appears as a whole word (case-insensitive) in
-/// any stored test's title, description, spec, or code. Lets a caller loop
-/// "generate the uncovered ones" until this reports zero uncovered.
+/// How a unit came to be counted as covered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Evidence {
+    /// A coverage run observed the function execute. Ground truth.
+    Executed,
+    /// A stored test's text mentions the function's name. This proves only that
+    /// someone typed the name — it is satisfied by a name-drop in a comment and
+    /// it cannot see the repo's own `cargo test`/pytest suite at all.
+    Named,
+    /// Both signals were available and disagree across the surface.
+    Mixed,
+}
+
+/// Cross-reference the structural surface against what is actually tested.
 #[derive(Debug, Clone, Serialize)]
 pub struct GapReport {
     pub total: usize,
     pub covered: usize,
+    /// Units a coverage run observed executing.
+    pub executed: usize,
+    /// Units counted as covered ONLY because a stored test mentions the name.
+    pub named_only: usize,
     pub uncovered: Vec<Unit>,
+    /// Which signal `covered` rests on.
+    pub evidence: Evidence,
+    /// What the number does and does not mean, when that is not obvious.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// True iff `name` (case-insensitive) occurs in `haystack` as a whole word:
@@ -418,8 +567,16 @@ pub(crate) fn mentions(haystack: &str, name: &str) -> bool {
     while let Some(rel) = haystack[start..].find(&needle) {
         let idx = start + rel;
         let end = idx + needle.len();
-        let before_ok = haystack[..idx].chars().next_back().map(|c| !is_word_char(c)).unwrap_or(true);
-        let after_ok = haystack[end..].chars().next().map(|c| !is_word_char(c)).unwrap_or(true);
+        let before_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .map(|c| !is_word_char(c))
+            .unwrap_or(true);
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .map(|c| !is_word_char(c))
+            .unwrap_or(true);
         if before_ok && after_ok {
             return true;
         }
@@ -449,8 +606,13 @@ pub(crate) fn test_haystack(t: &super::LocalTest) -> String {
     s.to_lowercase()
 }
 
-/// Compute [`GapReport`] for `scan`'s structural surface against `root`'s
-/// stored tests.
+/// Compute [`GapReport`] for `scan`'s structural surface.
+///
+/// A unit is covered when a coverage run observed it EXECUTE. Where real
+/// coverage is unavailable (no Cargo.toml, llvm-cov not installed, the build
+/// won't link), this falls back to matching the unit's name against the stored
+/// tests' text and labels the result [`Evidence::Named`] — a much weaker claim,
+/// reported as such rather than dressed up as coverage.
 pub async fn gaps(root: &Path, scan: &Path) -> anyhow::Result<GapReport> {
     let units = structural_surface(scan)?;
     let tests = crate::local::store::list(root).await?;
@@ -460,20 +622,54 @@ pub async fn gaps(root: &Path, scan: &Path) -> anyhow::Result<GapReport> {
         haystack.push_str(&test_haystack(t));
     }
 
-    let mut covered = 0usize;
+    let executed_fns = {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || rust_executed_functions(&root)).await?
+    };
+
+    let mut executed = 0usize;
+    let mut named_only = 0usize;
     let mut uncovered = Vec::new();
     for u in units.into_iter() {
-        if mentions(&haystack, &u.name) {
-            covered += 1;
+        let ran = executed_fns.as_ref().is_some_and(|e| e.contains(&u.name));
+        if ran {
+            executed += 1;
+        } else if mentions(&haystack, &u.name) {
+            named_only += 1;
         } else {
             uncovered.push(u);
         }
     }
 
+    let covered = executed + named_only;
+    let (evidence, note) = match (&executed_fns, named_only) {
+        (None, _) => (
+            Evidence::Named,
+            Some(
+                "No execution data (cargo llvm-cov unavailable here), so `covered` means \
+                 only that a stored test's text mentions the function's name — not that \
+                 anything ran. Install cargo-llvm-cov for a real measurement."
+                    .to_string(),
+            ),
+        ),
+        (Some(_), 0) => (Evidence::Executed, None),
+        (Some(_), n) => (
+            Evidence::Mixed,
+            Some(format!(
+                "{n} unit(s) are counted as covered only because a stored test mentions \
+                 the name; a coverage run did not observe them execute."
+            )),
+        ),
+    };
+
     Ok(GapReport {
         total: covered + uncovered.len(),
         covered,
+        executed,
+        named_only,
         uncovered,
+        evidence,
+        note,
     })
 }
 
@@ -486,10 +682,24 @@ pub async fn gaps_report(root: &Path, scan: &Path, json: bool) -> anyhow::Result
         return Ok(0);
     }
 
+    let basis = match report.evidence {
+        Evidence::Executed => "observed executing",
+        Evidence::Named => "referenced by a test's text (NOT executed)",
+        Evidence::Mixed => "covered",
+    };
     println!(
-        "coverage gaps: {}/{} functions referenced by tests",
+        "coverage gaps: {}/{} functions {basis}",
         report.covered, report.total
     );
+    if report.evidence == Evidence::Mixed {
+        println!(
+            "  ({} observed executing, {} matched by name only)",
+            report.executed, report.named_only
+        );
+    }
+    if let Some(note) = &report.note {
+        println!("  note: {note}");
+    }
     for u in report.uncovered.iter().take(60) {
         println!("  [uncovered] {}  {}:{}", u.name, u.file, u.line);
     }
@@ -607,8 +817,90 @@ fn bar() -> i32 { 2 }
         assert_eq!(report.covered, 1);
         assert_eq!(report.uncovered.len(), 1);
         assert_eq!(report.uncovered[0].name, "bar");
+        // `root` has no Cargo.toml, so there is no execution data and the
+        // report must say the number is only a name match.
+        assert_eq!(report.evidence, Evidence::Named);
+        assert_eq!(report.named_only, 1);
+        assert_eq!(report.executed, 0);
+        assert!(
+            report
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("not that anything ran")
+        );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_functions_are_not_testable_surface() {
+        // Regression: every `#[test]` fn was counted as a unit needing
+        // coverage, so the tool asked you to write tests for your tests and
+        // inflated the denominator with test code.
+        let dir = crate::local::tmp_root();
+        std::fs::write(
+            dir.join("lib.rs"),
+            r#"
+fn real_work() -> i32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_work_returns_one() {
+        assert_eq!(real_work(), 1);
+    }
+
+    #[tokio::test]
+    async fn also_a_test() {
+        assert!(true);
+    }
+
+    fn helper_inside_the_test_module() -> i32 { 2 }
+}
+"#,
+        )
+        .unwrap();
+
+        let units = structural_surface(&dir).unwrap();
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, vec!["real_work"], "only real surface counts");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_files_are_excluded_wholesale() {
+        let dir = crate::local::tmp_root();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/integration.rs"), "fn helper() -> i32 { 1 }").unwrap();
+        std::fs::write(dir.join("test_thing.py"), "def helper():\n    return 1\n").unwrap();
+        std::fs::write(
+            dir.join("app.py"),
+            "def test_like_name():\n    return 1\ndef real():\n    return 2\n",
+        )
+        .unwrap();
+
+        let units = structural_surface(&dir).unwrap();
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bare_symbol_name_strips_paths_and_generics() {
+        assert_eq!(
+            bare_symbol_name("testsprite_rs::local::coverage::mentions"),
+            "mentions"
+        );
+        assert_eq!(
+            bare_symbol_name("foo::bar::call_once<i32, ()>"),
+            "call_once"
+        );
+        assert_eq!(bare_symbol_name("plain"), "plain");
     }
 
     #[test]
@@ -617,5 +909,4 @@ fn bar() -> i32 { 2 }
         assert!(!mentions("foobar", "foo"));
         assert!(!mentions("", "foo"));
     }
-
 }

@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use super::{clip, ExecCtx, Executor, Outcome};
+use super::{ExecCtx, Executor, Outcome, clip};
 
 pub struct CommandExecutor;
 

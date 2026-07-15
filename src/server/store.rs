@@ -92,7 +92,11 @@ pub fn new_running_entity(
 }
 
 /// Execute one endpoint spec against `base_url`; returns (passed, error, code).
-pub async fn execute_spec(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, String>) -> (bool, String, String) {
+pub async fn execute_spec(
+    spec: &EndpointSpec,
+    base_url: &str,
+    vars: &HashMap<String, String>,
+) -> (bool, String, String) {
     let code = engine::python_for(spec, base_url, vars);
     let url = format!(
         "{}{}",
@@ -130,14 +134,11 @@ pub async fn execute_spec(spec: &EndpointSpec, base_url: &str, vars: &HashMap<St
     match req.timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let ok = match spec.expect_status {
-                Some(expected) => status == expected,
-                None => status < 500,
-            };
+            let ok = spec.expect_status.accepts(status);
             let err = if ok {
                 String::new()
             } else {
-                format!("expected {:?}, got {status}", spec.expect_status)
+                format!("expected {}, got {status}", spec.expect_status.describe())
             };
             (ok, err, code)
         }
@@ -198,10 +199,67 @@ pub fn spawn_execution(
 }
 
 fn now_iso() -> String {
-    // Seconds since epoch as a stable, dependency-free timestamp string.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("1970-01-01T00:00:00Z+{secs}")
+    rfc3339_from_epoch(secs as i64)
+}
+
+/// Format Unix epoch `secs` (UTC) as RFC3339.
+///
+/// Hand-rolled to keep the original's dependency-free intent, but actually
+/// parseable: the previous form was `1970-01-01T00:00:00Z+<secs>`, where a `Z`
+/// — which already means +00:00 — is followed by a numeric offset. No ISO
+/// parser accepts that, and read literally it claims every entity was created
+/// in 1970.
+fn rfc3339_from_epoch(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Days since 1970-01-01 → (year, month, day), proleptic Gregorian.
+/// Howard Hinnant's `civil_from_days`.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_are_real_rfc3339() {
+        // Regression: every entity carried `1970-01-01T00:00:00Z+<secs>` — a Z
+        // followed by an offset, which no ISO parser accepts, claiming 1970.
+        assert_eq!(rfc3339_from_epoch(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_from_epoch(1), "1970-01-01T00:00:01Z");
+        assert_eq!(rfc3339_from_epoch(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339_from_epoch(1_700_000_000), "2023-11-14T22:13:20Z");
+        // Leap-year boundaries.
+        assert_eq!(rfc3339_from_epoch(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_from_epoch(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn now_iso_is_parseable_and_not_in_1970() {
+        let now = now_iso();
+        assert!(now.ends_with('Z'), "{now}");
+        assert!(!now.contains("Z+"), "{now}");
+        assert_eq!(now.len(), 20, "{now}");
+        let year: i32 = now[..4].parse().unwrap();
+        assert!(year >= 2024, "{now}");
+    }
 }

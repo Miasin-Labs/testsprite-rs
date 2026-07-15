@@ -5,9 +5,8 @@ use std::path::Path;
 use anyhow::{Context, anyhow, bail};
 use serde_json::Value;
 
-use crate::server::executors::Outcome;
-
 use super::LocalTest;
+use crate::server::executors::{Outcome, TestKind};
 
 /// Read `file` as a JSON object, assign a uuid `id` if missing/empty, and
 /// upsert it into the `tests` table. Returns the id.
@@ -33,7 +32,11 @@ pub async fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     };
     obj.insert("id".to_string(), Value::String(id.clone()));
 
-    let title = obj.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+    let title = obj
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let kind = obj.get("kind").and_then(Value::as_str).map(str::to_string);
     let body = serde_json::to_string(&Value::Object(obj))?;
 
@@ -50,6 +53,50 @@ pub async fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     .await?;
 
     Ok(id)
+}
+
+/// Snapshot the CURRENT stored definition of `id` into `test_revisions` before
+/// something overwrites it, so an automated rewrite is never the only copy of
+/// what the test used to assert. No-op when `id` isn't stored yet.
+pub async fn snapshot_revision(root: &Path, id: &str, reason: &str) -> anyhow::Result<()> {
+    let pool = crate::local::db::open(root).await?;
+    let existing: Option<(String,)> = sqlx::query_as("SELECT body FROM tests WHERE id=?")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await?;
+    let Some((body,)) = existing else {
+        return Ok(());
+    };
+    sqlx::query("INSERT INTO test_revisions (test_id, body, reason) VALUES (?,?,?)")
+        .bind(id)
+        .bind(&body)
+        .bind(reason)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+/// Prior definitions of `id`, newest-first, as `{revId, body, reason, createdAt}`.
+pub async fn revisions(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT rev_id, body, reason, created_at FROM test_revisions WHERE test_id=? \
+         ORDER BY rev_id DESC",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(rev_id, body, reason, created_at)| {
+            serde_json::json!({
+                "revId": rev_id,
+                "reason": reason,
+                "createdAt": created_at,
+                "body": serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
+            })
+        })
+        .collect())
 }
 
 /// Persist a generated PRD + its test plan; returns the new prd id. The PRD is
@@ -171,14 +218,13 @@ pub async fn rename(root: &Path, id: &str, title: &str) -> anyhow::Result<()> {
     let body = serde_json::to_string(&test)?;
 
     let pool = crate::local::db::open(root).await?;
-    let done = sqlx::query(
-        "UPDATE tests SET title=?, body=?, updated_at=datetime('now') WHERE id=?",
-    )
-    .bind(title)
-    .bind(&body)
-    .bind(id)
-    .execute(&pool)
-    .await?;
+    let done =
+        sqlx::query("UPDATE tests SET title=?, body=?, updated_at=datetime('now') WHERE id=?")
+            .bind(title)
+            .bind(&body)
+            .bind(id)
+            .execute(&pool)
+            .await?;
     if done.rows_affected() == 0 {
         bail!("no test {id}");
     }
@@ -186,13 +232,17 @@ pub async fn rename(root: &Path, id: &str, title: &str) -> anyhow::Result<()> {
 }
 
 /// Append the outcome of running a test case to the `runs` table.
+///
+/// `kind` is the executor that produced `outcome`; the verdict cannot be
+/// derived from the error text without it (see [`crate::local::verdict`]).
 pub async fn write_result(
     root: &Path,
     id: &str,
     outcome: &Outcome,
     analysis: Option<&Value>,
+    kind: TestKind,
 ) -> anyhow::Result<()> {
-    let (v, fk) = crate::local::verdict::classify(outcome.passed, &outcome.error);
+    let (v, fk) = crate::local::verdict::classify(outcome.passed, &outcome.error, kind);
     let analysis_str = analysis.map(serde_json::to_string).transpose()?;
 
     let pool = crate::local::db::open(root).await?;
@@ -317,17 +367,33 @@ pub async fn import_values(root: &Path, tests: &[Value]) -> anyhow::Result<Vec<S
     Ok(ids)
 }
 
+/// One `runs` row as selected below:
+/// `(passed, error, code, analysis, verdict, failure_kind)`.
+type RunRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Load the most recent run result for `id`, if any.
+///
+/// Includes the `verdict`/`failureKind` recorded at run time. They are stored
+/// rather than re-derived because only the run knew which executor produced the
+/// error text, and that determines what the text means.
 pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let row: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT passed,error,code,analysis FROM runs WHERE test_id=? ORDER BY run_id DESC LIMIT 1",
+    let row: Option<RunRow> = sqlx::query_as(
+        "SELECT passed,error,code,analysis,verdict,failure_kind FROM runs WHERE test_id=? \
+             ORDER BY run_id DESC LIMIT 1",
     )
     .bind(id)
     .fetch_optional(&pool)
     .await?;
 
-    let Some((passed, error, code, analysis)) = row else {
+    let Some((passed, error, code, analysis, verdict, failure_kind)) = row else {
         return Ok(None);
     };
 
@@ -336,6 +402,8 @@ pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>>
         "passed": passed != 0,
         "error": error,
         "code": code,
+        "verdict": verdict,
+        "failureKind": failure_kind,
     });
     if let Some(analysis) = analysis {
         record["analysis"] = serde_json::from_str(&analysis).context("parsing stored analysis")?;
@@ -392,12 +460,18 @@ pub async fn last_failed_ids(root: &Path) -> anyhow::Result<Vec<String>> {
 
 /// Write an LLM-proposed fix recommendation to `fixes/<id>.md` for a coding
 /// agent to pick up. `fix` is `{explanation, patch}`; returns the file path.
+///
+/// `appliable` is set by the caller only when the patch was grounded in the
+/// repository's real source AND passed `git apply --check` — it controls whether
+/// the patch is presented as a verified, ready-to-apply diff or an illustrative
+/// sketch, so the two are never confused.
 pub fn write_fix(
     root: &Path,
     id: &str,
     title: &str,
     analysis: Option<&Value>,
     fix: &Value,
+    appliable: bool,
 ) -> anyhow::Result<std::path::PathBuf> {
     let dir = super::fixes_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -415,41 +489,200 @@ pub fn write_fix(
         if v.is_empty() { "unknown" } else { v }
     };
 
-    let mut body = format!("# Fix recommendation — {title}\n\n- test: `{id}`\n- verdict: **{verdict}**\n");
+    let mut body =
+        format!("# Fix recommendation — {title}\n\n- test: `{id}`\n- verdict: **{verdict}**\n");
     let cause = field("cause");
     if !cause.is_empty() {
         body.push_str(&format!("- root cause: {cause}\n"));
     }
-    body.push_str(&format!(
-        "\n## What to change\n\n{explanation}\n\n## Proposed patch\n\n```diff\n{patch}\n```\n"
-    ));
+    body.push_str(&format!("\n## What to change\n\n{explanation}\n"));
+    if !patch.trim().is_empty() {
+        if appliable {
+            // Grounded in the repo's real source and passed `git apply --check`.
+            body.push_str(
+                "\n## Verified patch (grounded in your source; passed `git apply --check`)\n\n\
+                 The fix engine was given the actual source at the failure's referenced lines and \
+                 its output applies cleanly to your working tree. Review, then apply with \
+                 `git apply`:\n\n",
+            );
+            body.push_str(&format!("```diff\n{patch}\n```\n"));
+        } else {
+            // The engine could not ground the change in real source, so the file
+            // paths/line numbers are its reconstruction — a sketch, not a patch.
+            body.push_str(
+                "\n## Suggested change (illustrative — NOT generated from your source)\n\n\
+                 The fix engine could not read (or ground the change in) the repository, so treat \
+                 the paths and line numbers below as a sketch of the change to make by hand, not \
+                 an appliable patch.\n\n",
+            );
+            body.push_str(&format!("```\n{patch}\n```\n"));
+        }
+    }
 
     let path = dir.join(format!("{id}.md"));
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 
-/// Materialize a stored test's `code` into a repo file (e.g.
-/// `crates/foo/tests/bar.rs`) so cargo/CI own it, instead of only running it
-/// ephemerally out of SQLite.
+/// Delete a stored test and its run history. Returns false if `id` wasn't
+/// stored.
+///
+/// `add_value` is an upsert, so without this the `tests` table only ever grows:
+/// auto-generated `TC000`-style duplicates accumulate with no way to prune them
+/// short of opening the SQLite file by hand.
+pub async fn delete(root: &Path, id: &str) -> anyhow::Result<bool> {
+    let pool = crate::local::db::open(root).await?;
+    let deleted = sqlx::query("DELETE FROM tests WHERE id=?")
+        .bind(id)
+        .execute(&pool)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Ok(false);
+    }
+    for table in ["runs", "test_revisions"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE test_id=?"))
+            .bind(id)
+            .execute(&pool)
+            .await?;
+    }
+    Ok(true)
+}
+
+/// Render a stored test into repo-native source text.
+///
+/// A `spec` case carries no `code` of its own — it is executed by reqwest from
+/// its `{method, path, expect_status}`. Rendering it through the same
+/// `python_for` the run records as its artifact is what lets the flagship
+/// deterministic cases leave SQLite at all.
+fn emit_source(test: &LocalTest) -> anyhow::Result<String> {
+    if let Some(code) = test.extra.get("code").and_then(Value::as_str)
+        && !code.is_empty()
+    {
+        // A `command` test's "code" is a shell line (`cargo test -p foo`).
+        // Writing that to `tests/bar.rs` produces a file that cannot compile.
+        if test.kind == Some(crate::server::executors::TestKind::Command) {
+            bail!(
+                "test {} is a `command` test: its code is a shell line, not source. \
+                 Run it via `testsprite-rs test run`, or put the command in your CI \
+                 config — emitting it to a source file would not compile.",
+                test.id
+            );
+        }
+        return Ok(code.to_string());
+    }
+
+    if let Some(spec) = &test.spec {
+        let spec: crate::server::engine::EndpointSpec = serde_json::from_value(spec.clone())
+            .with_context(|| format!("test {} has an unparseable spec", test.id))?;
+        // Emit against the placeholder target; the reader retargets it. Variables
+        // are intentionally not substituted — an emitted file should not bake in
+        // one machine's local ids.
+        return Ok(crate::server::engine::python_for(
+            &spec,
+            "http://127.0.0.1:8080",
+            &std::collections::HashMap::new(),
+        ));
+    }
+
+    bail!("test {} has neither `code` nor `spec` to emit", test.id)
+}
+
+/// Materialize a stored test into a repo file (e.g. `crates/foo/tests/bar.rs`,
+/// or `tests/test_api.py` for a spec case) so cargo/CI own it, instead of only
+/// running it ephemerally out of SQLite.
 pub async fn emit(root: &Path, id: &str, out: &Path) -> anyhow::Result<()> {
     let test = load_one(root, id).await?;
-    let code = test.extra.get("code").and_then(Value::as_str).unwrap_or("");
-    if code.is_empty() {
-        bail!("test {id} has no `code` to emit");
-    }
+    let source = emit_source(&test)?;
     if let Some(parent) = out.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::write(out, code).with_context(|| format!("writing {}", out.display()))?;
+    std::fs::write(out, source).with_context(|| format!("writing {}", out.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delete_removes_the_test_and_its_history() {
+        let root = crate::local::tmp_root();
+        let id = add_value(&root, serde_json::json!({"title": "t"}))
+            .await
+            .unwrap();
+        write_result(
+            &root,
+            &id,
+            &Outcome::fail("boom", String::new()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
+        snapshot_revision(&root, &id, "test").await.unwrap();
+
+        assert!(delete(&root, &id).await.unwrap());
+        assert!(list(&root).await.unwrap().is_empty());
+        assert!(load_result(&root, &id).await.unwrap().is_none());
+        assert!(revisions(&root, &id).await.unwrap().is_empty());
+
+        // Deleting an unknown id is reported, not silently "successful".
+        assert!(!delete(&root, "nope").await.unwrap());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn emit_renders_a_spec_case_instead_of_dead_ending() {
+        // The flagship deterministic cases carry a `spec` and no `code`. emit()
+        // used to bail on exactly those — the cases it most needed to support.
+        let root = crate::local::tmp_root();
+        let id = add_value(
+            &root,
+            serde_json::json!({
+                "title": "GET /todos responds",
+                "kind": "backend",
+                "spec": {"method": "GET", "path": "/todos", "expect_status": 200},
+            }),
+        )
+        .await
+        .unwrap();
+
+        let out = root.join("tests/test_api.py");
+        emit(&root, &id, &out).await.unwrap();
+        let src = std::fs::read_to_string(&out).unwrap();
+        assert!(src.contains("import requests"), "{src}");
+        assert!(src.contains("/todos"), "{src}");
+        assert!(src.contains("== 200"), "{src}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn emit_refuses_to_write_a_shell_command_into_a_source_file() {
+        let root = crate::local::tmp_root();
+        let id = add_value(
+            &root,
+            serde_json::json!({
+                "title": "cargo tests",
+                "kind": "command",
+                "code": "cargo test -p mycrate --lib",
+            }),
+        )
+        .await
+        .unwrap();
+
+        let err = emit(&root, &id, &root.join("tests/bar.rs"))
+            .await
+            .expect_err("a shell line is not Rust source");
+        assert!(err.to_string().contains("shell line"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[tokio::test]
     async fn add_with_explicit_id_stores_under_that_id() {
@@ -559,7 +792,9 @@ mod tests {
             error: "AssertionError: boom".to_string(),
             code: "print(1)".to_string(),
         };
-        write_result(&root, "t1", &outcome, None).await.unwrap();
+        write_result(&root, "t1", &outcome, None, TestKind::Backend)
+            .await
+            .unwrap();
 
         let result = load_result(&root, "t1").await.unwrap().unwrap();
         assert_eq!(result["passed"], false);
@@ -570,7 +805,9 @@ mod tests {
             error: String::new(),
             code: String::new(),
         };
-        write_result(&root, "t1", &ok, None).await.unwrap();
+        write_result(&root, "t1", &ok, None, TestKind::Backend)
+            .await
+            .unwrap();
 
         let latest = load_result(&root, "t1").await.unwrap().unwrap();
         assert_eq!(latest["passed"], true);
@@ -598,14 +835,20 @@ mod tests {
             error: "boom".to_string(),
             code: String::new(),
         };
-        write_result(&root, "pass", &ok, None).await.unwrap();
-        write_result(&root, "fail", &bad, None).await.unwrap();
+        write_result(&root, "pass", &ok, None, TestKind::Backend)
+            .await
+            .unwrap();
+        write_result(&root, "fail", &bad, None, TestKind::Backend)
+            .await
+            .unwrap();
 
         let reds = last_failed_ids(&root).await.unwrap();
         assert_eq!(reds, vec!["fail".to_string()]);
 
         // A later PASS on `fail` clears it — only the LATEST run counts.
-        write_result(&root, "fail", &ok, None).await.unwrap();
+        write_result(&root, "fail", &ok, None, TestKind::Backend)
+            .await
+            .unwrap();
         let reds = last_failed_ids(&root).await.unwrap();
         assert!(reds.is_empty(), "latest pass clears the red: {reds:?}");
 
@@ -622,9 +865,12 @@ mod tests {
     #[tokio::test]
     async fn emit_writes_stored_code_to_file() {
         let root = crate::local::tmp_root();
-        add_value(&root, serde_json::json!({"id":"e1","title":"T","code":"fn t() {}"}))
-            .await
-            .unwrap();
+        add_value(
+            &root,
+            serde_json::json!({"id":"e1","title":"T","code":"fn t() {}"}),
+        )
+        .await
+        .unwrap();
 
         let out = root.join("out").join("e1.rs");
         emit(&root, "e1", &out).await.unwrap();
@@ -635,6 +881,7 @@ mod tests {
 
     #[tokio::test]
     async fn emit_without_code_errors() {
+        // Neither `code` nor `spec`: there is genuinely nothing to render.
         let root = crate::local::tmp_root();
         add_value(&root, serde_json::json!({"id":"e2","title":"T"}))
             .await
@@ -642,7 +889,10 @@ mod tests {
 
         let out = root.join("e2.rs");
         let err = emit(&root, "e2", &out).await.unwrap_err();
-        assert!(err.to_string().contains("no `code` to emit"));
+        assert!(
+            err.to_string().contains("neither `code` nor `spec`"),
+            "{err}"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -658,7 +908,9 @@ mod tests {
             serde_json::json!({"id": "TC001", "title": "create"}),
             serde_json::json!({"id": "TC002", "title": "list"}),
         ];
-        let id = save_prd(&root, "instruction:todo", &prd, &plan).await.unwrap();
+        let id = save_prd(&root, "instruction:todo", &prd, &plan)
+            .await
+            .unwrap();
 
         let listed = list_prds(&root).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -669,9 +921,11 @@ mod tests {
         let loaded = load_prd(&root, &id).await.unwrap().unwrap();
         assert_eq!(loaded["prd"]["product_overview"], "a todo api");
         assert_eq!(loaded["plan"].as_array().unwrap().len(), 2);
-        assert_eq!(latest_prd_id(&root).await.unwrap().as_deref(), Some(id.as_str()));
+        assert_eq!(
+            latest_prd_id(&root).await.unwrap().as_deref(),
+            Some(id.as_str())
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
-
 }

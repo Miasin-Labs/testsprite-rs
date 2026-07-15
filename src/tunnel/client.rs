@@ -30,6 +30,7 @@ use super::protocol::{
     ControlServerMsg,
     StreamOpenRequest,
     TunnelHello,
+    TunnelTarget,
 };
 
 type ControlWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -40,6 +41,8 @@ pub struct TunnelOptions {
     pub control_url: String,
     pub tunnel_addr: String,
     pub heartbeat: Duration,
+    /// The only local target the control plane may ask us to dial.
+    pub target: TunnelTarget,
 }
 
 /// A running tunnel. `stop` aborts the background tasks.
@@ -201,10 +204,12 @@ impl TunnelClient {
             yamux::Mode::Client,
         );
 
+        let allowed = Arc::new(self.opts.target.clone());
         while let Some(stream) = futures::future::poll_fn(|cx| conn.poll_next_inbound(cx)).await {
             let stream = stream.map_err(|e| anyhow!("yamux error: {e}"))?;
+            let allowed = Arc::clone(&allowed);
             tokio::spawn(async move {
-                if let Err(e) = handle_stream(stream).await {
+                if let Err(e) = handle_stream(stream, allowed).await {
                     tracing::debug!("[TunnelClient] stream ended: {e}");
                 }
             });
@@ -223,7 +228,7 @@ impl TunnelClient {
 
 /// Handle one inbound yamux stream: read the open request, connect the local
 /// target, splice bidirectionally.
-async fn handle_stream(stream: yamux::Stream) -> Result<()> {
+async fn handle_stream(stream: yamux::Stream, allowed: Arc<TunnelTarget>) -> Result<()> {
     let mut stream = stream.compat();
     let req: StreamOpenRequest = protocol::read_frame(&mut stream).await?;
     tracing::info!(
@@ -232,6 +237,22 @@ async fn handle_stream(stream: yamux::Stream) -> Result<()> {
         req.target_host,
         req.target_port
     );
+
+    // The server chose this host:port. Dial it only if it is the app we exposed.
+    if !allowed.allows(&req.target_host, req.target_port) {
+        tracing::warn!(
+            "[TunnelClient] refusing to dial {}:{} — tunnel is authorized only for {}:{}",
+            req.target_host,
+            req.target_port,
+            allowed.host,
+            allowed.port
+        );
+        return Err(anyhow!(
+            "control server asked for a non-exposed target {}:{}",
+            req.target_host,
+            req.target_port
+        ));
+    }
 
     let target = connect_target(&req).await?;
     tracing::debug!(

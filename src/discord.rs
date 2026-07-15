@@ -17,8 +17,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateActionRow,
+    CreateAttachment,
+    CreateButton,
+    CreateCommand,
+    CreateCommandOption,
+    CreateInteractionResponse,
+    CreateInteractionResponseMessage,
+    CreateMessage,
     EditInteractionResponse,
 };
 use serenity::model::prelude::*;
@@ -48,7 +54,9 @@ struct DiscordSection {
 }
 
 fn config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join(".config/testsprite")
 }
 
@@ -200,7 +208,14 @@ impl EventHandler for Handler {
 
         let conv = msg.channel_id.to_string();
         tracing::info!("discord: message in {conv}: {}", truncate(&text, 80));
-        match crate::local::agent::message(&self.cfg.root, Some(&conv), &text, &self.cfg.model, false).await
+        match crate::local::agent::message(
+            &self.cfg.root,
+            Some(&conv),
+            &text,
+            &self.cfg.model,
+            false,
+        )
+        .await
         {
             Ok(v) => {
                 let builder = CreateMessage::new()
@@ -211,7 +226,10 @@ impl EventHandler for Handler {
                 }
             }
             Err(e) => {
-                let _ = msg.channel_id.say(&ctx.http, format!("agent error: {e}")).await;
+                let _ = msg
+                    .channel_id
+                    .say(&ctx.http, format!("agent error: {e}"))
+                    .await;
             }
         }
     }
@@ -254,7 +272,10 @@ impl Handler {
         }
 
         let conv = c.channel_id.to_string();
-        tracing::info!("discord: /{SLASH_COMMAND} in {conv}: {}", truncate(&message, 80));
+        tracing::info!(
+            "discord: /{SLASH_COMMAND} in {conv}: {}",
+            truncate(&message, 80)
+        );
         let edit = match crate::local::agent::message(
             &self.cfg.root,
             Some(&conv),
@@ -319,8 +340,10 @@ impl Handler {
     async fn render(&self, v: &Value) -> String {
         match v["kind"].as_str() {
             Some("run") => {
-                let results: Vec<Value> =
-                    v["result"]["results"].as_array().cloned().unwrap_or_default();
+                let results: Vec<Value> = v["result"]["results"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 format_run(&results)
             }
             Some("generate") => {
@@ -435,8 +458,9 @@ fn format_generate(tests: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn run_table_shows_pass_fail_error_cause_and_fix() {
@@ -458,7 +482,10 @@ mod tests {
 
     #[test]
     fn generate_list_shows_ids_and_titles() {
-        let out = format_generate(&[("TC001".into(), "First".into()), ("TC002".into(), "Second".into())]);
+        let out = format_generate(&[
+            ("TC001".into(), "First".into()),
+            ("TC002".into(), "Second".into()),
+        ]);
         assert!(out.contains("Generated 2 test(s)"));
         assert!(out.contains("`TC001` — First"));
         assert!(out.contains("`TC002` — Second"));

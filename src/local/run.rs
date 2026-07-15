@@ -8,9 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::StreamExt;
 use serde_json::Value;
 
-use crate::server::executors::{ExecCtx, Outcome};
-
-use super::{project, store, LocalTest};
+use super::{LocalTest, project, store};
+use crate::server::executors::{ExecCtx, Outcome, TestKind};
 
 const DEFAULT_TARGET: &str = "http://127.0.0.1:8080";
 
@@ -50,7 +49,10 @@ pub async fn run(
         for entry in &report {
             let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
             let title = entry.get("title").and_then(Value::as_str).unwrap_or("");
-            let passed = entry.get("passed").and_then(Value::as_bool).unwrap_or(false);
+            let passed = entry
+                .get("passed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let error = entry.get("error").and_then(Value::as_str).unwrap_or("");
             if passed {
                 println!("PASS  {id}  {title}");
@@ -190,8 +192,9 @@ pub async fn run_collect(
                         ),
                         String::new(),
                     );
-                    store::write_result(root, &t.id, &outcome, None).await?;
-                    report.push(build_entry(&t, &outcome, None, None));
+                    let kind = t.kind.unwrap_or(default_kind);
+                    store::write_result(root, &t.id, &outcome, None, kind).await?;
+                    report.push(build_entry(&t, &outcome, None, None, kind));
                 }
                 None => to_run.push(t),
             }
@@ -205,8 +208,15 @@ pub async fn run_collect(
                 }
             }
             let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
-            store::write_result(root, &t.id, &outcome, analysis.as_ref()).await?;
-            report.push(build_entry(&t, &outcome, analysis.as_ref(), fix_path.as_deref()));
+            let kind = t.kind.unwrap_or(default_kind);
+            store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
+            report.push(build_entry(
+                &t,
+                &outcome,
+                analysis.as_ref(),
+                fix_path.as_deref(),
+                kind,
+            ));
         }
     }
 
@@ -214,8 +224,15 @@ pub async fn run_collect(
     for t in teardown {
         let outcome = run_one(&t, &ctx, default_kind).await;
         let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
-        store::write_result(root, &t.id, &outcome, analysis.as_ref()).await?;
-        report.push(build_entry(&t, &outcome, analysis.as_ref(), fix_path.as_deref()));
+        let kind = t.kind.unwrap_or(default_kind);
+        store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
+        report.push(build_entry(
+            &t,
+            &outcome,
+            analysis.as_ref(),
+            fix_path.as_deref(),
+            kind,
+        ));
     }
 
     if let Some(w) = watcher {
@@ -306,7 +323,10 @@ async fn post_process(
     };
     let case = serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({ "id": t.id }));
 
-    let analysis = match client.analyze_failure(&case, &outcome.code, &outcome.error).await {
+    let analysis = match client
+        .analyze_failure(&case, &outcome.code, &outcome.error)
+        .await
+    {
         Ok(a) => Some(a),
         Err(e) => {
             tracing::warn!("failure analysis failed for {}: {e}", t.id);
@@ -315,14 +335,27 @@ async fn post_process(
     };
 
     let fix_path = if fix {
-        match client.propose_fix(&case, &outcome.code, &outcome.error).await {
-            Ok(f) => match store::write_fix(root, &t.id, &t.title, analysis.as_ref(), &f) {
-                Ok(p) => Some(p.display().to_string()),
-                Err(e) => {
-                    tracing::warn!("writing fix for {} failed: {e}", t.id);
-                    None
+        // Ground the fix in real source when the failure points at repo files;
+        // then a returned patch that passes `git apply --check` is labelled
+        // appliable, otherwise it stays an illustrative sketch.
+        let source = super::fix_context::source_context(root, &outcome.error);
+        match client
+            .propose_fix(&case, &outcome.code, &outcome.error, source.as_deref())
+            .await
+        {
+            Ok(f) => {
+                let appliable = source.is_some()
+                    && f.get("patch")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| super::fix_context::patch_applies(root, p));
+                match store::write_fix(root, &t.id, &t.title, analysis.as_ref(), &f, appliable) {
+                    Ok(p) => Some(p.display().to_string()),
+                    Err(e) => {
+                        tracing::warn!("writing fix for {} failed: {e}", t.id);
+                        None
+                    }
                 }
-            },
+            }
             Err(e) => {
                 tracing::warn!("fix proposal for {} failed: {e}", t.id);
                 None
@@ -341,6 +374,7 @@ fn build_entry(
     outcome: &Outcome,
     analysis: Option<&Value>,
     fix_path: Option<&str>,
+    kind: TestKind,
 ) -> Value {
     let mut entry = serde_json::json!({
         "id": t.id,
@@ -348,7 +382,7 @@ fn build_entry(
         "passed": outcome.passed,
         "error": outcome.error,
     });
-    let (verdict, fk) = super::verdict::classify(outcome.passed, &outcome.error);
+    let (verdict, fk) = super::verdict::classify(outcome.passed, &outcome.error, kind);
     entry["verdict"] = serde_json::json!(verdict.as_str());
     entry["failureKind"] = match fk {
         Some(k) => serde_json::json!(k),

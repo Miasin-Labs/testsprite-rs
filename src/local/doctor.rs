@@ -92,7 +92,9 @@ fn collect_checks() -> Vec<Check> {
         "docker",
         match probe("docker", &["--version"]) {
             Some(v) => Status::Ok(format!("{v} (webkit + any-browser via Docker)")),
-            None => Status::Warn("webkit executor unavailable (host browsers still work)".to_string()),
+            None => {
+                Status::Warn("webkit executor unavailable (host browsers still work)".to_string())
+            }
         },
     );
     add(
@@ -213,6 +215,9 @@ mod tests {
 
     #[test]
     fn render_text_is_status_lines() {
-        assert_eq!(render(&[check("x", "warn")], false).unwrap(), "[warn] x: d\n");
+        assert_eq!(
+            render(&[check("x", "warn")], false).unwrap(),
+            "[warn] x: d\n"
+        );
     }
 }

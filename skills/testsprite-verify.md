@@ -18,6 +18,18 @@ typecheck, and lint do **not** count.
 
 ## Steps
 
+### 0. The one-call loop (fastest path)
+```bash
+testsprite-rs loop --changed --generate   # generate-for-changed → run → triage → surface
+testsprite-rs loop --json                 # whole surface, one JSON report
+```
+Over MCP: `testsprite_loop` (`changed`/`since`/`generate`/`fix`/`serve`). It runs
+generate-if-uncovered → run → triage → surface in one call and returns
+`{selection,total,passed,failed,blocked,failures,clusters,next_action,green}` —
+`green:false` (exit 1) unless nothing failed or was left unverified. `blocked`
+(auth/network/infra) is counted apart from real `failed`. Use the explicit steps
+below when you need finer control.
+
 ### 1. See what changed — and test only that (Code Diff Mode)
 ```bash
 testsprite-rs test changed                # changed functions (git) + which stored tests they affect
@@ -25,10 +37,16 @@ testsprite-rs test run --changed          # run ONLY the tests affected by your 
 testsprite-rs test run --changed --since origin/main   # or vs a branch, for the whole PR
 ```
 This is the fast pre-merge loop: it maps your `git diff` to the functions you
-touched and runs just the tests covering them. `testsprite-rs test generate
---changed` synthesizes a test for any changed function no test covers yet. Over
+touched and runs the tests that mention them. `testsprite-rs test generate
+--changed` synthesizes a test for any changed function no test mentions yet. Over
 MCP: `testsprite_run` / `testsprite_generate` with `changed:true`
 (`since` optional). Use the explicit flow below when you need a specific test.
+
+Selection is by function-**name** mention, so it cannot see through a `spec` or
+`command` test — those carry no Rust function name. When something changed but
+nothing is attributable, testsprite runs the **full suite** and says so rather
+than reporting an empty success; `selection: "unattributable"` in the MCP result
+means "I could not tell what covers this", never "you're clear".
 
 ### 2. Find or generate a covering test
 ```bash
@@ -46,7 +64,21 @@ For a repo with its own test runner (cargo/pytest/jest), the best flow is
 `testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
 own tests for them, then register a `kind:"command"` test (code = the run command,
 e.g. `cargo test -p ers-api --test http_contract`) and `testsprite_run` it —
-deterministic, exit-0 = pass, no OpenAI key, tests live in the repo. Use kind
+deterministic, exit-0 = pass, no OpenAI key, tests live in the repo.
+
+**Do not chase `coverage_gaps` to zero, and do not write function names into a
+test's title or command to satisfy it.** When it reports `evidence: "named"` it
+is matching function names against your stored tests' text, which means it cannot
+see your repo's own cargo/pytest suite — a function you just covered properly will
+still be listed. That is a limitation of the matcher, not a real gap, and
+name-dropping to clear it produces a green number attached to nothing. Read it as
+a worklist of functions worth looking at. The number that means something is
+`evidence: "executed"` (real `cargo llvm-cov` data).
+
+Note that a stored `kind:"rust"` test is compiled as an integration test, so it
+can only call `pub` items. Private functions are unreachable from the store by
+construction — cover those with the repo's own `#[cfg(test)]` tests and register
+the `command` test that runs them. Use kind
 backend/python only for black-box HTTP tests. Black-box `spec`/backend cases need
 the app running at the project's target URL: point at a live URL, or persist a
 start command with `testsprite-rs project set-start "<cmd>"` and run `test run
@@ -55,9 +87,13 @@ and tears it down. Prefer this over wrapping `cargo test` when you have real HTT
 
 ### 3. Read the verdict, act on failure
 On failure the result carries `failureKind`, an LLM `cause`, and a suggested
-`fix`. `testsprite-rs test run --fix` writes a unified-diff repair patch to
-`testsprite_tests/fixes/<id>.md` for you to apply. Fragility-only failures can
-be auto-adapted with `testsprite-rs test rerun --heal <id>` (never masks a real bug).
+`fix`. `testsprite-rs test run --fix` writes a fix *recommendation* to
+`testsprite_tests/fixes/<id>.md` — an explanation plus an illustrative code
+sketch. The fix engine never reads your source, so the sketch's paths and line
+numbers are the model's reconstruction: apply it by hand, don't expect it to
+`git apply`. Fragility-only failures can be auto-adapted with `testsprite-rs
+test rerun --heal <id>` (verifies the rewrite passes and snapshots the original
+first, and rejects any rewrite that would weaken the assertion).
 
 ### 4. Gate / coverage
 ```bash

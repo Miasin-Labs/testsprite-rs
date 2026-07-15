@@ -1,7 +1,11 @@
 //! Visual regression: pixel-diff two PNG screenshots.
 //!
-//! Used to compare a `test run --browser <name>` screenshot against a stored
-//! baseline and flag UI regressions without any external service.
+//! A standalone comparison of two PNGs you point it at (the `visual` CLI
+//! subcommand): a baseline and a current shot. It flags UI regressions with no
+//! external service. Note: this is NOT auto-wired into `test run` and there is
+//! no managed baseline store — you supply both images (e.g. a screenshot from a
+//! `test run --browser <name>` and a saved reference); promoting a current shot
+//! to the new baseline is a manual file copy.
 
 use std::path::Path;
 

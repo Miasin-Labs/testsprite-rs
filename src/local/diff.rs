@@ -34,12 +34,22 @@ async fn load(root: &Path, id: &str) -> anyhow::Result<Summary> {
         .and_then(Value::as_str)
         .map(|s| s.to_string());
 
-    let (verdict, failure_kind) =
-        verdict::classify(passed.unwrap_or(false), error.as_deref().unwrap_or(""));
+    // Use the verdict recorded at run time rather than re-deriving it from the
+    // error text. The run knew which executor produced that text; we don't, and
+    // guessing here would classify a subprocess's output as if it were our own
+    // transport's (see `local::verdict`).
+    let verdict = value
+        .get("verdict")
+        .and_then(Value::as_str)
+        .and_then(Verdict::parse);
+    let failure_kind = value
+        .get("failureKind")
+        .and_then(Value::as_str)
+        .and_then(verdict::known_failure_kind);
 
     Ok(Summary {
         passed,
-        verdict: Some(verdict),
+        verdict,
         failure_kind,
         error,
     })

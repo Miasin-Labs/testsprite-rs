@@ -8,13 +8,30 @@
 
 use serde_json::{Value, json};
 
+use crate::server::engine::{Band, Expect};
+
 /// One extracted HTTP endpoint (path only — the host comes from the target URL).
 struct Endpoint {
     method: String,
     path: String,
     body: Option<Value>,
-    expect_status: Option<u16>,
+    expect_status: Expect,
     name: String,
+}
+
+/// The pass criterion for an imported endpoint whose response status the doc
+/// does not pin down.
+///
+/// Reads must simply succeed. Writes get the wider [`Band::Accepted`] because
+/// the body we send is a best-effort reconstruction and the server rejecting it
+/// (400/422) still proves the route exists and is wired. Neither band accepts
+/// 401/403/404/405: an endpoint that is missing or auth-walled is a failure,
+/// which is the entire reason to import the doc.
+fn expect_for(method: &str) -> Expect {
+    match method {
+        "POST" | "PUT" | "PATCH" => Expect::Band(Band::Accepted),
+        _ => Expect::Band(Band::Success),
+    }
 }
 
 /// The result of parsing a structured API doc.
@@ -125,9 +142,25 @@ fn postman_path(url: &Value) -> Option<String> {
 /// a doc so real passwords/tokens/cookies never land in the stored case (or an
 /// exported, git-committed test). Inject real values via `variables.json`.
 const SECRET_KEYS: &[&str] = &[
-    "password", "passwd", "pwd", "token", "secret", "authorization", "api_key",
-    "apikey", "access_token", "refresh_token", "session", "cookie", "credential",
-    "client_secret", "private_key", "ssn", "credit_card", "card_number", "cvv",
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "secret",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "session",
+    "cookie",
+    "credential",
+    "client_secret",
+    "private_key",
+    "ssn",
+    "credit_card",
+    "card_number",
+    "cvv",
 ];
 
 /// Recursively mask values whose key looks secret (`{"password":"***"}`).
@@ -136,7 +169,8 @@ fn redact(v: &mut Value) {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
                 let kl = k.to_lowercase();
-                if SECRET_KEYS.iter().any(|s| kl.contains(s)) && !val.is_object() && !val.is_array() {
+                if SECRET_KEYS.iter().any(|s| kl.contains(s)) && !val.is_object() && !val.is_array()
+                {
                     *val = Value::String("***".to_string());
                 } else {
                     redact(val);
@@ -161,7 +195,9 @@ fn postman_endpoints(v: &Value) -> Vec<Endpoint> {
                 walk(children, out);
                 continue;
             }
-            let Some(req) = it.get("request") else { continue };
+            let Some(req) = it.get("request") else {
+                continue;
+            };
             let method = req
                 .get("method")
                 .and_then(Value::as_str)
@@ -170,13 +206,21 @@ fn postman_endpoints(v: &Value) -> Vec<Endpoint> {
             let Some(path) = req.get("url").and_then(postman_path) else {
                 continue;
             };
-            let body = body_from(req.get("body").and_then(|b| b.get("raw")).and_then(Value::as_str));
-            let name = it.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            let body = body_from(
+                req.get("body")
+                    .and_then(|b| b.get("raw"))
+                    .and_then(Value::as_str),
+            );
+            let name = it
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             out.push(Endpoint {
+                expect_status: expect_for(&method),
                 method,
                 path,
                 body,
-                expect_status: None,
                 name,
             });
         }
@@ -196,7 +240,9 @@ fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
         return out;
     };
     for (path, methods) in paths {
-        let Some(mobj) = methods.as_object() else { continue };
+        let Some(mobj) = methods.as_object() else {
+            continue;
+        };
         for (method, op) in mobj {
             let m = method.to_uppercase();
             if !HTTP_METHODS.contains(&m.as_str()) {
@@ -204,19 +250,23 @@ fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
             }
             let is_write = matches!(m.as_str(), "POST" | "PUT" | "PATCH");
             // Synthesize/lift a body for write methods so POST/PUT don't send an
-            // empty payload (-> spurious 400/422). For writes we also relax the
-            // expected status: our best-effort body may not pass validation, so
-            // accept any non-5xx (a 5xx is still a real failure).
+            // empty payload (-> spurious 400/422).
             let body = if is_write { openapi_body(op, v) } else { None };
-            let expect_status = if is_write {
-                None
-            } else {
-                op.get("responses").and_then(Value::as_object).and_then(|r| {
+            // Prefer the status the doc declares; otherwise fall back to a band.
+            // Writes stay lenient about validation (our body is a guess) but,
+            // like reads, still fail on 401/403/404/405.
+            let declared = op
+                .get("responses")
+                .and_then(Value::as_object)
+                .and_then(|r| {
                     r.keys()
                         .filter_map(|k| k.parse::<u16>().ok())
                         .filter(|s| (200..300).contains(s))
                         .min()
-                })
+                });
+            let expect_status = match declared {
+                Some(s) if !is_write => Expect::Exact(s),
+                _ => expect_for(&m),
             };
             let name = op
                 .get("summary")
@@ -326,7 +376,9 @@ fn har_endpoints(v: &Value) -> Vec<Endpoint> {
     };
     let mut seen = std::collections::BTreeSet::new();
     for e in entries {
-        let Some(req) = e.get("request") else { continue };
+        let Some(req) = e.get("request") else {
+            continue;
+        };
         let method = req
             .get("method")
             .and_then(Value::as_str)
@@ -344,11 +396,25 @@ fn har_endpoints(v: &Value) -> Vec<Endpoint> {
                 .and_then(|p| p.get("text"))
                 .and_then(Value::as_str),
         );
+        // A HAR records what the server actually answered, so pin the
+        // expectation to it — but only when the capture succeeded. Replaying a
+        // capture that itself 401'd or 404'd should not enshrine that as the
+        // expected result; fall back to the band and let it fail loudly.
+        let recorded = e
+            .get("response")
+            .and_then(|r| r.get("status"))
+            .and_then(Value::as_u64)
+            .map(|s| s as u16)
+            .filter(|s| (200..400).contains(s));
+        let expect_status = match recorded {
+            Some(s) => Expect::Exact(s),
+            None => expect_for(&method),
+        };
         out.push(Endpoint {
             method,
             path,
             body,
-            expect_status: None,
+            expect_status,
             name: String::new(),
         });
     }
@@ -364,9 +430,7 @@ fn build(format: &'static str, endpoints: &[Endpoint]) -> Extracted {
             if let Some(b) = &e.body {
                 spec["body"] = b.clone();
             }
-            if let Some(s) = e.expect_status {
-                spec["expect_status"] = json!(s);
-            }
+            spec["expect_status"] = json!(e.expect_status);
             let label = if e.name.is_empty() {
                 format!("{} {}", e.method, e.path)
             } else {
@@ -375,7 +439,12 @@ fn build(format: &'static str, endpoints: &[Endpoint]) -> Extracted {
             json!({
                 "id": format!("TC{:03}", i + 1),
                 "title": format!("{} {}", e.method, e.path),
-                "description": format!("{label} — send {} {} and verify a non-error response.", e.method, e.path),
+                "description": format!(
+                    "{label} — send {} {} and verify {}.",
+                    e.method,
+                    e.path,
+                    e.expect_status.describe()
+                ),
                 "kind": "backend",
                 "spec": spec,
             })
@@ -393,7 +462,12 @@ fn synth_prd(format: &str, endpoints: &[Endpoint]) -> Value {
     use std::collections::BTreeMap;
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in endpoints {
-        let seg = e.path.trim_start_matches('/').split('/').next().unwrap_or("");
+        let seg = e
+            .path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("");
         let feature = if seg.is_empty() { "root" } else { seg };
         groups
             .entry(feature.to_string())
@@ -462,9 +536,17 @@ mod tests {
         let ex = extract(doc).unwrap();
         assert_eq!(ex.format, "openapi");
         assert_eq!(ex.cases.len(), 3);
-        let health = ex.cases.iter().find(|c| c["spec"]["path"] == "/health").unwrap();
+        let health = ex
+            .cases
+            .iter()
+            .find(|c| c["spec"]["path"] == "/health")
+            .unwrap();
         assert_eq!(health["spec"]["expect_status"], 200);
-        let del = ex.cases.iter().find(|c| c["spec"]["method"] == "DELETE").unwrap();
+        let del = ex
+            .cases
+            .iter()
+            .find(|c| c["spec"]["method"] == "DELETE")
+            .unwrap();
         assert_eq!(del["spec"]["expect_status"], 204);
         // PRD is synthesized with features grouped by first segment.
         assert!(ex.prd["features"].as_array().unwrap().len() >= 2);
@@ -492,7 +574,63 @@ mod tests {
         assert_eq!(post["spec"]["body"]["name"], "string");
         assert_eq!(post["spec"]["body"]["age"], 1);
         assert_eq!(post["spec"]["body"]["password"], "***");
-        assert!(post["spec"].get("expect_status").is_none());
+        // A synthesized body may fail validation, so writes tolerate 400/422 —
+        // but the relaxation stops there. A missing or auth-walled route is
+        // still a failure, never a pass.
+        assert_eq!(post["spec"]["expect_status"], "accepted");
+    }
+
+    #[test]
+    fn imported_endpoints_never_pass_on_missing_or_auth_walled_routes() {
+        // Regression: `expect_status` used to default to "any status < 500", so
+        // a renamed route (404), an auth wall (401/403), or a rejected request
+        // reported PASS and the whole imported suite went green against a wall
+        // of errors.
+        let doc = r#"{"info": {}, "item": [
+          {"name": "list", "request": {"method": "GET", "url": {"path": ["todos"]}}},
+          {"name": "create", "request": {"method": "POST", "url": {"path": ["todos"]},
+           "body": {"raw": "{\"title\":\"x\"}"}}}
+        ]}"#;
+        let ex = extract(doc).unwrap();
+        for case in &ex.cases {
+            let spec: crate::server::engine::EndpointSpec =
+                serde_json::from_value(case["spec"].clone()).unwrap();
+            for status in [401, 403, 404, 405, 500] {
+                assert!(
+                    !spec.expect_status.accepts(status),
+                    "{} {} must not pass on {status}",
+                    spec.method,
+                    spec.path
+                );
+            }
+            assert!(spec.expect_status.accepts(200));
+        }
+    }
+
+    #[test]
+    fn har_pins_the_expectation_to_the_recorded_status() {
+        let doc = r#"{"log": {"entries": [
+          {"request": {"method": "GET", "url": "https://api.example.com/todos"},
+           "response": {"status": 200}},
+          {"request": {"method": "GET", "url": "https://api.example.com/secret"},
+           "response": {"status": 401}}
+        ]}}"#;
+        let ex = extract(doc).unwrap();
+        assert_eq!(ex.format, "har");
+        let todos = ex
+            .cases
+            .iter()
+            .find(|c| c["spec"]["path"] == "/todos")
+            .unwrap();
+        assert_eq!(todos["spec"]["expect_status"], 200);
+        // A capture that itself 401'd must not enshrine 401 as the expectation —
+        // replaying it should fail loudly, not assert the auth wall is correct.
+        let secret = ex
+            .cases
+            .iter()
+            .find(|c| c["spec"]["path"] == "/secret")
+            .unwrap();
+        assert_eq!(secret["spec"]["expect_status"], "success");
     }
 
     #[test]

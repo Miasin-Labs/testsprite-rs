@@ -1,17 +1,21 @@
 //! `project` table lifecycle (single row, id=1): init, load, show.
 
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 
-use crate::server::executors::TestKind;
-
 use super::Project;
+use crate::server::executors::TestKind;
 
 /// Create the database (if needed) and upsert the single project row.
 /// Returns the path to the SQLite database file.
-pub async fn init(root: &Path, kind: TestKind, name: &str, url: Option<&str>) -> anyhow::Result<PathBuf> {
+pub async fn init(
+    root: &Path,
+    kind: TestKind,
+    name: &str,
+    url: Option<&str>,
+) -> anyhow::Result<PathBuf> {
     let pool = crate::local::db::open(root).await?;
 
     let kind_str = serde_json::to_value(kind)?
@@ -41,7 +45,9 @@ pub async fn load(root: &Path) -> anyhow::Result<Project> {
             .await?;
 
     match row {
-        None => Err(anyhow!("no project — run `testsprite-rs project init` first")),
+        None => Err(anyhow!(
+            "no project — run `testsprite-rs project init` first"
+        )),
         Some((name, kind_str, target_url, start_command)) => Ok(Project {
             name,
             kind: TestKind::parse(&kind_str),
@@ -120,9 +126,14 @@ mod tests {
     #[tokio::test]
     async fn init_then_load_round_trips_with_url() {
         let root = crate::local::tmp_root();
-        init(&root, TestKind::Backend, "my-app", Some("http://localhost:3000"))
-            .await
-            .unwrap();
+        init(
+            &root,
+            TestKind::Backend,
+            "my-app",
+            Some("http://localhost:3000"),
+        )
+        .await
+        .unwrap();
 
         let project = load(&root).await.unwrap();
         assert_eq!(project.name, "my-app");
@@ -157,7 +168,9 @@ mod tests {
     async fn init_twice_keeps_one_row() {
         let root = crate::local::tmp_root();
         init(&root, TestKind::Backend, "first", None).await.unwrap();
-        init(&root, TestKind::Frontend, "second", Some("http://x")).await.unwrap();
+        init(&root, TestKind::Frontend, "second", Some("http://x"))
+            .await
+            .unwrap();
 
         let pool = crate::local::db::open(&root).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM project")

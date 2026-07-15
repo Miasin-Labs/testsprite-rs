@@ -16,7 +16,7 @@ use std::process::Command;
 use anyhow::Context;
 use serde::Serialize;
 
-use super::coverage::{mentions, structural_surface, test_haystack, Unit};
+use super::coverage::{Unit, mentions, structural_surface, test_haystack};
 
 /// The changed surface computed from a git diff.
 #[derive(Debug, Clone, Serialize)]
@@ -84,7 +84,10 @@ fn attribute(units_in_file: &[&Unit], changed_lines: &[usize]) -> (Vec<Unit>, bo
             None => top_level = true,
         }
     }
-    (hit.into_iter().map(|i| sorted[i].clone()).collect(), top_level)
+    (
+        hit.into_iter().map(|i| sorted[i].clone()).collect(),
+        top_level,
+    )
 }
 
 /// Run `git ls-files --others --exclude-standard` at `root` for untracked files.
@@ -177,8 +180,44 @@ pub fn changed_surface(root: &Path, since: &str) -> anyhow::Result<ChangedSurfac
     })
 }
 
+/// What `--changed` could conclude about which stored tests to run.
+///
+/// The distinction that matters is between [`Selection::NoChanges`] ("nothing
+/// to verify") and [`Selection::Unattributable`] ("something changed and I
+/// cannot tell you what covers it"). Collapsing the second into the first is
+/// how a pre-merge check reports success having executed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selection {
+    /// Nothing testable changed since the ref.
+    NoChanges,
+    /// The changed functions map onto these stored tests.
+    Affected(Vec<String>),
+    /// Source changed, but no stored test could be attributed to any of it.
+    /// Attribution is by name mention (see [`affected_test_ids`]), which cannot
+    /// see through a `spec` or `command` test — those carry no Rust function
+    /// name to match. So this means "unknown", never "nothing to do".
+    Unattributable { changed_units: usize },
+}
+
+/// Resolve a changed surface to a [`Selection`].
+pub async fn select(root: &Path, changed: &ChangedSurface) -> anyhow::Result<Selection> {
+    if changed.units.is_empty() && changed.file_level.is_empty() {
+        return Ok(Selection::NoChanges);
+    }
+    let ids = affected_test_ids(root, changed).await?;
+    if ids.is_empty() {
+        return Ok(Selection::Unattributable {
+            changed_units: changed.units.len(),
+        });
+    }
+    Ok(Selection::Affected(ids))
+}
+
 /// Stored test ids whose text mentions any changed unit, sorted and deduped.
-pub async fn affected_test_ids(root: &Path, changed: &ChangedSurface) -> anyhow::Result<Vec<String>> {
+pub async fn affected_test_ids(
+    root: &Path,
+    changed: &ChangedSurface,
+) -> anyhow::Result<Vec<String>> {
     let names: Vec<&str> = changed.units.iter().map(|u| u.name.as_str()).collect();
     let tests = super::store::list(root).await?;
     let mut ids = Vec::new();
@@ -195,7 +234,10 @@ pub async fn affected_test_ids(root: &Path, changed: &ChangedSurface) -> anyhow:
 
 /// Changed units not mentioned by any stored test — the `generate --changed`
 /// targets (don't regenerate tests for functions already covered).
-pub async fn uncovered_changed_units(root: &Path, changed: &ChangedSurface) -> anyhow::Result<Vec<Unit>> {
+pub async fn uncovered_changed_units(
+    root: &Path,
+    changed: &ChangedSurface,
+) -> anyhow::Result<Vec<Unit>> {
     let tests = super::store::list(root).await?;
     let hays: Vec<String> = tests.iter().map(test_haystack).collect();
     Ok(changed
@@ -229,7 +271,10 @@ pub async fn changed_report(root: &Path, since: &str, json: bool) -> anyhow::Res
             println!("  ~ {}  ({}:{})", u.name, u.file, u.line);
         }
         if !changed.file_level.is_empty() {
-            println!("  top-level/unparsed changes in: {}", changed.file_level.join(", "));
+            println!(
+                "  top-level/unparsed changes in: {}",
+                changed.file_level.join(", ")
+            );
         }
         println!(
             "affected tests: {}",
@@ -294,5 +339,87 @@ mod tests {
         let (hit, _) = attribute(&units, &[9]);
         assert_eq!(hit.len(), 1);
         assert_eq!(hit[0].name, "alpha");
+    }
+
+    fn surface(units: Vec<Unit>) -> ChangedSurface {
+        ChangedSurface {
+            since: "HEAD".into(),
+            files: vec!["f.rs".into()],
+            units,
+            file_level: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_changed_is_distinct_from_nothing_attributable() {
+        let root = crate::local::tmp_root();
+
+        // Nothing changed at all: reporting success is honest here.
+        let empty = ChangedSurface {
+            since: "HEAD".into(),
+            files: Vec::new(),
+            units: Vec::new(),
+            file_level: Vec::new(),
+        };
+        assert_eq!(select(&root, &empty).await.unwrap(), Selection::NoChanges);
+
+        // A function changed and NO stored test mentions it. This must not
+        // collapse into NoChanges — that is how the pre-merge check reported
+        // success having executed nothing.
+        assert_eq!(
+            select(&root, &surface(vec![u("compute_totals", 5)]))
+                .await
+                .unwrap(),
+            Selection::Unattributable { changed_units: 1 }
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_spec_test_is_never_attributable_to_a_changed_rust_fn() {
+        // The matcher keys on the test's own text, and a backend spec case is
+        // {method, path, expect_status} — it carries no Rust function name. So
+        // editing a handler selects nothing, which is exactly why
+        // Unattributable must not be reported as an empty success.
+        let root = crate::local::tmp_root();
+        crate::local::store::add_value(
+            &root,
+            serde_json::json!({
+                "title": "GET /todos responds",
+                "kind": "backend",
+                "spec": {"method": "GET", "path": "/todos"},
+            }),
+        )
+        .await
+        .unwrap();
+
+        let selection = select(&root, &surface(vec![u("list_todos_handler", 5)]))
+            .await
+            .unwrap();
+        assert_eq!(selection, Selection::Unattributable { changed_units: 1 });
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_test_mentioning_the_changed_fn_is_selected() {
+        let root = crate::local::tmp_root();
+        let id = crate::local::store::add_value(
+            &root,
+            serde_json::json!({
+                "title": "compute_totals sums the book",
+                "code": "assert_eq!(compute_totals(&[]), 0);",
+            }),
+        )
+        .await
+        .unwrap();
+
+        let selection = select(&root, &surface(vec![u("compute_totals", 5)]))
+            .await
+            .unwrap();
+        assert_eq!(selection, Selection::Affected(vec![id]));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -30,26 +30,76 @@ impl Executor for McpExecutor {
         let code = serde_json::to_string_pretty(&call).unwrap_or_default();
 
         match probe_tool(&ctx.target, &call).await {
-            Ok(resp) => evaluate(&resp, code),
+            Ok(probe) => {
+                // A server that failed to initialize never dispatched anything,
+                // so whatever came back for the call says nothing about how it
+                // handles the payload.
+                if let Some(err) = probe.init.as_ref().and_then(|i| i.get("error")) {
+                    return Outcome::fail(format!("MCP server failed to initialize: {err}"), code);
+                }
+                evaluate(&probe.call, code)
+            }
             Err(e) => Outcome::fail(format!("server did not respond cleanly: {e}"), code),
         }
     }
 }
 
-/// A malformed/edge payload PASSES if the server replies with a structured
-/// JSON-RPC response (result, or an error/isError) — i.e. it handled the bad
-/// input gracefully. It FAILS only if the server crashed or returned non-JSON.
-fn evaluate(resp: &Value, code: String) -> Outcome {
-    if resp.get("result").is_some() || resp.get("error").is_some() {
-        Outcome::pass(code)
-    } else {
-        Outcome::fail("response missing both `result` and `error`", code)
+/// JSON-RPC errors that mean the server rejected THE CALL rather than handling
+/// our edge-case payload.
+///
+/// `-32601` (method not found) is the one that matters: fuzzing a tool name the
+/// server doesn't export returns it for every single case, and counting that as
+/// "handled gracefully" scores a server that rejects everything at 100%.
+/// `-32600`/`-32700` mean our own framing was malformed — a harness bug, not a
+/// result. `-32603` (internal error) is an unhandled failure, which is exactly
+/// what a fuzz case is looking for.
+fn rejected_the_call(code: i64) -> Option<&'static str> {
+    match code {
+        -32601 => Some(
+            "method not found — the server does not export this tool, so the payload was never exercised",
+        ),
+        -32600 => Some("invalid request — the server rejected our JSON-RPC framing"),
+        -32700 => Some("parse error — the server could not parse our JSON-RPC framing"),
+        -32603 => Some("internal error — the server did not handle the payload"),
+        _ => None,
     }
 }
 
-/// Spawn the MCP server command, perform `initialize`, send `call`, read the
-/// matching response line. `target` is a shell-style command string.
-async fn probe_tool(target: &str, call: &Value) -> anyhow::Result<Value> {
+/// A malformed/edge payload PASSES when the server *handled* it: a structured
+/// result (including a tool-level `isError`), or a clean rejection of the
+/// arguments (`-32602 invalid params`, or an application-defined error).
+///
+/// It FAILS when the server crashed, returned non-JSON, blew up internally, or
+/// never dispatched to the tool at all.
+fn evaluate(resp: &Value, code: String) -> Outcome {
+    if resp.get("result").is_some() {
+        return Outcome::pass(code);
+    }
+    let Some(err) = resp.get("error") else {
+        return Outcome::fail("response missing both `result` and `error`", code);
+    };
+    match err.get("code").and_then(Value::as_i64) {
+        Some(n) => match rejected_the_call(n) {
+            Some(why) => Outcome::fail(format!("JSON-RPC error {n}: {why}"), code),
+            // -32602 invalid params, or a server-defined error: the server
+            // validated our payload and said no. That is graceful handling.
+            None => Outcome::pass(code),
+        },
+        None => Outcome::fail("JSON-RPC error object has no `code`", code),
+    }
+}
+
+/// The two responses a probe collects.
+struct Probe {
+    /// The `initialize` response (id=0), if the server sent one.
+    init: Option<Value>,
+    /// The `tools/call` response (id=1).
+    call: Value,
+}
+
+/// Spawn the MCP server command, perform `initialize`, send `call`, and read
+/// both matching response lines. `target` is a shell-style command string.
+async fn probe_tool(target: &str, call: &Value) -> anyhow::Result<Probe> {
     let mut parts = shell_split(target);
     if parts.is_empty() {
         anyhow::bail!("empty MCP target command");
@@ -79,16 +129,21 @@ async fn probe_tool(target: &str, call: &Value) -> anyhow::Result<Value> {
     write_line(&mut stdin, &init).await?;
     write_line(&mut stdin, call).await?;
 
-    // Read lines until we see the response to id=1 (the tools/call), with a cap.
+    // Read lines until we see the response to id=1 (the tools/call), keeping the
+    // id=0 (initialize) response along the way, with a cap.
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut init = None;
         while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(&line)
-                && v.get("id").and_then(|i| i.as_i64()) == Some(1)
-            {
-                return Ok(v);
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            match v.get("id").and_then(|i| i.as_i64()) {
+                Some(0) => init = Some(v),
+                Some(1) => return Ok(Probe { init, call: v }),
+                _ => {}
             }
         }
         anyhow::bail!("no response for tools/call before stream closed")
@@ -129,4 +184,60 @@ fn shell_split(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eval(resp: Value) -> Outcome {
+        evaluate(&resp, String::new())
+    }
+
+    #[test]
+    fn a_structured_result_is_graceful_handling() {
+        assert!(eval(json!({"id": 1, "result": {"content": []}})).passed);
+        // A tool-level error is still the server handling the input.
+        assert!(eval(json!({"id": 1, "result": {"isError": true}})).passed);
+    }
+
+    #[test]
+    fn cleanly_rejected_arguments_are_graceful_handling() {
+        // -32602 is precisely what a fuzz case wants to see: the server
+        // validated the edge-case payload and said no.
+        assert!(
+            eval(json!({"id": 1, "error": {"code": -32602, "message": "invalid params"}})).passed
+        );
+        // Application-defined errors are handled too.
+        assert!(eval(json!({"id": 1, "error": {"code": -32000, "message": "nope"}})).passed);
+    }
+
+    #[test]
+    fn method_not_found_is_not_a_pass() {
+        // Regression: `pass iff result OR error` meant fuzzing a tool name the
+        // server does not export returned -32601 for every case and scored
+        // 100%. A server that rejects everything must not look perfect.
+        let out = eval(json!({"id": 1, "error": {"code": -32601, "message": "method not found"}}));
+        assert!(!out.passed);
+        assert!(
+            out.error.contains("does not export this tool"),
+            "{}",
+            out.error
+        );
+    }
+
+    #[test]
+    fn internal_errors_and_bad_framing_are_not_passes() {
+        // An unhandled server-side blowup is the bug a fuzz case hunts for.
+        assert!(!eval(json!({"id": 1, "error": {"code": -32603, "message": "boom"}})).passed);
+        // These indicate our own framing is wrong — a harness bug, not a result.
+        assert!(!eval(json!({"id": 1, "error": {"code": -32600}})).passed);
+        assert!(!eval(json!({"id": 1, "error": {"code": -32700}})).passed);
+    }
+
+    #[test]
+    fn a_response_with_neither_result_nor_error_fails() {
+        assert!(!eval(json!({"id": 1})).passed);
+        // An error object with no code cannot be classified.
+        assert!(!eval(json!({"id": 1, "error": {"message": "?"}})).passed);
+    }
 }
