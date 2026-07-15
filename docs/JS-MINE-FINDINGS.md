@@ -65,6 +65,8 @@ retryFailedAgents, reconfigure}`), `/frontend/{fpId}/test/{id}/{run,rerun}`
 | `manualGate` before run | ✅ built: agent approval gate | already built |
 | `verdict` / `failureKind` / `fixKind` | ✅ built: `verdict::classify` | already built (see V3-CONTRACT.md) |
 | **`/backend/rerun {skipDependencies}`** | ⏳ **G4 target** (dependency waves `--produces`/`--needs`) | confirms G4 is real; not new |
+| **`/frontend/plan {retryFailedAgents}`** (rerun only failed) | ⏳ **G4-forward** — local `test rerun --failed` (replay only tests whose latest run failed, read from the `runs` table) | locally buildable, not yet built |
+| **`maxTestList` / `maxTestListSize`** (from `/user/me`) | ⏳ **G4 target** (test lists / grouping) | confirms G4 test-lists; not new |
 | `/project/search`, `/stats`, sort/order/filter | list-all locally (no paging) | cloud UX; local `test list` covers it |
 | Orgs / billing / invoices / members / invitations | ❌ deliberately not built (cloud SaaS) | cloud-only, per V3-CONTRACT.md |
 | Project "resources" (GitHub/Linear/design/crawl/env/docs) | ❌ deliberately not built | cloud-only |
@@ -81,8 +83,10 @@ JS maps to one of three buckets:
    agent-conversation design: their `/v3/agent/conversations` +
    `/pending-actions/{id}/{confirm,reject}` is the exact shape of our local
    `agent::message` → pending action → `agent::resolve`.
-2. **Already planned (G4)** — `/backend/rerun {skipDependencies}` is the
-   dependency-wave/closure behavior G4 will implement locally.
+2. **Already planned (G4)** — `/backend/rerun {skipDependencies}` (dependency
+   waves), `/frontend/plan {retryFailedAgents}` (a local `test rerun --failed`
+   that replays only last-failed tests from the `runs` table), and `maxTestList`
+   (test lists/grouping) are all locally buildable and carried into G4.
 3. **Cloud-only SaaS, deliberately excluded** — orgs, billing, project
    resources, integrations, step recording, feature flags. Local shells would be
    non-functional stubs (already stated in V3-CONTRACT.md's "Deliberately NOT
