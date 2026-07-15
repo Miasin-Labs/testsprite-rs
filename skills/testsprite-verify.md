@@ -18,10 +18,17 @@ typecheck, and lint do **not** count.
 
 ## Steps
 
-### 1. See what changed
+### 1. See what changed — and test only that (Code Diff Mode)
 ```bash
-git diff --stat        # then read the changed files
+testsprite-rs test changed                # changed functions (git) + which stored tests they affect
+testsprite-rs test run --changed          # run ONLY the tests affected by your uncommitted changes
+testsprite-rs test run --changed --since origin/main   # or vs a branch, for the whole PR
 ```
+This is the fast pre-merge loop: it maps your `git diff` to the functions you
+touched and runs just the tests covering them. `testsprite-rs test generate
+--changed` synthesizes a test for any changed function no test covers yet. Over
+MCP: `testsprite_local_run` / `testsprite_local_generate` with `changed:true`
+(`since` optional). Use the explicit flow below when you need a specific test.
 
 ### 2. Find or generate a covering test
 ```bash

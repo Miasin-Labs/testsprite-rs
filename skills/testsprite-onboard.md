@@ -30,6 +30,7 @@ testsprite-rs project init --type backend --name "<repo>" --url <base-url>
 ```bash
 testsprite-rs test generate --instruction "cover <the key behaviors you found>"
 testsprite-rs test generate --cover        # one test per currently-uncovered function
+testsprite-rs test generate --doc README.md   # distill a PRD from a README/notes/spec, then plan
 ```
 Or from your coding agent over MCP: **`testsprite_local_generate`**. If you (the
 coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
@@ -59,7 +60,8 @@ Or **`testsprite_local_run`** over MCP. Each result carries `verdict`
 
 ### 5. Report
 Tell the user plainly: "N tests covering <flows>; smoke-ran M — <pass/fail>; run
-the rest with `testsprite-rs test run` or gate CI with `testsprite-rs gate`."
+the rest with `testsprite-rs test run`, or gate CI with `testsprite-rs gate`
+(`testsprite-rs ci init` drops a ready pull_request workflow)."
 
 ## Don'ts
 - Don't write narrative assertions an AI judge can rubber-stamp.
