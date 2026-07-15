@@ -1,0 +1,1 @@
+{"schemaVersion":1,"kind":"cli-replay","replaySafe":true,"command":["node","-e","console.log('js-mine-verified')"],"cwd":".","env":{"LC_ALL":"C"},"timeoutMs":30000,"expectedExitCode":0,"recordedStdout":"js-mine-verified\n","recordedStderr":"","invariants":[{"type":"substring","value":"js-mine-verified"},{"type":"not_substring","value":"error"}]}

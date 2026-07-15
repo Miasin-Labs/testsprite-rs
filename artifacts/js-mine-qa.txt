@@ -1,0 +1,145 @@
+JS-MINE-FINDINGS.md QA — Goal G002
+Date: 2026-07-15
+Reviewer: 23-G002-QA (Executor)
+
+=== 1. Endpoint reality check ===
+Dump root: ~/VulnerabilityResearch/testspite/dump-0715/pretty/www.testsprite.com/_next/static/chunks/
+(143 chunk files)
+
+$ grep -ro '"/v3/agent/conversations[^"]*"' .
+./4116-bc6521e5b23a376d.js.pretty:"/v3/agent/conversations"
+./4116-bc6521e5b23a376d.js.pretty:"/v3/agent/conversations/"
+=> FOUND (matches doc)
+
+$ grep -ro '"/v3/agent/pending-actions[^"]*"'
+./4116-bc6521e5b23a376d.js.pretty:"/v3/agent/pending-actions/"
+=> FOUND. Context (line 293/305 of same file):
+   ApiRequest.post("/v3/agent/pending-actions/".concat(e,"/confirm"), {...})
+   ApiRequest.post("/v3/agent/pending-actions/".concat(e,"/reject"), {...})
+=> Confirms doc's "(id)/confirm" + "(id)/reject" claim exactly, with the
+   {id} interpolation shown via string concat, matching doc's `{id}` notation.
+
+$ grep -n "backend/rerun" 8600-afca7a272d0cdefd.js.pretty
+315:  o.ApiRequest.post("/project/".concat(t,"/backend/rerun"),{
+316:  testIds:e,skipDependencies:n.skipDependencies
+=> FOUND. Body shape {testIds, skipDependencies} matches doc verbatim.
+
+$ grep -ro '"/v3/org/members[^"]*"'
+./4116-bc6521e5b23a376d.js.pretty:"/v3/org/members"
+./4116-bc6521e5b23a376d.js.pretty:"/v3/org/members/"
+=> FOUND (matches doc)
+
+$ grep -rl "feature-flags"
+./app/dashboard/layout-ba7cf9aad5b7d559.js.pretty:"/feature-flags"
+./app/layout-522f7647540a272b.js.pretty:"/feature-flags"
+=> FOUND (matches doc)
+
+$ grep -ro 'v2/frontend-test[^"'"'"']*'
+./4116-bc6521e5b23a376d.js.pretty:v2/frontend-test/
+=> FOUND (matches doc, GET /v2/frontend-test/{id}/steps family)
+
+Additional spot-checks (autoHeal / manualGate literal shapes):
+8600-afca7a272d0cdefd.js.pretty:467:  testIds:e.map(t=>t.id),autoHeal:!0===n.autoHeal
+8600-afca7a272d0cdefd.js.pretty:555:  autoHeal:!0===a.autoHeal
+=> autoHeal literal confirmed twice (rerun + wizard-rerun paths), matching doc.
+
+VERDICT endpoints-real: PASSED. All 6 sampled endpoints (+2 bonus literal
+checks) are verifiably present in the dump with matching body shapes.
+No fabricated endpoint found in the sampled set.
+
+=== 2. "Already built" claims vs src/ ===
+
+$ grep -n "pub async fn message" src/local/agent.rs
+16:pub async fn message(
+=> agent::message EXISTS (proposes one action for approval, per doc comment
+   at line 15: "action for the caller to approve/reject via [`resolve`]").
+
+$ grep -n "pub async fn resolve" src/local/agent.rs
+188:pub async fn resolve(
+   Signature: resolve(root, conversation_id, action_id, approve: bool, model)
+   Body (lines 211-225): if !approve -> marks pending_actions.status='rejected',
+   inserts "Skipped." message, returns {status:"rejected"}.
+   else -> executes generate/run pipeline (lines 229+).
+=> agent::resolve EXISTS and implements the confirm/reject branch exactly
+   as claimed (single function, `approve: bool` param = confirm/reject).
+
+$ grep -n "pub async fn history" src/local/agent.rs
+287:pub async fn history(root: &Path, conversation_id: &str) -> Result<Value>
+=> agent::history EXISTS (doc mentions it in the MCP tool list, consistent).
+
+$ grep -n "heal" src/local/rerun.rs
+1-2: module doc: "auto-healing fragility failures via the LLM"
+16-25: pub async fn rerun(... heal: bool ...)
+95: if heal && v.as_deref() == Some("fragility") && ... c.heal_test(...)
+=> rerun --heal / autoHeal claim CONFIRMED: gated strictly to fragility
+   verdicts (never bug/env), matches doc's "(fragility-only)" qualifier.
+
+$ grep -n "pub fn classify" src/local/verdict.rs
+26:pub fn classify(passed: bool, error: &str) -> (Verdict, Option<&'static str>)
+=> verdict::classify EXISTS, returns (Verdict, Option<failureKind>) — matches
+   doc's "verdict::classify" / "failureKind" claim and V3-CONTRACT.md.
+
+$ grep -n "testsprite_agent_" src/mcp.rs
+58:  "testsprite_agent_message"   (tool name + description)
+61:  "testsprite_agent_approve"   (approve/reject a pending action)
+64:  "testsprite_agent_history"
+197: match "testsprite_agent_message" => ...
+210: match "testsprite_agent_approve" => ...
+227: match "testsprite_agent_history" => ...
+=> testsprite_agent_* MCP tools EXIST and dispatch to agent::message /
+   agent::resolve / agent::history respectively.
+
+Discord confirm/reject UI (doc: "Discord ✅/❌ buttons"):
+$ grep -n "✅|❌" src/discord.rs
+7:  "Each proposed action renders as a ✅ Approve / ❌ Reject button; a click
+    calls `agent::resolve()`"
+123-127: CreateButton "approve:{conv}:{aid}" label "✅ ..." / "reject:{conv}:{aid}"
+    label "❌ Reject"
+274-277: handle_button -> parses "approve|reject:<conv>:<action_id>" -> agent::resolve
+=> Discord ✅/❌ button claim CONFIRMED (not in the assignment's required
+   list but doc cites it — verified anyway for honesty).
+
+VERDICT already-built-real: PASSED. Every "already built" cell in the dedup
+table maps to a real, currently-shipped function/tool with matching
+semantics. No false "already built" claim found.
+
+=== 3. Honesty check ===
+
+Cross-referenced doc's "cloud-only, deliberately not built" bucket against
+docs/V3-CONTRACT.md's own "Deliberately NOT built" section (independently
+authored, dated same day):
+
+V3-CONTRACT.md line 109-113:
+  "Orgs/multi-tenancy, agent conversations, project 'resources'
+   (GitHub/Linear/design/crawl), Slack/Jira integrations, monitoring/cron
+   schedules, artifact/video download, presigned code URLs, credit
+   metering, the AppSync GraphQL plane. These are network-only; local
+   shells would be non-functional stubs."
+
+JS-MINE-FINDINGS.md dedup table cloud-only bucket: orgs/billing/invoices/
+members/invitations, project "resources" (GitHub/Linear/design/crawl/env/
+docs), /v2/frontend-test steps + step recording, github/connect + image
+upload + presigned URLs, feature-flags/enable-v3/testSpriteV3Enabled.
+
+=> Consistent. Every item in the JS-mine "cloud-only" bucket is either
+   explicitly listed in V3-CONTRACT.md's prior "deliberately NOT built"
+   section, or is a rollout/gating mechanism (feature-flags) that has no
+   local-hostable analog (no local multi-tenant rollout system exists nor
+   is one implied by the codebase). None of these are obviously
+   locally-buildable without a hosted backend (org membership requires a
+   real multi-user auth system; step recording requires a server-side
+   step store per V3-CONTRACT.md's own admission; presigned URLs require
+   object storage). The doc's "no new locally-buildable signal" conclusion
+   holds — the only actionable item (`skipDependencies`) is correctly
+   deferred to the existing/planned G4 dependency-wave work, not silently
+   dropped.
+
+VERDICT honesty: PASSED. Conclusion is consistent with evidence; no
+overclaiming or underclaiming detected; un-built items are genuinely
+cloud/infra-dependent, not local gaps hidden as "cloud-only".
+
+=== Overall ===
+No fabricated endpoints. No false "already built" claims. Honesty
+conclusion is well-supported by cross-referenced independent doc
+(V3-CONTRACT.md) plus direct source grep. docs/JS-MINE-FINDINGS.md is
+accurate and non-fabricated.
