@@ -177,8 +177,16 @@ Minor, optional items (in priority order):
    chromium/firefox PASS; dead URL → real Playwright error). The `rust` executor
    still has only the deterministic `cargo build` fallback exercised.
 
-Recently landed (branch `feat/cli-v3-parity`): `server/llm.rs` now omits
-`temperature` for models that reject an explicit value (gpt-5/6, o1/o3/o4).
+Recently landed (branch `feat/cli-v3-parity`): UTF-8-safe head+tail output
+truncation (`clip`); `test history` + MCP `testsprite_run_history`; **webkit via
+Docker** (auto for webkit, `TESTSPRITE_BROWSER_DOCKER=1` forces any browser);
+dogfood harness (`dogfood/` — testsprite-rs green-gates its own repo via its own
+executor); `test rerun --failed`; `doctor --json` (+docker check); **test lists**
+(`test list/run --group`); **BE dependency waves** (`produces`/`needs`/
+`category:"teardown"` in the test body → `waves::order_by_waves` topo-orders
+`run`, teardown last, cycle-safe); local **schedules** (`schedule
+add|list|run|crontab` → OS cron). Precedence: `--group` beats `--id`; wave
+ordering also reorders explicit `--id` subsets by declared deps (no-op without).
 
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
@@ -231,7 +239,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
 | `auth whoami` | identity | `GET /me` | 🟡 (`account`) |
 | `auth logout` | clear creds | `/auth/logout` | ❌ |
 | `usage` | credits + plan | `GET /me` | 🟡 (`account`) |
-| `doctor` | env diagnostic (ok/warn/fail) | — | ❌ |
+| `doctor` | env diagnostic (ok/warn/fail) | — | 🟡 (8 checks text + `--json` DoctorReport) |
 | `agent install\|list\|status` | install/verify IDE skills | — | ❌ |
 | `project create --type fe\|be --name [--url --username --password-file]` | create project | `POST /v3/project` | ❌ |
 | `project list` | list | `GET /v3/project` | ❌ |
@@ -242,7 +250,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
 | `test create --type backend --code-file --project` | create BE test | `POST /tests` | ❌ |
 | `test create --plan-from plan.json` | create FE test | `POST /tests` | ❌ |
 | `test create-batch --plans jsonl\|--plan-from-dir` | batch FE (≤50) | `POST /tests/batch` | ❌ |
-| `test list --project [--status]` | list tests | `GET /tests` | ❌ |
+| `test list --project [--status]` | list tests | `GET /tests` | 🟡 (`test list [--group] [--output text\|json\|csv\|ndjson]`) |
 | `test get <id>` | detail | `GET /tests/{id}` | ❌ |
 | `test update <id>` | edit metadata | `PATCH /tests/{id}` | ❌ |
 | `test delete <id> --confirm` / `delete-batch` / `delete --all` | delete | `DELETE /tests/{id}` | ❌ |
@@ -251,8 +259,8 @@ Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
 | `test steps <id>` | recorded steps | `GET /tests/{id}/steps` | ❌ |
 | `test result <id> [--history]` | latest/historical result | `…/result` | 🟡 (`test history <id> [--json]` — local append-only runs; + MCP `testsprite_run_history`) |
 | `test run <id> [--target-url --wait]` | run one | trigger + poll | 🟡 (batch-only) |
-| `test run --all --project` | wave-ordered BE batch | batch | ❌ |
-| `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | ❌ |
+| `test run --all --project` | wave-ordered BE batch | batch | 🟡 (local dep waves: `produces`/`needs`/`category:teardown` order `test run`; `--group`) |
+| `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | 🟡 (`test rerun [--failed]`) |
 | `test wait <run-id…>` | attach to dispatched run(s) | poll | 🟡 (internal) |
 | `test artifact get <run-id> --out` | download failure bundle | artifact | ❌ |
 | `test failure get\|summary <id>` | agent-facing root-cause bundle | `…/failure/*` | ❌ |
