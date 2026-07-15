@@ -79,6 +79,41 @@ testsprite-rs generate-code-and-execute
 Register it with an MCP client by pointing the command at the built binary with
 `API_KEY` in the environment.
 
+## Local test flow — project → test → run (no account, no cloud)
+
+The simplest way to use it: a local, JSON-driven `setup → add → run/validate`
+lifecycle that drives the same `Executor` seam directly — no server, no tunnel.
+Full diagram in [`docs/FLOW.md`](docs/FLOW.md).
+
+```bash
+testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:8080
+testsprite-rs test add --file plan.json          # → testsprite_tests/tests/<id>.json
+testsprite-rs test list
+testsprite-rs test run                            # exit 0 all-pass else 1; writes results/<id>.json
+```
+
+A test case is just JSON; the **backend deterministic path needs no key**:
+
+```json
+{ "title": "health 200", "kind": "backend",
+  "spec": { "method": "GET", "path": "/health", "expect_status": 200 } }
+```
+
+With an OpenAI key (`OPENAI_API_KEY` or `~/.config/jfc/credentials.toml`), the
+same commands gain the cloud's intelligence — locally:
+
+```bash
+testsprite-rs test generate --instruction "a todo API: GET/POST /todos" --type backend
+testsprite-rs test run --json --fix
+```
+
+- **`test generate`** turns an instruction (or `--from code_summary.json`) into a
+  stored plan (happy paths + edge cases) via the LLM.
+- spec-less `{title,description}` cases get **LLM-generated** code at run time.
+- on failure, `test run` prints a **verdict** (`bug|fragility|env`) + root cause;
+  **`--fix`** writes an LLM **repair patch** to `testsprite_tests/fixes/<id>.md`
+  (a unified-diff hunk a coding agent can apply). `--json` emits a CI-friendly array.
+
 ## Local backend — run the whole thing with NO account / NO cloud
 
 `testsprite-rs backend` is a drop-in local reimplementation of
@@ -176,7 +211,7 @@ the deterministic checks precise:
 | `tunnel/protocol.rs` | `tunnelClient/v2/protocol.ts` | frame codec + control msgs |
 | `tunnel/client.rs` | `tunnelClient/v2/client.ts` | control WS + yamux data plane |
 | `tunnel/mod.rs` | `tunnelClient/v2/index.ts` | version negotiation + proxy URL |
-| `tools/*` | `tools/*.ts` | the 8 MCP tools + orchestrator |
+| `tools/*` | `tools/*.ts` | the 7 MCP tool handlers + orchestrator |
 | `mcp.rs` | `index.ts` | stdio JSON-RPC MCP server |
 | `server/api.rs` | (the cloud) | local `api.testsprite.com` REST contract |
 | `server/llm.rs` | (the cloud LLM) | OpenAI PRD/plan/test-code generation |
@@ -185,6 +220,7 @@ the deterministic checks precise:
 | `server/executors/` | (the sandbox) | `Executor` trait + http / browser / mcp / rust impls |
 | `server/coverage.rs` | (the gate) | Coverage Guard — declared vs. exercised surface |
 | `server/mod.rs` | (control plane) | HTTP + accept-only control WebSocket |
+| `local/*` | (new) | local `project`/`test` lifecycle: init/add/list/generate/run + `--fix` over the `Executor` seam |
 
 ## Endpoints
 
@@ -202,8 +238,10 @@ GET  /api/tunnel/v2/version
 
 ## Status
 
-Builds clean (`cargo build`, `cargo clippy` — 0 warnings; `cargo test` — 3
-pass). Verified live: the account check, MCP `initialize`/`tools/list`/
+Builds clean (`cargo build`, `cargo clippy` — 0 warnings; `cargo test` — 11
+pass). Verified live: the local `project → test → run` flow (deterministic, LLM
+`generate`, failure analysis, `--fix` repair patch), the account check, MCP
+`initialize`/`tools/list`/
 `tools/call`, the tunnel, a full backend `generate-code-and-execute` run, the
 local backend (deterministic + LLM), the **mcp** executor against this binary's
 own MCP server, and the **Coverage Guard** flagging an untested endpoint (2/3,

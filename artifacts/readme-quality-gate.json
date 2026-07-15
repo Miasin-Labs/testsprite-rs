@@ -1,0 +1,39 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader doc-accuracy review of the README refresh (G001). README.md was stale: it claimed 'cargo test - 3 pass' (now 11), '8 MCP tools' (now 7), and documented none of the shipped local flow. The refresh: (a) adds a 'Local test flow' section documenting project init/show, test add/list, test generate, and test run [--json --fix] including the LLM code-gen, verdict/cause failure analysis, and the fixes/<id>.md repair-patch output; (b) corrects the module-map tools row to '7 MCP tool handlers'; (c) adds a local/* module-map row; (d) fixes the Status test count to 11 and folds the local flow into the verified-live list. Every claim was checked against the code (mcp.rs tool count, the actual clap `test` subcommands) and a clean build. Doc-only change; no code touched.",
+    "commands": ["cargo test", "cargo clippy --all-targets", "grep tool count in src/mcp.rs", "testsprite-rs test --help"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Each README claim verified against reality (artifacts/readme-verify.txt): `cargo test` = 11 passed (README says 11); `cargo clippy --all-targets` = 0 warnings (README says 0); `src/mcp.rs` exposes exactly 7 `testsprite_` tools (README module map says 7); `testsprite-rs test --help` lists add/list/run/generate (README documents them); README has 20 fenced code blocks (even = balanced, renders correctly). Red-team: cross-checked the previously-stale figures (3 tests, 8 tools) are gone.",
+    "e2eCommands": ["cargo test", "cargo clippy --all-targets"],
+    "redTeamCommands": ["grep -c '\"name\": \"testsprite_' src/mcp.rs", "testsprite-rs test --help", "grep -c '```' README.md"],
+    "artifactRefs": [
+      { "id": "readme", "kind": "package-test-report", "path": "artifacts/readme-verify.txt", "description": "verification that every refreshed README claim matches the code (test count, clippy, 7 tools, local commands, fence balance)" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G001: README reflects current reality (test count, 7 tools, local+LLM+fix flow)", "obligation": "no stale claims; local flow documented", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "README.md documentation over the testsprite-rs package", "surface": "package", "invocation": "cargo test + cargo clippy + testsprite-rs test --help", "verdict": "passed", "artifactRefs": ["readme"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G001: no stale/inaccurate claims", "scenario": "README could still assert 3 tests / 8 tools or omit the local flow", "expectedBehavior": "actual code shows 11 tests, 7 tools, and the local commands exist — README now matches", "verdict": "passed", "artifactRefs": ["readme"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; all README claims verified against the code with no discrepancies remaining.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo test", "cargo clippy --all-targets"],
+    "blockers": []
+  }
+}
