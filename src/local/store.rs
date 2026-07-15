@@ -135,6 +135,57 @@ pub async fn write_result(
     Ok(())
 }
 
+/// The latest run result (if any) per stored test, joined to its title.
+pub async fn latest_results(root: &Path) -> anyhow::Result<Vec<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT t.id, t.title, r.passed, r.failure_kind, r.analysis \
+         FROM tests t JOIN runs r ON r.run_id = (SELECT MAX(run_id) FROM runs WHERE test_id = t.id)",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, title, passed, failure_kind, analysis) in rows {
+        let cause = analysis
+            .as_deref()
+            .and_then(|a| serde_json::from_str::<Value>(a).ok())
+            .and_then(|v| v.get("cause").and_then(Value::as_str).map(str::to_string));
+        out.push(serde_json::json!({
+            "id": id,
+            "title": title,
+            "passed": passed != 0,
+            "failureKind": failure_kind,
+            "cause": cause,
+        }));
+    }
+    Ok(out)
+}
+
+/// Export all stored test definitions (raw JSON bodies), sorted by id.
+pub async fn export_all(root: &Path) -> anyhow::Result<Vec<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM tests ORDER BY id")
+        .fetch_all(&pool)
+        .await?;
+
+    let mut out = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        out.push(serde_json::from_str(&body).context("parsing stored test body")?);
+    }
+    Ok(out)
+}
+
+/// Import test definitions (upserting each by id via [`add_value`]). Returns
+/// the ids that were stored.
+pub async fn import_values(root: &Path, tests: &[Value]) -> anyhow::Result<Vec<String>> {
+    let mut ids = Vec::with_capacity(tests.len());
+    for value in tests {
+        ids.push(add_value(root, value.clone()).await?);
+    }
+    Ok(ids)
+}
+
 /// Load the most recent run result for `id`, if any.
 pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>> {
     let pool = crate::local::db::open(root).await?;

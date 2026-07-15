@@ -14,6 +14,7 @@ pub mod project;
 pub mod run;
 pub mod rerun;
 pub mod store;
+pub mod triage;
 pub mod scaffold;
 pub mod verdict;
 pub mod visual;

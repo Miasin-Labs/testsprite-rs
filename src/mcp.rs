@@ -11,7 +11,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The 16 TestSprite tools (including the deterministic `testsprite_store_test`),
+/// The 17 TestSprite tools (including the deterministic `testsprite_store_test`),
 /// plus the 3 local conversational-agent tools.
 fn tool_list() -> Value {
     json!({
@@ -64,6 +64,9 @@ fn tool_list() -> Value {
             { "name": "testsprite_agent_history",
               "description": "Show a conversation's messages and pending actions.",
               "inputSchema": obj_schema(&[("conversation_id","string")]) },
+            { "name": "testsprite_triage",
+              "description": "Group the failing tests by root cause (failureKind) into clusters so you fix the few underlying problems instead of N symptoms.",
+              "inputSchema": obj_schema(&[]) },
         ]
     })
 }
@@ -223,6 +226,9 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: conversation_id"))?;
             crate::local::agent::history(&root, conversation_id).await
         }
+        "testsprite_triage" => Ok(serde_json::json!({
+            "clusters": crate::local::triage::triage(&std::env::current_dir()?).await?
+        })),
         other => anyhow::bail!("Unknown tool: {other}"),
     }
 }

@@ -20,7 +20,7 @@ mod tools;
 mod tunnel;
 mod types;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -281,6 +281,21 @@ enum TestCmd {
         #[arg(long)]
         title: String,
     },
+    /// Group failing tests by root cause (failureKind) — fix causes, not symptoms.
+    Triage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export all stored test definitions as JSON (for version control).
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Import test definitions from a JSON file (array of test objects).
+    Import {
+        #[arg()]
+        file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -504,6 +519,31 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Rename { id, title } => {
             local::store::rename(&root, &id, &title).await?;
             println!("renamed {id} -> {title}");
+            Ok(())
+        }
+        TestCmd::Triage { json } => {
+            let code = local::triage::triage_report(&root, json).await?;
+            std::process::exit(code);
+        }
+        TestCmd::Export { out } => {
+            let v = local::store::export_all(&root).await?;
+            let s = serde_json::to_string_pretty(&v)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &s)?;
+                    println!("exported {} test(s) -> {}", v.len(), p.display());
+                }
+                None => println!("{s}"),
+            }
+            Ok(())
+        }
+        TestCmd::Import { file } => {
+            let body = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let tests: Vec<serde_json::Value> = serde_json::from_str(&body)
+                .with_context(|| format!("{} is not a JSON array of test objects", file.display()))?;
+            let ids = local::store::import_values(&root, &tests).await?;
+            println!("imported {} test(s)", ids.len());
             Ok(())
         }
     }
