@@ -236,6 +236,17 @@ test` wrappers). `project set-start "<cmd>"` persists a start command
 up to `TESTSPRITE_SERVE_READY_SECS`=30), runs the cases against the LIVE server, and
 tears it down (`kill_on_drop` RAII — no orphan on early return/panic/SIGINT).
 
+**Structured API-doc import** — `test generate --doc <file>` first tries
+`apidoc::extract` (`src/local/apidoc.rs`): Postman collections, OpenAPI/Swagger
+(JSON **or** YAML), and HAR → deterministic `{method,path,expect_status?}` `spec`
+cases + a synthesized PRD, with **no OpenAI key and no per-run codegen** (they run
+via `execute_spec`/reqwest against the live target; `{{id}}`/`:id`/`{id}` normalize
+to `{id}` for `concrete_path` + `variables.json`). Only unstructured docs fall back
+to the LLM. This is what makes generated backend cases actually runnable — pair
+with `--serve` to exercise them live. Unreachable failures (connection-refused /
+urllib3 "error sending request"/"max retries") now classify as `network`/Blocked
+(env, not a bug) with a "run `test run --serve`" hint instead of a raw traceback.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

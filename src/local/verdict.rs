@@ -43,6 +43,19 @@ pub fn classify(passed: bool, error: &str) -> (Verdict, Option<&'static str>) {
         return (Verdict::Blocked, Some("infra"));
     }
 
+    // Target unreachable (connection refused / DNS / no route) — from the
+    // deterministic reqwest path ("error sending request") or LLM-generated
+    // Python (urllib3 "Failed to establish a new connection" / "Max retries").
+    // It's an env problem (the app isn't up), not a code bug — hence Blocked.
+    if lower.contains("connection refused")
+        || lower.contains("failed to establish a new connection")
+        || lower.contains("max retries exceeded")
+        || lower.contains("name or service not known")
+        || lower.contains("error sending request")
+    {
+        return (Verdict::Blocked, Some("network"));
+    }
+
     let mentions_browser = ["webkit", "chromium", "firefox", "playwright", "browser"]
         .iter()
         .any(|k| lower.contains(k));

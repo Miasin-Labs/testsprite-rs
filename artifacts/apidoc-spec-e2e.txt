@@ -1,0 +1,20 @@
+Structured API-doc -> deterministic spec cases + unreachable verdict (2026-07-15)
+================================================================================
+apidoc::extract parses Postman collections, OpenAPI/Swagger (JSON or YAML), and
+HAR into {method,path,expect_status?} spec cases + a synthesized PRD -- NO OpenAI
+key, NO per-run codegen. generate() tries this first for --doc; only unstructured
+docs fall back to the LLM. Params ({{id}}, :id, {id}) normalize to {id} for
+concrete_path + variables. Verdict: connection-refused / urllib3 "error sending
+request" / "max retries" -> Blocked/network (env, not a bug) + a run hint.
+
+Live e2e (Postman collection, OPENAI_API_KEY unset):
+  test generate --doc collection.json
+    -> "parsed 3 endpoint(s) (postman format) — deterministic spec cases (no LLM)"
+    -> PRD + TC001 GET /health, TC002 GET /users/{id}, TC003 GET /users
+  project set-var id 42 ; set-start "python3 app.py"
+  test run --serve   -> serve boots app -> 3/3 passed (hit the LIVE app, no key)
+  test run (no serve) -> FAIL + "→ target not reachable; run test run --serve"
+
+Closes the loop: doc -> PRD -> runnable spec cases -> --serve live app -> verdicts,
+all deterministic + re-runnable (the "regression suite / re-run the whole surface"
+the TestSprite flow is built on). clippy 0, cargo test 79/79 (+4 unit tests).

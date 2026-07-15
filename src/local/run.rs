@@ -59,6 +59,16 @@ pub async fn run(
                 if !error.is_empty() {
                     println!("      {error}");
                 }
+                let el = error.to_lowercase();
+                if el.contains("connection refused")
+                    || el.contains("error sending request")
+                    || el.contains("max retries")
+                    || el.contains("failed to establish")
+                {
+                    println!(
+                        "      → target not reachable; start the app or run `testsprite-rs test run --serve`"
+                    );
+                }
                 if let Some(analysis) = entry.get("analysis") {
                     let verdict = analysis
                         .get("verdict")

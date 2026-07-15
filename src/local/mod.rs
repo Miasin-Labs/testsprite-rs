@@ -3,6 +3,7 @@
 //! local target; there is no server and no tunnel.
 
 pub mod agent;
+pub mod apidoc;
 pub mod changed;
 pub mod ci;
 pub mod coverage;

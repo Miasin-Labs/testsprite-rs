@@ -35,51 +35,82 @@ pub async fn generate(
     model: &str,
     kind: Option<TestKind>,
 ) -> anyhow::Result<GenSummary> {
-    let Some(llm) = LlmClient::from_env(model) else {
-        anyhow::bail!(
-            "test generate needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
-        )
-    };
-
-    let (prd, source) = if let Some(dp) = doc {
+    // Structured API doc (Postman / OpenAPI / HAR) -> deterministic spec cases,
+    // no LLM key needed. The fast, robust path: cases run via execute_spec
+    // (reqwest) against the live target, not per-run LLM codegen.
+    if let Some(dp) = doc {
         if !dp.is_file() {
             anyhow::bail!("--doc expects a readable file ({})", dp.display());
         }
         let text = std::fs::read_to_string(dp)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", dp.display()))?;
+        if let Some(ex) = crate::local::apidoc::extract(&text) {
+            eprintln!(
+                "generate: parsed {} endpoint(s) from {} ({} format) — deterministic spec cases (no LLM)",
+                ex.cases.len(),
+                dp.display(),
+                ex.format
+            );
+            let source = format!("doc:{} ({})", dp.display(), ex.format);
+            let prd_id =
+                persist_prd(root, &source, &ex.prd, &ex.cases, Some(TestKind::Backend)).await?;
+            let test_ids =
+                store_cases(root, ex.cases, Some(TestKind::Backend), Some(&prd_id)).await?;
+            return Ok(GenSummary {
+                prd_id: Some(prd_id),
+                test_ids,
+            });
+        }
+        // Unstructured doc -> LLM normalization (needs a key).
+        let Some(llm) = LlmClient::from_env(model) else {
+            anyhow::bail!(
+                "{} isn't a recognized Postman/OpenAPI/HAR doc, and LLM fallback needs an OpenAI key (set OPENAI_API_KEY)",
+                dp.display()
+            )
+        };
+        let prd = llm.generate_prd_from_doc(&text).await?;
+        let cases = llm.generate_plan(&prd).await?;
+        let prd_id =
+            persist_prd(root, &format!("doc:{}", dp.display()), &prd, &cases, kind).await?;
+        let test_ids = store_cases(root, cases, kind, Some(&prd_id)).await?;
+        return Ok(GenSummary {
+            prd_id: Some(prd_id),
+            test_ids,
+        });
+    }
+
+    // --from / --instruction -> LLM (needs a key).
+    let Some(llm) = LlmClient::from_env(model) else {
+        anyhow::bail!(
+            "test generate needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
+        )
+    };
+    let (summary, source) = if let Some(p) = from.filter(|p| p.is_file()) {
+        let body = std::fs::read_to_string(p)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
+        if !value.is_object() {
+            anyhow::bail!("{} does not contain a JSON object", p.display());
+        }
+        (value, format!("from:{}", p.display()))
+    } else if let Some(instruction) = instruction {
         (
-            llm.generate_prd_from_doc(&text).await?,
-            format!("doc:{}", dp.display()),
+            json!({ "project_name": "local", "description": instruction }),
+            format!(
+                "instruction:{}",
+                instruction.chars().take(80).collect::<String>()
+            ),
+        )
+    } else if let Some(p) = from {
+        anyhow::bail!(
+            "--from expects a code-summary JSON file, not a directory ({}); pass --instruction instead",
+            p.display()
         )
     } else {
-        let (summary, source) = if let Some(p) = from.filter(|p| p.is_file()) {
-            let body = std::fs::read_to_string(p)
-                .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
-            let value: Value = serde_json::from_str(&body)
-                .map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
-            if !value.is_object() {
-                anyhow::bail!("{} does not contain a JSON object", p.display());
-            }
-            (value, format!("from:{}", p.display()))
-        } else if let Some(instruction) = instruction {
-            (
-                json!({ "project_name": "local", "description": instruction }),
-                format!(
-                    "instruction:{}",
-                    instruction.chars().take(80).collect::<String>()
-                ),
-            )
-        } else if let Some(p) = from {
-            anyhow::bail!(
-                "--from expects a code-summary JSON file, not a directory ({}); pass --instruction instead",
-                p.display()
-            )
-        } else {
-            anyhow::bail!("pass --from <code_summary.json>, --doc <file>, or --instruction <text>")
-        };
-        (llm.generate_prd(&summary).await?, source)
+        anyhow::bail!("pass --from <code_summary.json>, --doc <file>, or --instruction <text>")
     };
-
+    let prd = llm.generate_prd(&summary).await?;
     let cases = llm.generate_plan(&prd).await?;
     let prd_id = persist_prd(root, &source, &prd, &cases, kind).await?;
     let test_ids = store_cases(root, cases, kind, Some(&prd_id)).await?;
