@@ -132,7 +132,61 @@ pub async fn write_result(
     .execute(&pool)
     .await?;
 
+    // Auto-prune: bound run history per test so scheduled/frequent runs don't
+    // bloat testsprite.db (0 = unlimited).
+    let keep = crate::envs::run_history_keep();
+    if keep > 0 {
+        sqlx::query(
+            "DELETE FROM runs WHERE test_id = ? AND run_id NOT IN \
+             (SELECT run_id FROM runs WHERE test_id = ? ORDER BY run_id DESC LIMIT ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(keep as i64)
+        .execute(&pool)
+        .await?;
+    }
+
     Ok(())
+}
+
+/// Delete all but the latest `keep` runs for `id` (`0` = keep all). Returns the
+/// number of rows deleted.
+pub async fn prune_runs(root: &Path, id: &str, keep: usize) -> anyhow::Result<u64> {
+    if keep == 0 {
+        return Ok(0);
+    }
+    let pool = crate::local::db::open(root).await?;
+    let res = sqlx::query(
+        "DELETE FROM runs WHERE test_id = ? AND run_id NOT IN \
+         (SELECT run_id FROM runs WHERE test_id = ? ORDER BY run_id DESC LIMIT ?)",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(keep as i64)
+    .execute(&pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Prune run history across ALL tests, keeping the latest `keep` per test
+/// (`0` = keep all). Returns the total number of rows deleted.
+pub async fn prune_all(root: &Path, keep: usize) -> anyhow::Result<u64> {
+    if keep == 0 {
+        return Ok(0);
+    }
+    let pool = crate::local::db::open(root).await?;
+    let res = sqlx::query(
+        "DELETE FROM runs WHERE run_id NOT IN (\
+           SELECT run_id FROM (\
+             SELECT run_id, ROW_NUMBER() OVER (PARTITION BY test_id ORDER BY run_id DESC) AS rn \
+             FROM runs\
+           ) WHERE rn <= ?)",
+    )
+    .bind(keep as i64)
+    .execute(&pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 /// The latest run result (if any) per stored test, joined to its title.

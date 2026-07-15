@@ -341,6 +341,15 @@ enum TestCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Prune run history, keeping the latest N runs per test (bounds testsprite.db).
+    Prune {
+        /// Keep the latest N runs per test (0 = keep all).
+        #[arg(long, default_value_t = 200)]
+        keep: usize,
+        /// Only prune this test id (omit to prune every test).
+        #[arg(long)]
+        id: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -783,6 +792,14 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                     println!("  #{run_id}  {when}  {mark}  verdict={verdict}  failureKind={fk}");
                 }
             }
+            Ok(())
+        }
+        TestCmd::Prune { keep, id } => {
+            let deleted = match id {
+                Some(id) => local::store::prune_runs(&root, &id, keep).await?,
+                None => local::store::prune_all(&root, keep).await?,
+            };
+            println!("pruned {deleted} run row(s), keeping latest {keep} per test");
             Ok(())
         }
     }

@@ -1,0 +1,5 @@
+DB pruning e2e 2026-07-15
+=========================
+$ (run t 5x with TESTSPRITE_RUN_HISTORY_KEEP=3) => test history = 3 rows (auto-pruned)
+$ test prune --keep 1 => "pruned 2 run row(s)"; history = 1
+$ (run 4x with KEEP=0) => history = 5 (unbounded honored)

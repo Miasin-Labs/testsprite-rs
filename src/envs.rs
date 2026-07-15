@@ -26,6 +26,16 @@ pub fn playwright_image() -> String {
         .unwrap_or_else(|_| "testsprite-rs-playwright:1.60.0".to_string())
 }
 
+/// Keep at most this many run-history rows per test (`0` = unlimited). The
+/// append-only `runs` table is auto-pruned to this bound on every write, so
+/// frequent/scheduled runs don't bloat `testsprite.db`.
+pub fn run_history_keep() -> usize {
+    env::var("TESTSPRITE_RUN_HISTORY_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+}
+
 /// The user's API key (encrypted AEAD token, `sk-user-...`).
 pub fn api_key() -> Option<String> {
     env::var("TSMCP_API_KEY")
