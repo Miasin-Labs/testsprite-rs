@@ -85,6 +85,29 @@ pub async fn load_one(root: &Path, id: &str) -> anyhow::Result<LocalTest> {
     }
 }
 
+/// Rename a stored test — update its `title` (column + the JSON body). Fixes the
+/// "TC000 duplicate names with no way to rename" pain: the agent renames its own
+/// generated tests to something meaningful.
+pub async fn rename(root: &Path, id: &str, title: &str) -> anyhow::Result<()> {
+    let mut test = load_one(root, id).await?;
+    test.title = title.to_string();
+    let body = serde_json::to_string(&test)?;
+
+    let pool = crate::local::db::open(root).await?;
+    let done = sqlx::query(
+        "UPDATE tests SET title=?, body=?, updated_at=datetime('now') WHERE id=?",
+    )
+    .bind(title)
+    .bind(&body)
+    .bind(id)
+    .execute(&pool)
+    .await?;
+    if done.rows_affected() == 0 {
+        bail!("no test {id}");
+    }
+    Ok(())
+}
+
 /// Append the outcome of running a test case to the `runs` table.
 pub async fn write_result(
     root: &Path,

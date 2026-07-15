@@ -11,7 +11,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The 15 TestSprite tools (including the deterministic `testsprite_store_test`),
+/// The 16 TestSprite tools (including the deterministic `testsprite_store_test`),
 /// plus the 3 local conversational-agent tools.
 fn tool_list() -> Value {
     json!({
@@ -52,6 +52,9 @@ fn tool_list() -> Value {
             { "name": "testsprite_emit_test",
               "description": "Materialize a stored test's code into a repo file (e.g. crates/foo/tests/bar.rs) so cargo/CI own it — the repo-native alternative to ephemeral SQLite runs.",
               "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
+            { "name": "testsprite_rename_test",
+              "description": "Rename a stored test's title. Use this to fix the munged/duplicate TC000 names auto-generation produces — give each test a meaningful, unique name.",
+              "inputSchema": obj_schema(&[("id","string"),("title","string")]) },
             { "name": "testsprite_agent_message",
               "description": "Talk to the local test agent: it proposes ONE action (generate/run) to approve.",
               "inputSchema": obj_schema(&[("conversation_id","string"),("message","string"),("model","string")]) },
@@ -168,6 +171,19 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: out"))?;
             crate::local::store::emit(&root, id, std::path::Path::new(out)).await?;
             Ok(json!({ "wrote": out }))
+        }
+        "testsprite_rename_test" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: title"))?;
+            crate::local::store::rename(&root, id, title).await?;
+            Ok(json!({ "id": id, "title": title, "renamed": true }))
         }
         "testsprite_agent_message" => {
             let model = args

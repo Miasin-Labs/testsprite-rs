@@ -274,6 +274,13 @@ enum TestCmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Rename a stored test's title (fixes munged TC000 duplicates).
+    Rename {
+        #[arg()]
+        id: String,
+        #[arg(long)]
+        title: String,
+    },
 }
 
 #[tokio::main]
@@ -492,6 +499,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Emit { id, out } => {
             local::store::emit(&root, &id, &out).await?;
             println!("wrote {}", out.display());
+            Ok(())
+        }
+        TestCmd::Rename { id, title } => {
+            local::store::rename(&root, &id, &title).await?;
+            println!("renamed {id} -> {title}");
             Ok(())
         }
     }
