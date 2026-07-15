@@ -4,6 +4,8 @@
 
 use std::process::Command;
 
+use serde_json::json;
+
 /// Run one probe command and return its trimmed stdout on success, `None` on
 /// spawn error or non-zero exit.
 fn probe(cmd: &str, args: &[&str]) -> Option<String> {
@@ -26,22 +28,37 @@ enum Status {
     Fail(String),
 }
 
-fn report(name: &str, status: Status) -> bool {
-    let (tag, detail, is_fail) = match status {
-        Status::Ok(d) => ("ok", d, false),
-        Status::Warn(d) => ("warn", d, false),
-        Status::Fail(d) => ("fail", d, true),
-    };
-    println!("[{tag}] {name}: {detail}");
-    is_fail
+impl Status {
+    /// (`ok|warn|fail`, detail) — the on-the-wire status tag + human detail.
+    fn parts(self) -> (&'static str, String) {
+        match self {
+            Status::Ok(d) => ("ok", d),
+            Status::Warn(d) => ("warn", d),
+            Status::Fail(d) => ("fail", d),
+        }
+    }
 }
 
-/// Run every diagnostic check, printing one `[ok]/[warn]/[fail]` line each.
-/// Returns exit code 1 if any check failed, else 0.
-pub fn doctor() -> anyhow::Result<i32> {
-    let mut any_fail = false;
+/// One diagnostic result, named and tagged `ok|warn|fail`.
+struct Check {
+    name: &'static str,
+    status: &'static str,
+    detail: String,
+}
 
-    any_fail |= report(
+/// Gather every diagnostic (no I/O side effects beyond the probes themselves).
+fn collect_checks() -> Vec<Check> {
+    let mut checks = Vec::new();
+    let mut add = |name: &'static str, status: Status| {
+        let (status, detail) = status.parts();
+        checks.push(Check {
+            name,
+            status,
+            detail,
+        });
+    };
+
+    add(
         "openai key",
         if crate::server::llm::resolve_key().is_some() {
             Status::Ok("configured, LLM features enabled".to_string())
@@ -49,42 +66,43 @@ pub fn doctor() -> anyhow::Result<i32> {
             Status::Warn("no key — deterministic mode only".to_string())
         },
     );
-
-    any_fail |= report(
+    add(
         "cargo",
         match probe("cargo", &["--version"]) {
             Some(v) => Status::Ok(v),
             None => Status::Fail("not found on PATH".to_string()),
         },
     );
-
-    any_fail |= report(
+    add(
         "cargo-llvm-cov",
         match probe("cargo", &["llvm-cov", "--version"]) {
             Some(v) => Status::Ok(v),
             None => Status::Warn("coverage --rust unavailable".to_string()),
         },
     );
-
-    any_fail |= report(
+    add(
         "node",
         match probe("node", &["--version"]) {
             Some(v) => Status::Ok(v),
             None => Status::Warn("frontend/Playwright unavailable".to_string()),
         },
     );
-
-    any_fail |= report("playwright browsers", playwright_status());
-
-    any_fail |= report(
+    add("playwright browsers", playwright_status());
+    add(
+        "docker",
+        match probe("docker", &["--version"]) {
+            Some(v) => Status::Ok(format!("{v} (webkit + any-browser via Docker)")),
+            None => Status::Warn("webkit executor unavailable (host browsers still work)".to_string()),
+        },
+    );
+    add(
         "gh",
         match probe("gh", &["--version"]) {
             Some(v) => Status::Ok(v.lines().next().unwrap_or("").to_string()),
             None => Status::Warn("PR gating unavailable".to_string()),
         },
     );
-
-    any_fail |= report(
+    add(
         "python3",
         match probe("python3", &["--version"]) {
             Some(v) => Status::Ok(v),
@@ -94,6 +112,30 @@ pub fn doctor() -> anyhow::Result<i32> {
             ),
         },
     );
+    checks
+}
+
+/// Run every diagnostic check. In text mode prints one `[ok]/[warn]/[fail]`
+/// line each; with `json` emits a `DoctorReport` = `{checks:[{name,status,
+/// detail}]}` (status ∈ ok|warn|fail). Returns exit code 1 if any check
+/// failed, else 0.
+pub fn doctor(json_out: bool) -> anyhow::Result<i32> {
+    let checks = collect_checks();
+    let any_fail = checks.iter().any(|c| c.status == "fail");
+
+    if json_out {
+        let report = json!({
+            "checks": checks
+                .iter()
+                .map(|c| json!({ "name": c.name, "status": c.status, "detail": c.detail }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for c in &checks {
+            println!("[{}] {}: {}", c.status, c.name, c.detail);
+        }
+    }
 
     Ok(if any_fail { 1 } else { 0 })
 }

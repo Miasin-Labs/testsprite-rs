@@ -39,8 +39,12 @@ struct Cli {
 enum Command {
     /// Run as a stdio MCP server (default when no subcommand is given).
     Serve,
-    /// Diagnose the local environment (LLM key, cargo, coverage, node/playwright, gh, python).
-    Doctor,
+    /// Diagnose the local environment (LLM key, cargo, coverage, node/playwright, docker, gh, python).
+    Doctor {
+        /// Emit a DoctorReport JSON object ({checks:[{name,status,detail}]}) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the current account (plan, credits, email).
     Account,
     /// Alias for `account` — verify the API key.
@@ -230,6 +234,9 @@ enum TestCmd {
         /// Print a single JSON array of results instead of PASS/FAIL lines.
         #[arg(long)]
         json: bool,
+        /// Re-run only tests whose most recent run FAILED (replaces --id).
+        #[arg(long)]
+        failed: bool,
     },
     /// Generate test cases with the LLM (needs an OpenAI key).
     Generate {
@@ -338,7 +345,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => mcp::serve().await,
-        Command::Doctor => std::process::exit(local::doctor::doctor()?),
+        Command::Doctor { json } => std::process::exit(local::doctor::doctor(json)?),
         Command::Account | Command::Check => run_account().await,
         Command::GenerateCodeAndExecute => run_console_execute().await,
         Command::Backend { port, model, kind } => {
@@ -535,8 +542,19 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             model,
             heal,
             json,
+            failed,
         } => {
-            let code = local::rerun::rerun(&root, &id, url.as_deref(), &model, heal, json).await?;
+            let ids = if failed {
+                let reds = local::store::last_failed_ids(&root).await?;
+                if reds.is_empty() {
+                    println!("no failed tests to rerun");
+                    return Ok(());
+                }
+                reds
+            } else {
+                id
+            };
+            let code = local::rerun::rerun(&root, &ids, url.as_deref(), &model, heal, json).await?;
             std::process::exit(code);
         }
         TestCmd::Generate {

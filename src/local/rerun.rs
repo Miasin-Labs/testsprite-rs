@@ -25,11 +25,11 @@ pub async fn rerun(
     heal: bool,
     json: bool,
 ) -> anyhow::Result<i32> {
-    let project = project::load(root).await?;
+    let project = project::load(root).await.ok();
 
     let target = url_override
         .map(str::to_string)
-        .or_else(|| project.target_url.clone())
+        .or_else(|| project.as_ref().and_then(|p| p.target_url.clone()))
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
 
     let tests = if ids.is_empty() {
@@ -64,7 +64,9 @@ pub async fn rerun(
     let mut report = Vec::with_capacity(total);
 
     for t in &tests {
-        let kind = t.kind.unwrap_or(project.kind);
+        let kind = t
+            .kind
+            .unwrap_or_else(|| project.as_ref().map(|p| p.kind).unwrap_or_default());
         let ex = crate::server::executors::for_kind(kind);
         let case = serde_json::to_value(t)?;
         let mut outcome = ex.run(&case, &ctx).await;

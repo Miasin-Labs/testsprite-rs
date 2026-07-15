@@ -243,6 +243,22 @@ pub async fn run_history(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
         .collect())
 }
 
+/// Ids of tests whose MOST RECENT run failed (`passed = 0`), sorted by id.
+/// Empty when nothing has run or every latest run passed. Powers
+/// `test rerun --failed` — replay just the reds (the local analogue of the
+/// V3 `retryFailedAgents` flow).
+pub async fn last_failed_ids(root: &Path) -> anyhow::Result<Vec<String>> {
+    let pool = crate::local::db::open(root).await?;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT t.id FROM tests t \
+         JOIN runs r ON r.run_id = (SELECT MAX(run_id) FROM runs WHERE test_id = t.id) \
+         WHERE r.passed = 0 ORDER BY t.id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(ids)
+}
+
 /// Write an LLM-proposed fix recommendation to `fixes/<id>.md` for a coding
 /// agent to pick up. `fix` is `{explanation, patch}`; returns the file path.
 pub fn write_fix(

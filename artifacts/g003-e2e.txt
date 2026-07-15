@@ -1,0 +1,54 @@
+G003 Discord+X mining -> implemented local features (2026-07-15)
+=================================================================
+
+--- test rerun --failed (replay only last-failed; = retryFailedAgents) ---
+$ (2 command tests: tp=true PASS, tf=exit1 FAIL) then:
+$ testsprite-rs test rerun --failed --json  => reran ["tf"] only (verified: ids==["tf"])
+$ (after tf fixed to pass + rerun) testsprite-rs test rerun --failed  => "no failed tests to rerun"
+  + fixed rerun() to be project-tolerant (project::load().ok()) like run(), so command-kind reruns need no project.
+
+--- doctor --json (DoctorReport {checks:[{name,status,detail}]}) ---
+{
+  "checks": [
+    {
+      "detail": "configured, LLM features enabled",
+      "name": "openai key",
+      "status": "ok"
+    },
+    {
+      "detail": "cargo 1.99.0-nightly (7e707bd34 2026-07-13)",
+      "name": "cargo",
+      "status": "ok"
+    },
+    {
+      "detail": "cargo-llvm-cov 0.6.18",
+      "name": "cargo-llvm-cov",
+      "status": "ok"
+    },
+    {
+      "detail": "v26.4.0",
+      "name": "node",
+      "status": "ok"
+    },
+    {
+      "detail": "chromium, firefox, webkit",
+      "name": "playwright browsers",
+      "status": "ok"
+    },
+    {
+      "detail": "Docker version 29.1.3, build f52814d454173982e6692dd7e290a41b828d9cbc (webkit + any-browser via Docker)",
+      "name": "docker",
+      "status": "ok"
+    },
+    {
+      "detail": "gh version 2.81.0 (2026-04-11)",
+      "name": "gh",
+      "status": "ok"
+    },
+    {
+      "detail": "Python 3.13.14",
+      "name": "python3",
+      "status": "ok"
+    }
+  ]
+}
