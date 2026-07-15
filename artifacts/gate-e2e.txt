@@ -1,0 +1,25 @@
+gate: 1/2 passed (1 failed) — junit.xml + gate-summary.json written
+gh: not on a PR (or gh unavailable) — skipping PR comment
+exit=1
+--- junit.xml ---
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="testsprite" tests="2" failures="1">
+  <testcase name="missing 200" classname="bad">
+    <failure message="expected Some(200), got 404">expected Some(200), got 404</failure>
+  </testcase>
+  <testcase name="root 200" classname="ok">
+  </testcase>
+</testsuite>
+--- gate-summary.json (head) ---
+{
+  "failed": 1,
+  "passed": 1,
+  "results": [
+    {
+      "analysis": {
+        "cause": "The endpoint '/nope' does not exist, leading to a 404 error instead of the expected 200 status code.",
+        "fix": "Implement the '/nope' endpoint in the backend to return a 200 status code.",
+        "fixKind": "code",
+        "verdict": "bug"
+      },
+      "error": "expected Some(200), got 404",

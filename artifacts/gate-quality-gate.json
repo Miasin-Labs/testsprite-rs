@@ -1,0 +1,40 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of the gate command (G002). Reuses run_collect (no forked run logic), emits a valid JUnit XML (XML-escaped) + JSON summary under testsprite_tests/, and the gh integration is strictly best-effort: it probes gh presence + PR context and only posts on a real PR, otherwise prints a skip note and continues — the gate exit code depends ONLY on test results (0 all-pass else 1), never on gh. Small, cohesive, idiomatic; +3 unit tests (junit escaping/shape). Works with or without an OpenAI key (analysis is additive).",
+    "commands": ["read src/local/gate.rs", "cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Live e2e (artifacts/gate-e2e.txt): a scratch project with 1 passing + 1 failing backend test against a local server. `testsprite-rs gate` printed 'gate: 1/2 passed (1 failed)', wrote a VALID junit.xml (testsuite tests=2 failures=1, a <failure> element for the failing case) and gate-summary.json (failed/passed/results incl. LLM root-cause), gracefully skipped gh ('not on a PR ... skipping'), and exited 1 — so CI would gate on the failure. build clean, clippy 0, cargo test 16/16 (+3 gate tests).",
+    "e2eCommands": ["testsprite-rs gate"],
+    "redTeamCommands": ["gate with a failing test (must exit 1 + emit junit failure element)", "gate outside a git repo (gh must skip gracefully, never fail the gate)"],
+    "artifactRefs": [
+      { "id": "gate", "kind": "package-test-report", "path": "artifacts/gate-e2e.txt", "description": "live: junit.xml + gate-summary.json emitted, gh skipped gracefully, exit 1 on failure" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G002: gate emits JUnit+JSON, best-effort gh PR comment, non-zero exit on failure", "obligation": "CI-gating exit code + report artifacts; gh never breaks the gate", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a2"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs gate (compiled package)", "surface": "package", "invocation": "target/debug/testsprite-rs gate", "verdict": "passed", "artifactRefs": ["gate"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G002: gate on failure", "scenario": "suite with a failing test", "expectedBehavior": "junit failure element written, exit 1", "verdict": "passed", "artifactRefs": ["gate"] },
+      { "id": "a2", "contractRef": "G002: gh is best-effort", "scenario": "run outside a git repo / not on a PR", "expectedBehavior": "prints skip note, continues, exit code still reflects tests only", "verdict": "passed", "artifactRefs": ["gate"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; gate verified live (junit + json + exit code + gh skip); no fix loop.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  }
+}

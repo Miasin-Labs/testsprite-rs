@@ -3,6 +3,7 @@
 //! local target; there is no server and no tunnel.
 
 pub mod coverage;
+pub mod gate;
 pub mod generate;
 pub mod project;
 pub mod run;

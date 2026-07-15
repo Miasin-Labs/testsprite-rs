@@ -68,6 +68,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the suite as a CI gate: JUnit + JSON + best-effort gh PR comment; exit 1 on any failure.
+    Gate {
+        /// Override the project's target URL for this run.
+        #[arg(long)]
+        url: Option<String>,
+        /// OpenAI model for spec-less LLM execution and failure analysis.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+    },
     /// Local project lifecycle — no cloud (init / show).
     Project {
         #[command(subcommand)]
@@ -188,6 +197,11 @@ async fn main() -> Result<()> {
         Command::Coverage { path, json } => {
             let root = path.unwrap_or(std::env::current_dir()?);
             let code = local::coverage::coverage(&root, json).await?;
+            std::process::exit(code);
+        }
+        Command::Gate { url, model } => {
+            let root = std::env::current_dir()?;
+            let code = local::gate::gate(&root, url.as_deref(), &model).await?;
             std::process::exit(code);
         }
         Command::Test { cmd } => run_test(cmd).await,
