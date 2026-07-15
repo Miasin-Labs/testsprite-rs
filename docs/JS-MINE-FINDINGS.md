@@ -94,3 +94,22 @@ JS maps to one of three buckets:
 
 Nothing to implement under G002. The one actionable confirmation —
 `skipDependencies` on rerun — is carried into G4 (BE dependency waves).
+
+## Deep deobfuscation pass (2026-07-15) — confirms the above
+
+Re-mined with `jsbeautify -d --rename-vars` (oxc) over **all** app-logic chunks,
+including the 186 KB `9da6db1e` the first pass skipped, then searched the
+readable output. Result: **no new endpoints, no new locally-buildable signal.**
+`9da6db1e` is mostly the embedded **PostHog analytics SDK**; the rest is cloud
+workflow (`/backend/plan-all`, `/wizard-run`, `processStatus` Executing/Failed
+lifecycle, `pollInterval:2000`, `testPlan` PUT, server-side generation).
+
+Positive validations of already-shipped local features:
+- `maxTestList` / `maxSchedule` are real plan-gated product limits → local
+  **test lists** (`test list/run --group`) + **schedules** mirror real features.
+- `retryFailedAgents` → local `test rerun --failed`; `skipDependencies` → local
+  dependency waves; `autoHeal` → `rerun --heal`. All built.
+
+The dump (`~/VulnerabilityResearch/testspite/dump-0715`, target
+`dashboard/settings/apikey`) is fully handled: present, extracted (479/479), and
+mined twice. Nothing to build from it.
