@@ -1,0 +1,9 @@
+=== cargo build ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+=== clippy ===
+warn+err: 0
+=== test ===
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== coverage on repo (rust surface) ===
+rust: {'branches': 460, 'files': 35, 'functions': 232}
+rust_real_cov: None

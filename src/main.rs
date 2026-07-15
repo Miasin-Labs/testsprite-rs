@@ -59,6 +59,15 @@ enum Command {
         #[arg(long, default_value = "backend")]
         kind: String,
     },
+    /// Report test coverage: cargo llvm-cov (Rust) + a tree-sitter structural surface.
+    Coverage {
+        /// Root directory to scan (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Print a single JSON object instead of a human-readable report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Local project lifecycle — no cloud (init / show).
     Project {
         #[command(subcommand)]
@@ -153,6 +162,11 @@ async fn main() -> Result<()> {
             server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
         }
         Command::Project { cmd } => run_project(cmd),
+        Command::Coverage { path, json } => {
+            let root = path.unwrap_or(std::env::current_dir()?);
+            let code = local::coverage::coverage(&root, json).await?;
+            std::process::exit(code);
+        }
         Command::Test { cmd } => run_test(cmd).await,
     }
 }

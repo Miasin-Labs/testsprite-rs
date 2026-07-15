@@ -1,0 +1,41 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Delegated architect review (agent 5-ReviewCoverage, opus) confirmed the two hard requirements: rust_llvm_cov is exhaustively best-effort (every failure path -> Ok(None); no ?/unwrap/panic; live Ok(None) proven under the sandbox peony linker) and both blocking ops (tree-sitter walk + cargo subprocess) run off the tokio runtime via spawn_blocking. Panic-safety solid (non-UTF8 skipped, malformed tolerated, follow_links=false). It returned REQUEST CHANGES for ONE MEDIUM: nested-function branch double-attribution (count both enclosing + nested). FIXED this pass: replaced the inner full-subtree walk with a pruning `count_branches` that stops descending at nested-function boundaries. Verified live: a Python `outer` with a nested `inner` now reports outer=1/inner=1 (was outer=2). Also fixed 2 LOW hardening items the review raised: units_in_file now skips a file on set_language error instead of aborting the whole walk, and filter_entry never filters the depth-0 root. The 2 remaining LOW P3 items (unbounded AST recursion depth; uncovered_names omitting Rust fns when the llvm-cov aggregate succeeds) are the ones the architect explicitly called optional hardening/advisory and are accepted. Reverified: build clean, clippy 0, cargo test 13/13.",
+    "commands": ["architect agent 5-ReviewCoverage", "cargo build", "cargo clippy --all-targets", "cargo test", "coverage --json nested-function check"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "artifacts/coverage-e2e.txt: on py/go/ts files the tree-sitter structural surface enumerated functions with accurate branch counts (python classify=3 for if/elif/for; go/ts if=1) and a well-formed {languages,functions,uncovered,rust} JSON. artifacts/coverage-build.txt: on the repo, rust surface = {files:35,functions:232,branches:460}; cargo llvm-cov cannot link in this sandbox (custom peony linker) so rust=null — the best-effort Ok(None) fallback is proven live, not just unit-tested. Red-team: nested-function double-count (the review's MEDIUM) verified fixed (outer=1/inner=1). 2 new unit tests (structural_surface finds functions + counts an if branch; rust_llvm_cov None without Cargo.toml). Full suite 13/13.",
+    "e2eCommands": ["testsprite-rs coverage", "testsprite-rs coverage --json", "cargo test coverage::"],
+    "redTeamCommands": ["coverage on a nested-function python file (enclosing must NOT include the nested fn's branches)", "coverage where cargo llvm-cov fails to link (rust must be null, no crash)"],
+    "artifactRefs": [
+      { "id": "cov-e2e", "kind": "package-test-report", "path": "artifacts/coverage-e2e.txt", "description": "cross-language structural surface (py/go/ts) with accurate branch counts + JSON shape" },
+      { "id": "cov-build", "kind": "package-test-report", "path": "artifacts/coverage-build.txt", "description": "build/clippy/test + repo rust surface (232 fns) + rust:null graceful llvm-cov fallback" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G002: coverage command with llvm-cov (Rust) + tree-sitter structural surface across languages", "obligation": "enumerate functions/branches for rust/python/go/js/ts; real Rust % best-effort; uncovered list for generate", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a2"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs coverage over source trees (compiled package)", "surface": "package", "invocation": "target/debug/testsprite-rs coverage [--json]", "verdict": "passed", "artifactRefs": ["cov-e2e", "cov-build"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G002: branch counting must not double-count", "scenario": "a function containing a nested function that itself has a branch", "expectedBehavior": "enclosing function's branch count excludes the nested function's branches (outer=1, inner=1)", "verdict": "passed", "artifactRefs": ["cov-build"] },
+      { "id": "a2", "contractRef": "G002: real Rust coverage is best-effort", "scenario": "cargo llvm-cov cannot link (custom linker)", "expectedBehavior": "coverage still runs, emits rust:null, exit 0 (no crash)", "verdict": "passed", "artifactRefs": ["cov-build"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "One review iteration: architect REQUEST CHANGES on 1 MEDIUM (+4 LOW); MEDIUM + 2 LOW fixed and reverified (nested-function count corrected live), 2 P3 residuals accepted per the review's own 'optional' classification; full loop rerun clean.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test", "coverage --json"],
+    "blockers": []
+  }
+}

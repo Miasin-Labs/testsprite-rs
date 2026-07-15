@@ -1,0 +1,68 @@
+### multi-language structural surface (py + go + ts)
+Structural surface (tree-sitter):
+language        files  functions   branches
+go                  1          1          1
+python              1          2          3
+typescript          1          1          1
+
+Rust coverage (cargo llvm-cov): unavailable (no Cargo.toml or llvm-cov run failed)
+
+Uncovered/target functions: 4
+  svc.py:1 add
+  svc.py:3 classify
+  svc.go:2 Max
+  svc.ts:1 greet
+
+### --json (functions + branches per language)
+{
+  "functions": [
+    {
+      "branches": 0,
+      "file": "svc.py",
+      "line": 1,
+      "name": "add"
+    },
+    {
+      "branches": 3,
+      "file": "svc.py",
+      "line": 3,
+      "name": "classify"
+    },
+    {
+      "branches": 1,
+      "file": "svc.go",
+      "line": 2,
+      "name": "Max"
+    },
+    {
+      "branches": 1,
+      "file": "svc.ts",
+      "line": 1,
+      "name": "greet"
+    }
+  ],
+  "languages": {
+    "go": {
+      "branches": 1,
+      "files": 1,
+      "functions": 1
+    },
+    "python": {
+      "branches": 3,
+      "files": 1,
+      "functions": 2
+    },
+    "typescript": {
+      "branches": 1,
+      "files": 1,
+      "functions": 1
+    }
+  },
+  "rust": null,
+  "uncovered": [
+    "svc.py:1 add",
+    "svc.py:3 classify",
+    "svc.go:2 Max",
+    "svc.ts:1 greet"
+  ]
+}
