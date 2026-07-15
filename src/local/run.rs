@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use serde_json::Value;
+
 use crate::server::executors::ExecCtx;
 
 use super::{project, store};
@@ -10,9 +12,18 @@ use super::{project, store};
 const DEFAULT_TARGET: &str = "http://127.0.0.1:8080";
 
 /// Run the given test ids (all tests if `ids` is empty) against the local
-/// project's target, printing pass/fail per test and a summary line.
+/// project's target, printing pass/fail per test and a summary line (or a
+/// single JSON array when `json` is set). Uses the LLM for cases without a
+/// `spec` and for failure analysis when a key is available (`model`); falls
+/// back to the deterministic engine otherwise.
 /// Returns `0` if every test passed, `1` otherwise.
-pub async fn run(root: &Path, ids: &[String], url_override: Option<&str>) -> anyhow::Result<i32> {
+pub async fn run(
+    root: &Path,
+    ids: &[String],
+    url_override: Option<&str>,
+    model: &str,
+    json: bool,
+) -> anyhow::Result<i32> {
     let project = project::load(root)?;
 
     let target = url_override
@@ -33,35 +44,79 @@ pub async fn run(root: &Path, ids: &[String], url_override: Option<&str>) -> any
         return Ok(0);
     }
 
+    let llm = crate::server::llm::LlmClient::from_env(model);
     let ctx = ExecCtx {
         target: target.clone(),
-        llm: None,
+        llm: llm.clone(),
         prd: Arc::new(serde_json::json!({})),
     };
 
     let mut failed = 0;
     let total = tests.len();
+    let mut report = Vec::with_capacity(total);
     for t in &tests {
         let kind = t.kind.unwrap_or(project.kind);
         let ex = crate::server::executors::for_kind(kind);
         let case = serde_json::to_value(t)?;
         let outcome = ex.run(&case, &ctx).await;
 
-        if outcome.passed {
+        let analysis: Option<Value> = if !outcome.passed {
+            match &llm {
+                Some(c) => match c.analyze_failure(&case, &outcome.code, &outcome.error).await {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        tracing::warn!("failure analysis failed for {}: {e}", t.id);
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        if !outcome.passed {
+            failed += 1;
+        }
+
+        if json {
+            let mut entry = serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "passed": outcome.passed,
+                "error": outcome.error,
+            });
+            if let Some(analysis) = &analysis {
+                entry["analysis"] = analysis.clone();
+            }
+            report.push(entry);
+        } else if outcome.passed {
             println!("PASS  {}  {}", t.id, t.title);
         } else {
-            failed += 1;
             println!("FAIL  {}  {}", t.id, t.title);
             if !outcome.error.is_empty() {
                 println!("      {}", outcome.error);
             }
+            if let Some(analysis) = &analysis {
+                let verdict = analysis
+                    .get("verdict")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let cause = analysis.get("cause").and_then(Value::as_str).unwrap_or("?");
+                let fix = analysis.get("fix").and_then(Value::as_str).unwrap_or("?");
+                println!("      [{verdict}] {cause} — fix: {fix}");
+            }
         }
 
-        store::write_result(root, &t.id, &outcome)?;
+        store::write_result(root, &t.id, &outcome, analysis.as_ref())?;
     }
 
-    let passed = total - failed;
-    println!("\n{passed}/{total} passed");
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let passed = total - failed;
+        println!("\n{passed}/{total} passed");
+    }
 
     Ok(if failed == 0 { 0 } else { 1 })
 }

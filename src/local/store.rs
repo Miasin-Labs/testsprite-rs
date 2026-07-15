@@ -20,9 +20,15 @@ pub fn add(root: &Path, file: &Path) -> anyhow::Result<String> {
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let value: Value =
         serde_json::from_str(&body).with_context(|| format!("parsing {}", file.display()))?;
+    add_value(root, value)
+}
+
+/// Assign a uuid `id` if missing/empty, and store `value` under
+/// `tests/<id>.json`. Returns the id.
+pub fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     let mut obj = match value {
         Value::Object(obj) => obj,
-        _ => bail!("{} does not contain a JSON object", file.display()),
+        _ => bail!("test case is not a JSON object"),
     };
 
     let id = match obj.get("id").and_then(Value::as_str) {
@@ -81,16 +87,24 @@ pub fn load_one(root: &Path, id: &str) -> anyhow::Result<LocalTest> {
 }
 
 /// Write the outcome of running a test case to `results/<id>.json`.
-pub fn write_result(root: &Path, id: &str, outcome: &Outcome) -> anyhow::Result<()> {
+pub fn write_result(
+    root: &Path,
+    id: &str,
+    outcome: &Outcome,
+    analysis: Option<&Value>,
+) -> anyhow::Result<()> {
     let dir = results_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let record = serde_json::json!({
+    let mut record = serde_json::json!({
         "id": id,
         "passed": outcome.passed,
         "error": outcome.error,
         "code": outcome.code,
     });
+    if let Some(analysis) = analysis {
+        record["analysis"] = analysis.clone();
+    }
     let path = dir.join(format!("{id}.json"));
     let mut body = serde_json::to_string_pretty(&record)?;
     body.push('\n');
@@ -158,6 +172,21 @@ mod tests {
         assert_eq!(tests.len(), 2);
         assert_eq!(tests[0].id, "a");
         assert_eq!(tests[1].id, "b");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn add_value_without_id_assigns_uuid() {
+        let root = crate::local::tmp_root();
+
+        let id = add_value(&root, serde_json::json!({"title": "generated"})).unwrap();
+        assert!(!id.is_empty());
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+
+        let loaded = load_one(&root, &id).unwrap();
+        assert_eq!(loaded.id, id);
+        assert_eq!(loaded.title, "generated");
 
         std::fs::remove_dir_all(&root).unwrap();
     }

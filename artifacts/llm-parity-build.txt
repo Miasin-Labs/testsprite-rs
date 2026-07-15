@@ -1,0 +1,13 @@
+=== cargo build ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+=== cargo clippy --all-targets ===
+warn+err count: 0
+=== cargo test ===
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== changed (feature only) ===
+ M src/local/mod.rs
+ M src/local/run.rs
+ M src/local/store.rs
+ M src/main.rs
+ M src/server/llm.rs
+?? src/local/generate.rs

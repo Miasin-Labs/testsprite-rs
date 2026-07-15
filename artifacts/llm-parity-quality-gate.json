@@ -1,0 +1,44 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Delegated architect review (agent 3-ReviewLlmParity, opus) returned APPROVE with all three lanes CLEAR and no blocking findings. It verified all four acceptance criteria: (1) reuses the existing LlmClient + ExecCtx/Executor seam with no parallel path and no new deps; (2) the no-key deterministic path is behaviorally identical — ExecCtx.llm was already Option and stays None when LlmClient::from_env finds no key, so every executor takes its exact prior branch (confirmed by e2e case A/D); (3) failure analysis is strictly additive — `failed` increments only on !outcome.passed and the exit code is failed==0?0:1; analyze_failure errors resolve to None and never rescue a failed test (e2e case B: test still FAIL, 1/2 passed); (4) generate() bails clearly without a key and skips non-object plan items. It raised three P3/negligible nits; two were fixed this pass (run.rs now logs tracing::warn! when analysis errors instead of silently discarding; generate.rs now resolves the OpenAI key BEFORE parsing --from so a bad file with no key surfaces the key bail — verified). The remaining micro-nit (llm cloned into ctx + a double !outcome.passed eval) is negligible and accepted. Reverified green after the fixes.",
+    "commands": ["architect agent 3-ReviewLlmParity", "cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Real end-to-end with a LIVE OpenAI key. artifacts/llm-parity-e2e.txt: (A) deterministic no-key path (HOME override + unset OPENAI_API_KEY) runs spec cases unchanged — PASS/FAIL, exit 1, NO analysis lines; (D) --json emits a valid JSON array of {id,title,passed,error}; (B) with the real key, the failing spec case produced a genuine LLM classification `[bug] The endpoint '/nope' does not exist, leading to a 404 ... — fix: Implement the '/nope' endpoint` while the test still counted as FAIL (1/2 passed, exit 1); (C0) `test generate` with no key errors cleanly. artifacts/llm-generate-e2e.txt: real `test generate --instruction` produced 6 structured cases (happy + edge: no-todos, missing/empty/too-long title) stored as spec-less backend cases. Post-fix: `test generate --from bad.json` with no key now bails on the key first. build clean, clippy 0, cargo test 11/11 (adds add_value test).",
+    "e2eCommands": ["testsprite-rs test run", "testsprite-rs test run --json", "testsprite-rs test generate --instruction ...", "testsprite-rs test generate --from ..."],
+    "redTeamCommands": ["run a failing spec case WITH a key (analysis must classify but NOT rescue the FAIL / exit 1)", "run deterministic with HOME override + unset key (must be unchanged, no analysis)", "generate without a key (must bail clearly)"],
+    "artifactRefs": [
+      { "id": "e2e", "kind": "package-test-report", "path": "artifacts/llm-parity-e2e.txt", "description": "live e2e: deterministic no-key path + --json + real LLM failure analysis + no-key generate error" },
+      { "id": "gen", "kind": "package-test-report", "path": "artifacts/llm-generate-e2e.txt", "description": "live e2e: real `test generate` synthesizing 6 cases from an instruction" },
+      { "id": "build", "kind": "package-test-report", "path": "artifacts/llm-parity-build.txt", "description": "cargo build/clippy(0)/test(11/11)" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "brief: wire LlmClient into test run; keep deterministic path unchanged", "obligation": "LLM available when key present; spec cases still run with no key", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a2"] },
+      { "id": "cc2", "contractRef": "brief: test generate + failure analysis", "obligation": "LLM synthesizes cases; failures get bug/fragility/env + cause + fix", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a3"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs local CLI (compiled package) with a live OpenAI key", "surface": "package", "invocation": "target/debug/testsprite-rs test run | test run --json | test generate", "verdict": "passed", "artifactRefs": ["e2e", "gen"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "brief: analysis must never mask a real failure", "scenario": "a failing spec case run WITH a key present", "expectedBehavior": "LLM classifies it ([bug]…) but it still counts as FAIL and `test run` exits 1", "verdict": "passed", "artifactRefs": ["e2e"] },
+      { "id": "a2", "contractRef": "brief: deterministic no-key path unchanged", "scenario": "test run with OPENAI_API_KEY unset and HOME pointed away from jfc creds", "expectedBehavior": "spec cases run deterministically, no analysis lines, exit 1", "verdict": "passed", "artifactRefs": ["e2e"] },
+      { "id": "a3", "contractRef": "brief: generate errors clearly without a key", "scenario": "test generate (and --from bad.json) with no key", "expectedBehavior": "clean 'needs an OpenAI key' bail, key checked before file parse", "verdict": "passed", "artifactRefs": ["e2e"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "One review iteration: architect returned CLEAR/APPROVE; two P3 nits (missing warn on analysis error; --from parsed before key check) fixed and reverified; full loop rerun clean.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test", "no-key generate --from e2e"],
+    "blockers": []
+  }
+}

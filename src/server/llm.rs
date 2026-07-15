@@ -206,6 +206,19 @@ impl LlmClient {
         let code = self.chat(&system, &user, false).await?;
         Ok(strip_code_fences(&code))
     }
+    /// Classify a failed test (real bug vs test/env fragility) with root cause + fix.
+    pub async fn analyze_failure(&self, case: &Value, code: &str, error: &str) -> Result<Value> {
+        let system = "You are TestSprite's failure analyst. Given a test case, the code that ran, \
+            and the failure output, classify the failure. Respond with JSON only: \
+            {\"fixKind\":\"code|selector|data|env|unknown\",\"verdict\":\"bug|fragility|env\",\
+            \"cause\":\"one-sentence root cause\",\"fix\":\"one concrete fix\"}.";
+        let user = format!(
+            "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}",
+            serde_json::to_string_pretty(case)?, code, error
+        );
+        let out = self.chat(system, &user, true).await?;
+        serde_json::from_str(&out).context("failure analysis was not valid JSON")
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.

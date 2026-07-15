@@ -107,6 +107,27 @@ enum TestCmd {
         /// Override the project's target URL for this run.
         #[arg(long)]
         url: Option<String>,
+        /// OpenAI model for spec-less LLM execution and failure analysis.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        /// Print a single JSON array of results instead of PASS/FAIL lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate test cases with the LLM (needs an OpenAI key).
+    Generate {
+        /// Path to a code-summary JSON file.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Plain-text instruction describing what to test.
+        #[arg(long)]
+        instruction: Option<String>,
+        /// Modality to tag generated cases with: backend | frontend | mcp | rust.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// OpenAI model for PRD/plan generation.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
     },
 }
 
@@ -189,9 +210,35 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             }
             Ok(())
         }
-        TestCmd::Run { id, url } => {
-            let code = local::run::run(&root, &id, url.as_deref()).await?;
+        TestCmd::Run {
+            id,
+            url,
+            model,
+            json,
+        } => {
+            let code = local::run::run(&root, &id, url.as_deref(), &model, json).await?;
             std::process::exit(code);
+        }
+        TestCmd::Generate {
+            from,
+            instruction,
+            kind,
+            model,
+        } => {
+            let kind = kind.as_deref().map(server::executors::TestKind::parse);
+            let ids = local::generate::generate(
+                &root,
+                from.as_deref(),
+                instruction.as_deref(),
+                &model,
+                kind,
+            )
+            .await?;
+            println!("generated {} test(s)", ids.len());
+            for id in &ids {
+                println!("  {id}");
+            }
+            Ok(())
         }
     }
 }

@@ -1,0 +1,34 @@
+### A. deterministic path, NO key (HOME override + unset) — expect 1 PASS 1 FAIL, NO analysis, exit 1
+FAIL  b3c2937b-f5bc-47b1-bbe9-c1dc96950c68  missing but expects 200
+      expected Some(200), got 404
+PASS  c247903b-7dd8-4949-9f0e-189643e2c4aa  root 200
+
+1/2 passed
+exit=1
+
+### C0. test generate WITHOUT key — expect clean error
+Error: test generate needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key
+
+### D. test run --json (no key)
+[
+  {
+    "error": "expected Some(200), got 404",
+    "id": "b3c2937b-f5bc-47b1-bbe9-c1dc96950c68",
+    "passed": false,
+    "title": "missing but expects 200"
+  },
+  {
+    "error": "",
+    "id": "c247903b-7dd8-4949-9f0e-189643e2c4aa",
+    "passed": true,
+    "title": "root 200"
+  }
+]
+
+### B. failure analysis WITH real key — the failing case should get an [verdict] line
+FAIL  b3c2937b-f5bc-47b1-bbe9-c1dc96950c68  missing but expects 200
+      expected Some(200), got 404
+      [bug] The endpoint '/nope' does not exist, leading to a 404 error instead of the expected 200 status. — fix: Implement the '/nope' endpoint in the backend to return a 200 status.
+PASS  c247903b-7dd8-4949-9f0e-189643e2c4aa  root 200
+
+1/2 passed

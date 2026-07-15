@@ -2,6 +2,7 @@
 //! `test run` calls `server::executors::for_kind(kind).run()` directly against a
 //! local target; there is no server and no tunnel.
 
+pub mod generate;
 pub mod project;
 pub mod run;
 pub mod store;

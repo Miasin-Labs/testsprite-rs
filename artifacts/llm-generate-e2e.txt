@@ -1,0 +1,22 @@
+### test generate (real LLM: PRD -> plan -> stored cases)
+generated 6 test(s)
+  TC001
+  TC002
+  TC003
+  TC004
+  TC005
+  TC006
+### test list — generated cases stored (spec-less, LLM will gen code at run time)
+TC001  Retrieve List of Todos - Happy Path
+TC002  Retrieve List of Todos - No Todos Exist
+TC003  Create Todo - Happy Path
+TC004  Create Todo - Missing Title
+TC005  Create Todo - Empty Title
+TC006  Create Todo - Title Too Long
+### one generated case file:
+{
+  "description": "Verify that the API returns a list of todos when a GET request is made to /todos.",
+  "id": "TC001",
+  "kind": "backend",
+  "title": "Retrieve List of Todos - Happy Path"
+}
