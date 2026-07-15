@@ -21,7 +21,7 @@ impl Executor for HttpExecutor {
             .get("spec")
             .and_then(|s| from_value::<EndpointSpec>(s.clone()).ok())
         {
-            let (ok, err, code) = store::execute_spec(&spec, &ctx.target).await;
+            let (ok, err, code) = store::execute_spec(&spec, &ctx.target, &ctx.variables).await;
             return Outcome {
                 passed: ok,
                 error: err,

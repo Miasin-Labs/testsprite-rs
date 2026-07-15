@@ -63,6 +63,9 @@ pub struct ExecCtx {
     pub shots_dir: Option<std::path::PathBuf>,
     /// Project/repo root a `command` test runs in.
     pub root: std::path::PathBuf,
+    /// Path-param variable seeds (`{id}` -> a real value) from
+    /// `testsprite_tests/variables.json`; empty falls back to the `1` probe.
+    pub variables: std::collections::HashMap<String, String>,
 }
 
 /// The outcome of executing one case.

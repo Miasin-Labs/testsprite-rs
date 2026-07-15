@@ -267,6 +267,7 @@ async fn backend_run(State(state): State<AppState>, Json(body): Json<Value>) -> 
         browser: None,
         shots_dir: None,
         root: std::env::current_dir().unwrap_or_default(),
+        variables: std::collections::HashMap::new(),
     };
     store::spawn_execution(state.store.clone(), executor, ctx, to_run);
     (StatusCode::CREATED, Json(json!({ "testIds": ids })))

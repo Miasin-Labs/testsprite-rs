@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 /// One executable endpoint check derived from the code summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,19 +51,28 @@ fn parse_endpoint(v: &Value) -> Option<EndpointSpec> {
     })
 }
 
-/// Substitute `{param}` path segments with a probe value (`1`).
-pub fn concrete_path(path: &str) -> String {
+/// Substitute `{param}` path segments: use `vars[param]` when present, else the
+/// probe value `1`. The map (from `testsprite_tests/variables.json`) lets
+/// deterministic tests hit real records — e.g. `{id}` -> a real UUID — instead
+/// of 404ing on the `1` placeholder.
+pub fn concrete_path(path: &str, vars: &HashMap<String, String>) -> String {
     let mut out = String::new();
+    let mut name = String::new();
     let mut in_brace = false;
     for ch in path.chars() {
         match ch {
             '{' => {
                 in_brace = true;
-                out.push('1');
+                name.clear();
             }
-            '}' => in_brace = false,
-            // Drop characters that make up the parameter name itself.
-            _ if in_brace => continue,
+            '}' => {
+                in_brace = false;
+                match vars.get(&name) {
+                    Some(v) => out.push_str(v),
+                    None => out.push('1'),
+                }
+            }
+            _ if in_brace => name.push(ch),
             c => out.push(c),
         }
     }
@@ -121,11 +131,11 @@ pub fn prd_from_code_summary(code_summary: &Value) -> Value {
 }
 
 /// Generate the Python `requests` test-code artifact for a case.
-pub fn python_for(spec: &EndpointSpec, base_url: &str) -> String {
+pub fn python_for(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, String>) -> String {
     let url = format!(
         "{}{}",
         base_url.trim_end_matches('/'),
-        concrete_path(&spec.path)
+        concrete_path(&spec.path, vars)
     );
     let fn_name = format!(
         "test_{}_{}",
@@ -165,5 +175,24 @@ fn py_literal(v: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concrete_path_seeds_from_vars_else_probe() {
+        let mut vars = HashMap::new();
+        vars.insert("id".to_string(), "uuid-1234".to_string());
+        // known param -> the variable; unknown -> the `1` probe; literals untouched
+        assert_eq!(concrete_path("/users/{id}", &vars), "/users/uuid-1234");
+        assert_eq!(
+            concrete_path("/users/{id}/posts/{postId}", &vars),
+            "/users/uuid-1234/posts/1"
+        );
+        assert_eq!(concrete_path("/health", &vars), "/health");
+        assert_eq!(concrete_path("/a/{x}", &HashMap::new()), "/a/1");
     }
 }

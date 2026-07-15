@@ -92,12 +92,12 @@ pub fn new_running_entity(
 }
 
 /// Execute one endpoint spec against `base_url`; returns (passed, error, code).
-pub async fn execute_spec(spec: &EndpointSpec, base_url: &str) -> (bool, String, String) {
-    let code = engine::python_for(spec, base_url);
+pub async fn execute_spec(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, String>) -> (bool, String, String) {
+    let code = engine::python_for(spec, base_url, vars);
     let url = format!(
         "{}{}",
         base_url.trim_end_matches('/'),
-        engine::concrete_path(&spec.path)
+        engine::concrete_path(&spec.path, vars)
     );
     let client = reqwest::Client::new();
 

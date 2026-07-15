@@ -66,6 +66,7 @@ mod tests {
             browser: None,
             shots_dir: None,
             root: std::env::current_dir().unwrap_or_default(),
+            variables: std::collections::HashMap::new(),
         }
     }
 

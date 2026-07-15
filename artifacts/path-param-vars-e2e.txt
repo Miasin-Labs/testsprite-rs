@@ -1,0 +1,18 @@
+Path-param variables + Discord graceful shutdown (2026-07-15)
+============================================================
+#2 Path-param seeding: engine::concrete_path(path, vars) now looks up {param} in a
+variables map before the `1` fallback. Map = testsprite_tests/variables.json, loaded
+into ExecCtx.variables by run.rs/rerun.rs. CLI: `project set-var <key> <value>`.
+
+Live e2e (server 200s only on /users/42):
+  spec GET /users/{id} expect 200
+  run (no var)         -> {id}->1  -> /users/1  -> 404 -> FAIL (0/1)
+  project set-var id 42 -> variables.json {"id":"42"}
+  run (with var)       -> {id}->42 -> /users/42 -> 200 -> PASS (1/1)
+Also flows through MCP testsprite_local_run (same run_collect path). +1 unit test.
+
+#3 Discord graceful shutdown: discord::run spawns a Ctrl+C task that calls
+client.shard_manager.shutdown_all() to close the gateway cleanly instead of a hard
+kill. Compile-verified with --features discord (live bot test needs a token).
+
+clippy 0 (default), cargo test 74/74, --features discord builds clean of our changes.

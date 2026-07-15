@@ -57,6 +57,7 @@ pub async fn rerun(
         browser: None,
         shots_dir: None,
         root: root.to_path_buf(),
+        variables: crate::local::project::load_variables(root),
     };
 
     let mut failed = 0;

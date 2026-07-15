@@ -211,6 +211,13 @@ what you just changed" pre-merge loop, local. `ci init` writes a `pull_request`
 GitHub Actions workflow that runs `gate` (2.1's "PR blocks merge"). `test generate
 --doc <file>` distills a normalized PRD from an arbitrary README/notes/Jira/spec.
 
+**Path-param seeding** — `engine::concrete_path(path, vars)` looks up a `{param}`
+in a variables map before the `1` probe fallback, so deterministic specs hit real
+records (`/users/{id}` -> a real UUID) instead of 404ing. Map lives in
+`testsprite_tests/variables.json`, loaded into `ExecCtx.variables`; set via
+`project set-var <key> <value>`. **Discord graceful shutdown** — `discord::run`
+traps Ctrl+C and calls `shard_manager.shutdown_all()` to close the gateway cleanly.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

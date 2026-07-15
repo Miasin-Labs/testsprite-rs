@@ -478,6 +478,18 @@ pub async fn run(token_override: Option<String>) -> Result<()> {
         })
         .await
         .context("building the Discord client")?;
+
+    // Graceful shutdown: on Ctrl+C, close the gateway cleanly via Serenity's own
+    // shard manager instead of a hard kill that can leave the socket/typing
+    // state dangling. Its own task; `run.rs`'s interrupt_watcher is a separate
+    // execution path that does not cover the bot.
+    let shard_manager = client.shard_manager.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("SIGINT — shutting down Discord gateway cleanly");
+            shard_manager.shutdown_all().await;
+        }
+    });
     client.start().await.context("Discord client error")?;
     Ok(())
 }

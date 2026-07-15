@@ -1,6 +1,7 @@
 //! `project` table lifecycle (single row, id=1): init, load, show.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 use anyhow::{Context, anyhow};
 
@@ -54,6 +55,47 @@ pub async fn show(root: &Path) -> anyhow::Result<()> {
     let project = load(root).await?;
     println!("{}", serde_json::to_string_pretty(&project)?);
     Ok(())
+}
+
+/// Read `testsprite_tests/variables.json` — a `{param: value}` map that seeds
+/// `{param}` path segments in deterministic specs (so `{id}` can hit a real
+/// record instead of the `1` probe). Empty when absent/unparseable: variables
+/// are best-effort, never fatal.
+pub fn load_variables(root: &Path) -> HashMap<String, String> {
+    let path = super::ts_dir(root).join("variables.json");
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let raw: HashMap<String, serde_json::Value> = serde_json::from_str(&body).unwrap_or_default();
+    raw.into_iter()
+        .map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            (k, s)
+        })
+        .collect()
+}
+
+/// Upsert one `key=value` into `testsprite_tests/variables.json` (created if
+/// needed). Returns the full updated map.
+pub fn set_variable(
+    root: &Path,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut vars = load_variables(root);
+    vars.insert(key.to_string(), value.to_string());
+    let dir = super::ts_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    // BTreeMap for stable, diff-friendly key ordering on disk.
+    let ordered: std::collections::BTreeMap<&String, &String> = vars.iter().collect();
+    std::fs::write(
+        dir.join("variables.json"),
+        serde_json::to_string_pretty(&ordered)? + "\n",
+    )?;
+    Ok(vars)
 }
 
 #[cfg(test)]

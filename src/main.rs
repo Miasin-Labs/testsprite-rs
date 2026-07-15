@@ -202,6 +202,13 @@ enum ProjectCmd {
     },
     /// Print the current project.json.
     Show,
+    /// Set a path-param variable ({id} -> value) in testsprite_tests/variables.json.
+    SetVar {
+        /// Variable name (the {name} in a route, e.g. id).
+        key: String,
+        /// Value to substitute (e.g. a real UUID or record id).
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -632,6 +639,11 @@ async fn run_project(cmd: ProjectCmd) -> Result<()> {
             Ok(())
         }
         ProjectCmd::Show => local::project::show(&root).await,
+        ProjectCmd::SetVar { key, value } => {
+            let vars = local::project::set_variable(&root, &key, &value)?;
+            println!("set {key} = {value}  ({} variable(s) total)", vars.len());
+            Ok(())
+        }
     }
 }
 

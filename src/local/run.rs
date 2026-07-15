@@ -114,6 +114,7 @@ pub async fn run_collect(
     }
 
     let llm = crate::server::llm::LlmClient::from_env(model);
+    let variables = project::load_variables(root);
     let ctx = ExecCtx {
         target: target.clone(),
         llm: llm.clone(),
@@ -121,6 +122,7 @@ pub async fn run_collect(
         browser: browser.map(str::to_string),
         shots_dir: browser.map(|_| super::ts_dir(root).join("shots")),
         root: root.to_path_buf(),
+        variables,
     };
     let default_kind = project.as_ref().map(|p| p.kind).unwrap_or_default();
 
