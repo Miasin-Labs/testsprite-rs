@@ -18,6 +18,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "m
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
+serenity = { path = "/home/cole/RustProjects/forks/serenity", optional = true, default-features = false, features = ["builder", "client", "gateway", "model", "http", "utils", "rustls_backend"] }
 sha2 = "0.11.0"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"
@@ -36,3 +37,8 @@ tree-sitter-typescript = "0.23.2"
 uuid = { version = "1.23.3", features = ["v4"] }
 walkdir = "2.5.0"
 yamux = "0.13.10"
+
+[features]
+# The Discord bot front-end (`testsprite-rs discord`). Heavy dep tree, so opt-in:
+#   cargo build --features discord
+discord = ["dep:serenity"]

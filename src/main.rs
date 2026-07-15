@@ -7,6 +7,8 @@
 
 mod backend;
 mod config;
+#[cfg(feature = "discord")]
+mod discord;
 mod envs;
 mod local;
 mod mcp;
@@ -104,6 +106,13 @@ enum Command {
     Agent {
         #[command(subcommand)]
         cmd: AgentCmd,
+    },
+    /// Run the Discord bot front-end for the agent (build with `--features discord`).
+    #[cfg(feature = "discord")]
+    Discord {
+        /// Override the bot token (else config `[discord].token_file` or `token.key`).
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -303,6 +312,8 @@ async fn main() -> Result<()> {
             std::process::exit(if regression { 1 } else { 0 });
         }
         Command::Agent { cmd } => run_agent(cmd).await,
+        #[cfg(feature = "discord")]
+        Command::Discord { token } => discord::run(token).await,
     }
 }
 

@@ -1,0 +1,20 @@
+### Discord bot front-end (--features discord) — live verification
+
+Build:
+  cargo build            -> default build unchanged, clippy 0, cargo test 30/30
+  cargo build --features discord  -> compiles (serenity path dep), our src/ clippy 0
+
+Live login (token read from token.key, never printed):
+  $ testsprite-rs discord
+  INFO serenity::gateway::bridge::shard_runner: [ShardRunner ShardInfo { id: ShardId(0), total: 1 }] Running
+  INFO testsprite_rs::discord: discord: connected as testsprite — agent root /home/cole/RustProjects/active/testsprite-rs
+
+Notes:
+- First attempt failed with gateway 4014 "Disallowed intent(s)"; resolved by enabling
+  the MESSAGE CONTENT (and Presence) privileged intents in the Discord dev portal.
+- Wiring: EventHandler::message -> agent::message() (channel id = conversation id),
+  proposed actions render as ✅ Approve / ❌ Reject buttons (custom_id
+  "approve|reject:<conv>:<action_id>"); EventHandler::interaction_create defers within
+  the 3s window, calls agent::resolve(), then edits the response with the result.
+- The agent engine (agent::message/resolve) is separately live-proven end to end
+  (see artifacts/agent-conversations-e2e.txt); Discord is a thin front-end over it.

@@ -1,0 +1,19 @@
+# testsprite-rs runtime config — copy to ~/.config/testsprite/config.toml
+#
+# Currently only the Discord bot front-end reads this. Build the bot with:
+#   cargo build --features discord
+# then run:  testsprite-rs discord
+
+[discord]
+# Path to the file whose sole contents are the Discord bot token.
+# The token is NEVER inlined here or logged. token.key is gitignored.
+token_file = "token.key"
+
+# Only guild messages starting with this prefix are handled (DMs always are).
+prefix = "ts "
+
+# OpenAI model the agent plans/executes with (no key -> deterministic routing).
+model = "gpt-4o-mini"
+
+# Project directory whose testsprite_tests/testsprite.db the agent drives.
+root = "."

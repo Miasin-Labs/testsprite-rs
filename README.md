@@ -114,6 +114,30 @@ testsprite-rs test run --json --fix
   **`--fix`** writes an LLM **repair patch** to `testsprite_tests/fixes/<id>.md`
   (a unified-diff hunk a coding agent can apply). `--json` emits a CI-friendly array.
 
+## Talk to it — agent conversations (MCP + CLI + Discord)
+
+A threaded, DB-backed agent that proposes **one action at a time** (generate /
+run) which you **approve** before it executes — the whole loop is local (SQLite),
+no cloud.
+
+```bash
+testsprite-rs agent message "generate a test that GETs / and expects 404"
+testsprite-rs agent approve <conv> <id>       # LLM generates; --reject to skip
+testsprite-rs agent message --conversation <conv> "now run them"
+testsprite-rs agent history <conv>            # the thread + action ledger
+```
+
+Same three tools over MCP (`testsprite_agent_message` / `_approve` / `_history`)
+so Claude Code / Codex / OpenCode drive it. An optional **Discord bot** fronts the
+exact same engine — a message becomes a proposal, the approval gate is ✅/❌
+buttons:
+
+```bash
+cargo build --features discord              # opt-in (heavy serenity dep tree)
+cp config.example.toml ~/.config/testsprite/config.toml   # token stays in token.key
+testsprite-rs discord
+```
+
 ## Local backend — run the whole thing with NO account / NO cloud
 
 `testsprite-rs backend` is a drop-in local reimplementation of
