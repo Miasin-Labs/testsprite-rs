@@ -120,13 +120,20 @@ pub fn crontab(root: &Path, bin: &str) -> Result<String> {
         let cron = cadence_cron(&s.cadence)
             .with_context(|| format!("schedule {:?} has invalid cadence {:?}", s.name, s.cadence))?;
         out.push_str(&format!(
-            "{cron} cd {} && {bin} test run --group {}  # testsprite-rs:{}\n",
-            root.display(),
-            s.group,
+            "{cron} cd {} && {} test run --group {}  # testsprite-rs:{}\n",
+            sh_quote(&root.display().to_string()),
+            sh_quote(bin),
+            sh_quote(&s.group),
             s.name
         ));
     }
     Ok(out)
+}
+
+/// POSIX single-quote a value so the emitted crontab line survives spaces and
+/// shell metacharacters in the path, binary, or group name.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -198,14 +205,26 @@ mod tests {
             .find(|l| l.contains("testsprite-rs:nightly"))
             .unwrap();
         assert!(nightly_line.starts_with("0 9 * * *"));
-        assert!(nightly_line.contains("test run --group smoke"));
+        assert!(nightly_line.contains("test run --group 'smoke'"));
 
         let hourly_line = lines
             .iter()
             .find(|l| l.contains("testsprite-rs:hourly-check"))
             .unwrap();
         assert!(hourly_line.starts_with("0 * * * *"));
-        assert!(hourly_line.contains("test run --group core"));
+        assert!(hourly_line.contains("test run --group 'core'"));
+    }
+
+    #[test]
+    fn crontab_shell_quotes_group_with_spaces() {
+        let root = tmp_root();
+        add(&root, "sp", "my group", "daily").unwrap();
+        let out = crontab(&root, "testsprite").unwrap();
+        // A spaced group must stay a SINGLE argument via single-quoting.
+        assert!(
+            out.contains("test run --group 'my group'"),
+            "spaced group not quoted: {out}"
+        );
     }
 
     #[test]
