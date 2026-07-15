@@ -302,7 +302,7 @@ impl Handler {
         )
         .await
         {
-            Ok(v) => v["assistant"].as_str().unwrap_or("done").to_string(),
+            Ok(v) => self.render(&v).await,
             Err(e) => format!("error: {e}"),
         };
         let _ = c
@@ -311,6 +311,32 @@ impl Handler {
                 EditInteractionResponse::new().content(truncate(&content, 1900)),
             )
             .await;
+    }
+
+    /// Render a resolve result richly: a per-test code-block table for a run, a
+    /// generated-test list for a generate, else the plain assistant line.
+    async fn render(&self, v: &Value) -> String {
+        match v["kind"].as_str() {
+            Some("run") => {
+                let results: Vec<Value> =
+                    v["result"]["results"].as_array().cloned().unwrap_or_default();
+                format_run(&results)
+            }
+            Some("generate") => {
+                let mut tests = Vec::new();
+                if let Some(ids) = v["result"]["ids"].as_array() {
+                    for id in ids.iter().filter_map(Value::as_str) {
+                        let title = crate::local::store::load_one(&self.cfg.root, id)
+                            .await
+                            .map(|t| t.title)
+                            .unwrap_or_default();
+                        tests.push((id.to_string(), title));
+                    }
+                }
+                format_generate(&tests)
+            }
+            _ => v["assistant"].as_str().unwrap_or("done").to_string(),
+        }
     }
 }
 
@@ -326,6 +352,88 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// A fenced-code-block table of per-test outcomes with error + verdict + fix.
+fn format_run(results: &[Value]) -> String {
+    let total = results.len();
+    let passed = results
+        .iter()
+        .filter(|r| r["passed"].as_bool() == Some(true))
+        .count();
+    let mut body = String::new();
+    let mut budget = 1600usize;
+    for r in results {
+        let id = r["id"].as_str().unwrap_or("?");
+        let title = r["title"].as_str().unwrap_or("");
+        let line = if r["passed"].as_bool() == Some(true) {
+            format!("PASS  {id}  {}\n", truncate(title, 52))
+        } else {
+            let fk = r["failureKind"].as_str().unwrap_or("failed");
+            let mut s = format!("FAIL  {id}  [{fk}] {}\n", truncate(title, 44));
+            if let Some(err) = r["error"].as_str().filter(|e| !e.is_empty()) {
+                s.push_str(&format!("      error: {}\n", truncate(err, 100)));
+            }
+            if let Some(cause) = r["analysis"]["cause"].as_str().filter(|c| !c.is_empty()) {
+                s.push_str(&format!("      cause: {}\n", truncate(cause, 100)));
+            }
+            if let Some(fix) = r["analysis"]["fix"].as_str().filter(|f| !f.is_empty()) {
+                s.push_str(&format!("      fix:   {}\n", truncate(fix, 100)));
+            }
+            s
+        };
+        if line.len() > budget {
+            body.push_str("      … (more)\n");
+            break;
+        }
+        budget -= line.len();
+        body.push_str(&line);
+    }
+    format!(
+        "**Ran {total} · {passed} passed · {} failed**\n```\n{body}```",
+        total - passed
+    )
+}
+
+/// A bullet list of the tests a generate action produced.
+fn format_generate(tests: &[(String, String)]) -> String {
+    let mut out = format!("**Generated {} test(s):**\n", tests.len());
+    for (id, title) in tests {
+        out.push_str(&format!("• `{id}` — {}\n", truncate(title, 90)));
+    }
+    truncate(&out, 1900)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn run_table_shows_pass_fail_error_cause_and_fix() {
+        let results = vec![
+            json!({"id":"TC001","title":"root ok","passed":true}),
+            json!({"id":"TC002","title":"root bad","passed":false,"failureKind":"routing_404",
+                   "error":"expected 200, got 404",
+                   "analysis":{"cause":"the route is missing","fix":"add the handler"}}),
+        ];
+        let out = format_run(&results);
+        assert!(out.contains("1 passed · 1 failed"), "{out}");
+        assert!(out.contains("PASS  TC001"));
+        assert!(out.contains("FAIL  TC002  [routing_404]"));
+        assert!(out.contains("expected 200, got 404"));
+        assert!(out.contains("the route is missing"));
+        assert!(out.contains("add the handler"));
+        assert!(out.contains("```"));
+    }
+
+    #[test]
+    fn generate_list_shows_ids_and_titles() {
+        let out = format_generate(&[("TC001".into(), "First".into()), ("TC002".into(), "Second".into())]);
+        assert!(out.contains("Generated 2 test(s)"));
+        assert!(out.contains("`TC001` — First"));
+        assert!(out.contains("`TC002` — Second"));
+    }
 }
 
 /// Connect to Discord and run the agent bot until the process is stopped.
