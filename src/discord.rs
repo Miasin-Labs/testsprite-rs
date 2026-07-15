@@ -200,7 +200,7 @@ impl EventHandler for Handler {
 
         let conv = msg.channel_id.to_string();
         tracing::info!("discord: message in {conv}: {}", truncate(&text, 80));
-        match crate::local::agent::message(&self.cfg.root, Some(&conv), &text, &self.cfg.model).await
+        match crate::local::agent::message(&self.cfg.root, Some(&conv), &text, &self.cfg.model, false).await
         {
             Ok(v) => {
                 let builder = CreateMessage::new()
@@ -260,6 +260,7 @@ impl Handler {
             Some(&conv),
             &message,
             &self.cfg.model,
+            false,
         )
         .await
         {

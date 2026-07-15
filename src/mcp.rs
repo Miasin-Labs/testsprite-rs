@@ -56,8 +56,8 @@ fn tool_list() -> Value {
               "description": "Rename a stored test's title. Use this to fix the munged/duplicate TC000 names auto-generation produces — give each test a meaningful, unique name.",
               "inputSchema": obj_schema(&[("id","string"),("title","string")]) },
             { "name": "testsprite_agent_message",
-              "description": "Talk to the local test agent: it proposes ONE action (generate/run) to approve.",
-              "inputSchema": obj_schema(&[("conversation_id","string"),("message","string"),("model","string")]) },
+              "description": "Talk to the local test agent: it proposes ONE action (generate/run) to approve. Set auto_approve:true to execute the proposed action immediately (no separate approve step).",
+              "inputSchema": obj_schema(&[("conversation_id","string"),("message","string"),("model","string"),("auto_approve","boolean")]) },
             { "name": "testsprite_agent_approve",
               "description": "Approve (or reject) a pending agent action by id; executes the pipeline.",
               "inputSchema": obj_schema(&[("conversation_id","string"),("action_id","number"),("approve","boolean"),("model","string")]) },
@@ -205,7 +205,8 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: message"))?;
             let conversation_id = args.get("conversation_id").and_then(|v| v.as_str());
-            crate::local::agent::message(&root, conversation_id, message, model).await
+            let auto_approve = args.get("auto_approve").and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::local::agent::message(&root, conversation_id, message, model, auto_approve).await
         }
         "testsprite_agent_approve" => {
             let model = args

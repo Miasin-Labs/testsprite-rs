@@ -144,6 +144,9 @@ enum AgentCmd {
         /// OpenAI model for the conversational planner.
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
+        /// Auto-execute the proposed action immediately (no separate approve step).
+        #[arg(long)]
+        auto_approve: bool,
         /// The message text (joined from remaining words).
         #[arg(trailing_var_arg = true, required = true)]
         message: Vec<String>,
@@ -514,11 +517,13 @@ async fn run_agent(cmd: AgentCmd) -> Result<()> {
         AgentCmd::Message {
             conversation,
             model,
+            auto_approve,
             message,
         } => {
             let text = message.join(" ");
             let out =
-                local::agent::message(&root, conversation.as_deref(), &text, &model).await?;
+                local::agent::message(&root, conversation.as_deref(), &text, &model, auto_approve)
+                    .await?;
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
         }

@@ -1,0 +1,8 @@
+Live-API-driven feature: agent auto-approve (2026-07-15)
+========================================================
+Source: GET https://api.testsprite.com/v3/agent/settings -> {"autoApprove": false}
+  (captured read-only with the user's own Cognito session; TestSprite's agent has an auto-approve toggle)
+
+$ agent message --auto-approve "run the tests"  => pendingActions:[], autoApproved:{kind:run, result,...} (EXECUTED)
+$ agent message "run the tests"                 => pendingActions:[1] (waits for approve), autoApproved:null
+MCP testsprite_agent_message gains auto_approve:boolean. +1 unit test. clippy 0.

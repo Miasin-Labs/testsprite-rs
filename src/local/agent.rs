@@ -18,6 +18,7 @@ pub async fn message(
     conversation_id: Option<&str>,
     user_msg: &str,
     model: &str,
+    auto_approve: bool,
 ) -> Result<Value> {
     let pool = super::db::open(root).await?;
 
@@ -86,6 +87,7 @@ pub async fn message(
         .await?;
 
     let mut pending = Vec::new();
+    let mut auto_approved = Value::Null;
     if kind == "generate" || kind == "run" {
         let args = serde_json::to_string(&action)?;
         let summary = action["summary"].as_str().unwrap_or("").to_string();
@@ -98,12 +100,18 @@ pub async fn message(
         .bind(&summary)
         .fetch_one(&pool)
         .await?;
-        pending.push(json!({
-            "id": action_id,
-            "kind": kind,
-            "summary": summary,
-            "args": action,
-        }));
+        if auto_approve {
+            // Mirror TestSprite's agent autoApprove: execute the proposed action
+            // immediately instead of waiting for a manual resolve().
+            auto_approved = resolve(root, &conv_id, action_id, true, model).await?;
+        } else {
+            pending.push(json!({
+                "id": action_id,
+                "kind": kind,
+                "summary": summary,
+                "args": action,
+            }));
+        }
     }
 
     sqlx::query("UPDATE conversations SET updated_at=datetime('now') WHERE id=?")
@@ -115,6 +123,7 @@ pub async fn message(
         "conversationId": conv_id,
         "assistant": assistant_text,
         "pendingActions": pending,
+        "autoApproved": auto_approved,
     }))
 }
 
@@ -369,7 +378,7 @@ mod tests {
     async fn message_with_no_key_proposes_a_run_action() {
         let _guard = NoKeyGuard::new();
         let root = super::super::tmp_root();
-        let out = message(&root, None, "run the tests", "gpt-4o-mini")
+        let out = message(&root, None, "run the tests", "gpt-4o-mini", false)
             .await
             .unwrap();
 
@@ -394,10 +403,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_approve_executes_without_a_pending_action() {
+        let _guard = NoKeyGuard::new();
+        let root = super::super::tmp_root();
+        let out = message(&root, None, "run the tests", "gpt-4o-mini", true)
+            .await
+            .unwrap();
+        // Auto-approved: nothing left pending, and the proposed action executed.
+        assert!(out["pendingActions"].as_array().unwrap().is_empty());
+        assert!(!out["autoApproved"].is_null());
+        assert_eq!(out["autoApproved"]["kind"], "run");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
     async fn resolve_reject_then_second_resolve_errors() {
         let _guard = NoKeyGuard::new();
         let root = super::super::tmp_root();
-        let out = message(&root, None, "run the tests", "gpt-4o-mini")
+        let out = message(&root, None, "run the tests", "gpt-4o-mini", false)
             .await
             .unwrap();
         let conv_id = out["conversationId"].as_str().unwrap().to_string();
