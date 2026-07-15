@@ -1,0 +1,113 @@
+G003 QA — rerun --failed & doctor --json red-team run
+Date: 2026-07-15T03:34:40-04:00
+Work dir: /tmp/g003-qa
+
+===== rerun --failed =====
+-- test add x3 (pass1=true, fail1='exit 1', pass2=true) --
+-- test run (initial) --
+FAIL  fail1  fail1
+      command failed (exit 1): 
+      [bug] The command 'exit 1' is intended to terminate the process with an error code, indicating failure. — fix: Replace 'exit 1' with a successful command or remove it if not needed.
+PASS  pass1  pass1
+PASS  pass2  pass2
+
+2/3 passed
+(real exit code observed: 1)
+
+-- test rerun --failed --json (should select ONLY fail1) --
+[
+  {
+    "healed": false,
+    "id": "fail1",
+    "passed": false,
+    "title": "fail1",
+    "verdict": "bug"
+  }
+]
+(exit code: 1; parsed id set == {fail1}: PASS)
+
+-- fix fail1 to 'true' via re-add (upsert, no duplicate id created) --
+-- test run (after fix): 
+PASS  fail1  fail1
+PASS  pass1  pass1
+PASS  pass2  pass2
+
+3/3 passed
+(exit code: 0)
+
+-- test rerun --failed (after fix, expect 'no failed tests to rerun') --
+no failed tests to rerun
+(exit code: 0) PASS
+
+-- project-tolerance: no 'project init' was ever run in this session; all add/run/rerun commands succeeded without a project config. PASS
+
+-- adversarial: re-broke fail1 (exit 1), test run:
+FAIL  fail1  fail1
+      command failed (exit 1): 
+      [bug] The command 'exit 1' is intended to terminate the script with an error status, which is not a failure in the context of the test. — fix: Change the command to a valid operation that does not exit with an error status.
+PASS  pass1  pass1
+PASS  pass2  pass2
+
+2/3 passed
+-- test rerun --failed --id pass1 --json (both flags; expect --failed wins, reruns {fail1} not pass1) --
+[
+  {
+    "healed": false,
+    "id": "fail1",
+    "passed": false,
+    "title": "fail1",
+    "verdict": "bug"
+  }
+]
+(exit code: 1; parsed id set == {fail1}, NOT pass1: --failed correctly took precedence over --id, matching '--failed replaces --id' doc. Minor note: no warning/notice was printed to stderr that --id was ignored.)
+
+===== doctor --json =====
+-- doctor --json (env OPENAI_API_KEY=) --
+{
+  "checks": [
+    {
+      "detail": "configured, LLM features enabled",
+      "name": "openai key",
+      "status": "ok"
+    },
+    {
+      "detail": "cargo 1.99.0-nightly (7e707bd34 2026-07-13)",
+      "name": "cargo",
+      "status": "ok"
+    },
+    {
+      "detail": "cargo-llvm-cov 0.6.18",
+      "name": "cargo-llvm-cov",
+      "status": "ok"
+    },
+    {
+      "detail": "v26.4.0",
+      "name": "node",
+      "status": "ok"
+    },
+    {
+      "detail": "chromium, firefox, webkit",
+      "name": "playwright browsers",
+      "status": "ok"
+    },
+    {
+      "detail": "Docker version 29.1.3, build f52814d454173982e6692dd7e290a41b828d9cbc (webkit + any-browser via Docker)",
+      "name": "docker",
+      "status": "ok"
+    },
+    {
+      "detail": "gh version 2.81.0 (2026-04-11)",
+      "name": "gh",
+      "status": "ok"
+    },
+    {
+      "detail": "Python 3.13.14",
+      "name": "python3",
+      "status": "ok"
+    }
+  ]
+}
+(exit code: 0)
+Shape assertions: checks is non-empty array (8 elements); every element has name+status+detail; every status in {ok,warn,fail}: PASS
+Exit-code correlation: no 'fail' status present among 8 checks -> exit 0 observed. Matches documented contract (exit 1 iff any check is 'fail').
+Note: 'openai key' check reported status=ok/'configured, LLM features enabled' even though OPENAI_API_KEY was set empty in this shell — doctor evidently also consults ~/.config/jfc/credentials.toml, so the env var alone did not force a 'fail'/'warn' on that check. This did not affect the exit-code<->status invariant, which held for all 8 checks observed.
