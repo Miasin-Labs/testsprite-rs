@@ -53,3 +53,42 @@ pub async fn generate(
     }
     Ok(ids)
 }
+
+/// Generate a test case per function found by the structural coverage surface
+/// under `path`, targeting each function's inputs/outputs and control-flow
+/// branches. Stores the cases and returns their ids.
+pub async fn generate_cover(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    model: &str,
+) -> anyhow::Result<Vec<String>> {
+    let units = crate::local::coverage::structural_surface(path)?;
+    if units.is_empty() {
+        anyhow::bail!("no functions found under {}", path.display());
+    }
+    let functions = serde_json::Value::Array(
+        units
+            .iter()
+            .take(40)
+            .map(|u| serde_json::json!({"name": u.name, "file": u.file, "branches": u.branches}))
+            .collect(),
+    );
+
+    let Some(llm) = crate::server::llm::LlmClient::from_env(model) else {
+        anyhow::bail!(
+            "test generate --cover needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
+        )
+    };
+
+    let cases = llm.generate_from_functions(&functions).await?;
+
+    let mut ids = Vec::new();
+    for case in cases {
+        if !case.is_object() {
+            continue;
+        }
+        let id = store::add_value(root, case)?;
+        ids.push(id);
+    }
+    Ok(ids)
+}

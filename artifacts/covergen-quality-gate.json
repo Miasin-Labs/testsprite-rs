@@ -1,0 +1,39 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of the coverage-driven generation change (G001). Reuses the existing pieces with no forked logic: llm.rs gains generate_from_functions (same chat+plan-parse pattern as generate_plan); generate.rs gains generate_cover which calls the existing coverage::structural_surface, caps to 40 units to bound LLM output, requires a key (clear bail otherwise), and stores each returned case via store::add_value; main.rs extends TestCmd::Generate with --cover/--path and branches to generate_cover, leaving the non-cover behavior identical. Small, cohesive, idiomatic. Deterministic no-key path unchanged; --cover errors clearly without a key.",
+    "commands": ["read src/local/generate.rs generate_cover", "read src/server/llm.rs generate_from_functions", "cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Live end-to-end with a real OpenAI key (artifacts/covergen-e2e.txt): on a Python source tree with two functions (add, clamp), `test generate --cover --path src` enumerated them via the tree-sitter structural surface and produced exactly two targeted test cases (TC001 'Test add function', TC002 'Test clamp function'), stored and visible via `test list`. This closes the coverage->generate loop at the FUNCTION level (not just APIs). build clean, clippy 0, cargo test 13/13.",
+    "e2eCommands": ["testsprite-rs test generate --cover --path src", "testsprite-rs test list"],
+    "redTeamCommands": ["run --cover on a multi-function source tree (must produce one targeted case per function)", "confirm non-cover generate + deterministic path unchanged (13/13)"],
+    "artifactRefs": [
+      { "id": "cg", "kind": "package-test-report", "path": "artifacts/covergen-e2e.txt", "description": "live: structural surface -> one LLM test per uncovered function (add, clamp)" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G001: wire coverage surface into generation; a test per uncovered function", "obligation": "enumerate functions and synthesize a targeting test each, toward 100% function coverage", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs test generate --cover (compiled package) with a live key", "surface": "package", "invocation": "target/debug/testsprite-rs test generate --cover --path <dir>", "verdict": "passed", "artifactRefs": ["cg"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G001: one targeted test per function", "scenario": "a source tree with multiple functions incl. branchy ones (clamp has 2 ifs)", "expectedBehavior": "generates a distinct test per function targeting its I/O + branches", "verdict": "passed", "artifactRefs": ["cg"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; live loop verified; no fix loop needed.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  }
+}

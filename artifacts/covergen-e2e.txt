@@ -1,0 +1,6 @@
+generated 2 coverage test(s)
+  TC001
+  TC002
+--- stored cases ---
+TC001  Test add function
+TC002  Test clamp function

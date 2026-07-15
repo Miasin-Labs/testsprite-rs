@@ -158,6 +158,11 @@ enum TestCmd {
         /// OpenAI model for PRD/plan generation.
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
+        /// --cover: generate a test per function under --path (default cwd).
+        #[arg(long)]
+        cover: bool,
+        #[arg(long)]
+        path: Option<PathBuf>,
     },
 }
 
@@ -270,7 +275,18 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             instruction,
             kind,
             model,
+            cover,
+            path,
         } => {
+            if cover {
+                let p = path.unwrap_or(std::env::current_dir()?);
+                let ids = local::generate::generate_cover(&root, &p, &model).await?;
+                println!("generated {} coverage test(s)", ids.len());
+                for id in &ids {
+                    println!("  {id}");
+                }
+                return Ok(());
+            }
             let kind = kind.as_deref().map(server::executors::TestKind::parse);
             let ids = local::generate::generate(
                 &root,

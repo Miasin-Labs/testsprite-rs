@@ -256,6 +256,21 @@ impl LlmClient {
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("healed case was not valid JSON")
     }
+
+    /// Generate a test plan (one case per function) from a list of function units
+    /// `[{name,file,branches}]`, targeting each function's inputs/outputs and its
+    /// control-flow branches. Returns [{id,title,description}].
+    pub async fn generate_from_functions(&self, functions: &Value) -> Result<Vec<Value>> {
+        let system = "You are TestSprite's coverage-driven planner. Given a JSON array of functions \
+            {name,file,branches}, produce one test case per function that exercises its inputs/outputs \
+            and every control-flow branch. Respond with JSON only: {\"plan\":[{\"id\":\"TC001\",\
+            \"title\":...,\"description\":\"what to feed the function and assert, covering its branches\"}]}.";
+        let user = format!("Functions to cover:\n{}", serde_json::to_string_pretty(functions)?);
+        let out = self.chat(system, &user, true).await?;
+        let v: Value = serde_json::from_str(&out).context("cover plan was not valid JSON")?;
+        let plan = v.get("plan").cloned().unwrap_or(v);
+        plan.as_array().cloned().ok_or_else(|| anyhow!("cover plan was not an array"))
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.
