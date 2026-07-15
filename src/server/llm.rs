@@ -75,8 +75,19 @@ impl LlmClient {
                 { "role": "system", "content": system },
                 { "role": "user", "content": user },
             ],
-            "temperature": 0.2,
         });
+        // Older models accept a low temperature for determinism; newer ones
+        // (gpt-5*, gpt-6*, o1/o3/o4*) only support the default (1) and 400 on an
+        // explicit 0.2 — so omit `temperature` for those.
+        let m = self.model.as_str();
+        if !(m.starts_with("gpt-5")
+            || m.starts_with("gpt-6")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4"))
+        {
+            body["temperature"] = json!(0.2);
+        }
         if json_mode {
             body["response_format"] = json!({ "type": "json_object" });
         }
