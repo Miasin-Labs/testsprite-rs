@@ -190,13 +190,29 @@ enum TestCmd {
         path: Option<PathBuf>,
     },
     /// Validate stored test JSON offline.
-    Lint,
+    Lint {
+        /// Print a single CliLintReport JSON object instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare two stored test results (results/<id>.json).
     Diff {
         #[arg()]
         a: String,
         #[arg()]
         b: String,
+        /// Print a single CliRunDiff JSON object instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Emit a schema-correct starter test (backend python | frontend plan).
+    Scaffold {
+        /// Modality: backend | frontend.
+        #[arg(long = "type", value_name = "KIND")]
+        kind: String,
+        /// Print the scaffold as a single JSON object instead of raw text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -360,12 +376,16 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             }
             Ok(())
         }
-        TestCmd::Lint => {
-            let code = local::lint::lint(&root)?;
+        TestCmd::Lint { json } => {
+            let code = local::lint::lint(&root, json)?;
             std::process::exit(code);
         }
-        TestCmd::Diff { a, b } => {
-            let code = local::diff::diff(&root, &a, &b)?;
+        TestCmd::Diff { a, b, json } => {
+            let code = local::diff::diff(&root, &a, &b, json)?;
+            std::process::exit(code);
+        }
+        TestCmd::Scaffold { kind, json } => {
+            let code = local::scaffold::scaffold(&kind, json)?;
             std::process::exit(code);
         }
     }

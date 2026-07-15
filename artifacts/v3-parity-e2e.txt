@@ -1,0 +1,82 @@
+### test run --json (OPENAI key present) — note verdict + failureKind + analysis.fixKind
+[
+  {
+    "analysis": {
+      "cause": "The HTTP method 'FETCH' is not a standard method and likely not supported by the server.",
+      "fix": "Change the method from 'FETCH' to a valid HTTP method like 'GET' or 'POST'.",
+      "fixKind": "code",
+      "verdict": "bug"
+    },
+    "error": "request failed: builder error",
+    "failureKind": "network",
+    "id": "bad",
+    "passed": false,
+    "title": "",
+    "verdict": "blocked"
+  },
+  {
+    "error": "",
+    "failureKind": null,
+    "id": "ok",
+    "passed": true,
+    "title": "root ok",
+    "verdict": "passed"
+  }
+]
+
+### test diff ok bad --json (verdict/failureKind delta, CliRunDiff shape)
+{
+  "changedSteps": [],
+  "crossTest": false,
+  "failureKindChanged": true,
+  "runA": {
+    "failureKind": null,
+    "id": "ok",
+    "verdict": "passed"
+  },
+  "runB": {
+    "failureKind": "network",
+    "id": "bad",
+    "verdict": "blocked"
+  },
+  "verdictChanged": true
+}
+diff exit=1  (1 = verdicts differ)
+
+### test lint --json (CliLintReport shape); text mode exits 5
+{
+  "checked": 2,
+  "issues": [
+    {
+      "field": "method",
+      "file": "bad",
+      "reason": "invalid spec.method \"FETCH\""
+    },
+    {
+      "field": "path",
+      "file": "bad",
+      "reason": "spec.path \"x\" must start with '/'"
+    },
+    {
+      "field": "expect_status",
+      "file": "bad",
+      "reason": "spec.expect_status must be an integer in 100..=599"
+    }
+  ],
+  "valid": 1
+}
+lint text exit=5  (5 = VALIDATION_ERROR)
+
+### test scaffold --type frontend (plan JSON)
+{
+  "description": "Verify the app loads and renders successfully.",
+  "steps": [
+    {
+      "description": "navigate to the app"
+    },
+    {
+      "description": "assert the page loaded"
+    }
+  ],
+  "title": "Frontend smoke test"
+}

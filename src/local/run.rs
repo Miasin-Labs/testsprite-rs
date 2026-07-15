@@ -164,6 +164,12 @@ pub async fn run_collect(
             "passed": outcome.passed,
             "error": outcome.error,
         });
+        let (verdict, fk) = super::verdict::classify(outcome.passed, &outcome.error);
+        entry["verdict"] = serde_json::json!(verdict.as_str());
+        entry["failureKind"] = match fk {
+            Some(k) => serde_json::json!(k),
+            None => Value::Null,
+        };
         if let Some(analysis) = &analysis {
             entry["analysis"] = analysis.clone();
         }

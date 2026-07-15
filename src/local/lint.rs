@@ -10,46 +10,82 @@ use crate::server::executors::TestKind;
 
 use super::store;
 
+const VALIDATION_ERROR: i32 = 5;
+
 enum Issue {
     Warn(String),
-    Hard(String),
+    Hard { field: &'static str, msg: String },
 }
 
 /// Validate every stored test in `root`; print `[ok] <id>` or
-/// `[issue] <id>: <problem>` per test plus a summary line. Returns exit code
-/// 1 if any hard issue was found, else 0.
-pub fn lint(root: &Path) -> anyhow::Result<i32> {
+/// `[issue] <id>: <problem>` per test plus a summary line (or a single
+/// `CliLintReport` JSON object when `json` is set). Returns exit code `5`
+/// (VALIDATION_ERROR) if any hard issue was found, else `0`.
+pub fn lint(root: &Path, json: bool) -> anyhow::Result<i32> {
     let tests = store::list(root)?;
     let mut issue_count = 0usize;
     let mut hard_found = false;
+    let mut valid_count = 0usize;
+    let mut report_issues = Vec::new();
 
     for test in &tests {
         let issues = check(&test.id, test);
+        let has_hard = issues.iter().any(|i| matches!(i, Issue::Hard { .. }));
+        if !has_hard {
+            valid_count += 1;
+        }
         if issues.is_empty() {
-            println!("[ok] {}", test.id);
+            if !json {
+                println!("[ok] {}", test.id);
+            }
             continue;
         }
         for issue in issues {
             issue_count += 1;
             match issue {
-                Issue::Warn(msg) => println!("[issue] {}: {msg} (warn)", test.id),
-                Issue::Hard(msg) => {
+                Issue::Warn(msg) => {
+                    if !json {
+                        println!("[issue] {}: {msg} (warn)", test.id);
+                    }
+                }
+                Issue::Hard { field, msg } => {
                     hard_found = true;
-                    println!("[issue] {}: {msg}", test.id);
+                    if json {
+                        report_issues.push(serde_json::json!({
+                            "file": test.id,
+                            "field": field,
+                            "reason": msg,
+                        }));
+                    } else {
+                        println!("[issue] {}: {msg}", test.id);
+                    }
                 }
             }
         }
     }
 
-    println!("lint: {} tests, {issue_count} issues", tests.len());
-    Ok(if hard_found { 1 } else { 0 })
+    if json {
+        let obj = serde_json::json!({
+            "checked": tests.len(),
+            "valid": valid_count,
+            "issues": report_issues,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("lint: {} tests, {issue_count} issues", tests.len());
+    }
+
+    Ok(if hard_found { VALIDATION_ERROR } else { 0 })
 }
 
 fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
     let mut issues = Vec::new();
 
     if id.trim().is_empty() {
-        issues.push(Issue::Hard("empty id".to_string()));
+        issues.push(Issue::Hard {
+            field: "id",
+            msg: "empty id".to_string(),
+        });
     }
     if test.title.trim().is_empty() {
         issues.push(Issue::Warn("empty title".to_string()));
@@ -84,22 +120,35 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
 
     match spec.get("method").and_then(Value::as_str) {
         Some(m) if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&m) => {}
-        Some(m) => issues.push(Issue::Hard(format!("invalid spec.method {m:?}"))),
-        None => issues.push(Issue::Hard("spec.method missing or not a string".to_string())),
+        Some(m) => issues.push(Issue::Hard {
+            field: "method",
+            msg: format!("invalid spec.method {m:?}"),
+        }),
+        None => issues.push(Issue::Hard {
+            field: "method",
+            msg: "spec.method missing or not a string".to_string(),
+        }),
     }
 
     match spec.get("path").and_then(Value::as_str) {
         Some(p) if p.starts_with('/') => {}
-        Some(p) => issues.push(Issue::Hard(format!("spec.path {p:?} must start with '/'"))),
-        None => issues.push(Issue::Hard("spec.path missing or not a string".to_string())),
+        Some(p) => issues.push(Issue::Hard {
+            field: "path",
+            msg: format!("spec.path {p:?} must start with '/'"),
+        }),
+        None => issues.push(Issue::Hard {
+            field: "path",
+            msg: "spec.path missing or not a string".to_string(),
+        }),
     }
 
     if let Some(status) = spec.get("expect_status") {
         match status.as_i64() {
             Some(code) if (100..=599).contains(&code) => {}
-            _ => issues.push(Issue::Hard(
-                "spec.expect_status must be an integer in 100..=599".to_string(),
-            )),
+            _ => issues.push(Issue::Hard {
+                field: "expect_status",
+                msg: "spec.expect_status must be an integer in 100..=599".to_string(),
+            }),
         }
     }
 
