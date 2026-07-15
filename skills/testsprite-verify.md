@@ -35,6 +35,12 @@ Over MCP: `testsprite_local_run` (and `testsprite_local_generate`). If you can
 write the covering test yourself, prefer `testsprite_store_test` (`spec` or
 `code`) + `testsprite_local_run` — deterministic, no OpenAI key needed. Prefer a
 single self-contained test; assert concrete, observable outcomes.
+For a repo with its own test runner (cargo/pytest/jest), the best flow is
+`testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
+own tests for them, then register a `kind:"command"` test (code = the run command,
+e.g. `cargo test -p ers-api --test http_contract`) and `testsprite_local_run` it —
+deterministic, exit-0 = pass, no OpenAI key, tests live in the repo. Use kind
+backend/python only for black-box HTTP tests.
 
 ### 3. Read the verdict, act on failure
 On failure the result carries `failureKind`, an LLM `cause`, and a suggested

@@ -38,6 +38,13 @@ with no OpenAI key. Aim for
 ~8–15 tests on the core behaviors; don't pad. Every assertion must name a
 **concrete, observable** outcome (status code, body field, element, count) — never
 "verify it works".
+"verify it works". For a repo that already has its own test runner (cargo/pytest/jest),
+prefer the repo-native loop: `testsprite_coverage_gaps` to find uncovered functions,
+write/extend the repo's own tests for them, then register a `kind:"command"` test
+(code = the run command, e.g. `cargo test -p ers-api --test http_contract`) and
+`testsprite_local_run` it — deterministic, exit-0 = pass, no OpenAI key, and the
+tests live in the repo (cargo/CI own them). Use kind backend/python only for
+black-box HTTP tests.
 
 ### 4. Smoke-run a few
 ```bash

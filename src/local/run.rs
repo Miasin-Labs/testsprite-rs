@@ -87,11 +87,11 @@ pub async fn run_collect(
     fix: bool,
     browser: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
-    let project = project::load(root).await?;
+    let project = project::load(root).await.ok();
 
     let target = url_override
         .map(str::to_string)
-        .or_else(|| project.target_url.clone())
+        .or_else(|| project.as_ref().and_then(|p| p.target_url.clone()))
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
 
     let tests = if ids.is_empty() {
@@ -115,11 +115,14 @@ pub async fn run_collect(
         prd: Arc::new(serde_json::json!({})),
         browser: browser.map(str::to_string),
         shots_dir: browser.map(|_| super::ts_dir(root).join("shots")),
+        root: root.to_path_buf(),
     };
 
     let mut report = Vec::with_capacity(tests.len());
     for t in &tests {
-        let kind = t.kind.unwrap_or(project.kind);
+        let kind = t
+            .kind
+            .unwrap_or_else(|| project.as_ref().map(|p| p.kind).unwrap_or_default());
         let ex = crate::server::executors::for_kind(kind);
         let case = serde_json::to_value(t)?;
         let outcome = ex.run(&case, &ctx).await;

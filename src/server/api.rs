@@ -266,6 +266,7 @@ async fn backend_run(State(state): State<AppState>, Json(body): Json<Value>) -> 
         prd: Arc::new(state.prd.read().await.clone()),
         browser: None,
         shots_dir: None,
+        root: std::env::current_dir().unwrap_or_default(),
     };
     store::spawn_execution(state.store.clone(), executor, ctx, to_run);
     (StatusCode::CREATED, Json(json!({ "testIds": ids })))

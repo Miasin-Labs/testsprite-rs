@@ -44,7 +44,7 @@ fn tool_list() -> Value {
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch.",
               "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean")]) },
             { "name": "testsprite_store_test",
-              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_local_generate when you can write the test yourself.",
+              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_local_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
               "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
             { "name": "testsprite_coverage_gaps",
               "description": "List functions in the code surface that NO stored test references yet — the uncovered set to generate next. Loop this until empty for full coverage.",

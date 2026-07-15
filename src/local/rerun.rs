@@ -56,6 +56,7 @@ pub async fn rerun(
         prd: Arc::new(serde_json::json!({})),
         browser: None,
         shots_dir: None,
+        root: root.to_path_buf(),
     };
 
     let mut failed = 0;

@@ -8,6 +8,7 @@
 //! [`Executor`] trait. A case is just JSON (`{id,title,description,spec?}`) so
 //! the planner, store, and API never need to know which modality is running.
 
+pub mod command;
 pub mod browser;
 pub mod http;
 pub mod mcp;
@@ -29,6 +30,8 @@ pub enum TestKind {
     Frontend,
     Mcp,
     Rust,
+    #[serde(alias = "cargo", alias = "shell")]
+    Command,
 }
 
 impl TestKind {
@@ -37,6 +40,7 @@ impl TestKind {
             "frontend" | "browser" | "e2e" => TestKind::Frontend,
             "mcp" => TestKind::Mcp,
             "rust" | "unit" => TestKind::Rust,
+            "command" | "shell" | "cargo" => TestKind::Command,
             _ => TestKind::Backend,
         }
     }
@@ -57,6 +61,8 @@ pub struct ExecCtx {
     pub browser: Option<String>,
     /// Directory to write per-case screenshots into; `None` skips screenshots.
     pub shots_dir: Option<std::path::PathBuf>,
+    /// Project/repo root a `command` test runs in.
+    pub root: std::path::PathBuf,
 }
 
 /// The outcome of executing one case.
@@ -101,5 +107,6 @@ pub fn for_kind(kind: TestKind) -> Arc<dyn Executor> {
         TestKind::Frontend => Arc::new(browser::BrowserExecutor),
         TestKind::Mcp => Arc::new(mcp::McpExecutor),
         TestKind::Rust => Arc::new(rust::RustExecutor),
+        TestKind::Command => Arc::new(command::CommandExecutor),
     }
 }
