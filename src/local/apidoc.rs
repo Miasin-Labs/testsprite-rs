@@ -121,8 +121,37 @@ fn postman_path(url: &Value) -> Option<String> {
     Some(normalize_params(&url_string_path(raw)))
 }
 
+/// Common secret-ish key substrings; their values are masked when extracted from
+/// a doc so real passwords/tokens/cookies never land in the stored case (or an
+/// exported, git-committed test). Inject real values via `variables.json`.
+const SECRET_KEYS: &[&str] = &[
+    "password", "passwd", "pwd", "token", "secret", "authorization", "api_key",
+    "apikey", "access_token", "refresh_token", "session", "cookie", "credential",
+    "client_secret", "private_key", "ssn", "credit_card", "card_number", "cvv",
+];
+
+/// Recursively mask values whose key looks secret (`{"password":"***"}`).
+fn redact(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                let kl = k.to_lowercase();
+                if SECRET_KEYS.iter().any(|s| kl.contains(s)) && !val.is_object() && !val.is_array() {
+                    *val = Value::String("***".to_string());
+                } else {
+                    redact(val);
+                }
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(redact),
+        _ => {}
+    }
+}
+
 fn body_from(raw: Option<&str>) -> Option<Value> {
-    raw.and_then(|t| serde_json::from_str::<Value>(t).ok())
+    let mut v: Value = serde_json::from_str(raw?).ok()?;
+    redact(&mut v);
+    Some(v)
 }
 
 fn postman_endpoints(v: &Value) -> Vec<Endpoint> {
@@ -173,15 +202,22 @@ fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
             if !HTTP_METHODS.contains(&m.as_str()) {
                 continue;
             }
-            let expect_status = op
-                .get("responses")
-                .and_then(Value::as_object)
-                .and_then(|r| {
+            let is_write = matches!(m.as_str(), "POST" | "PUT" | "PATCH");
+            // Synthesize/lift a body for write methods so POST/PUT don't send an
+            // empty payload (-> spurious 400/422). For writes we also relax the
+            // expected status: our best-effort body may not pass validation, so
+            // accept any non-5xx (a 5xx is still a real failure).
+            let body = if is_write { openapi_body(op, v) } else { None };
+            let expect_status = if is_write {
+                None
+            } else {
+                op.get("responses").and_then(Value::as_object).and_then(|r| {
                     r.keys()
                         .filter_map(|k| k.parse::<u16>().ok())
                         .filter(|s| (200..300).contains(s))
                         .min()
-                });
+                })
+            };
             let name = op
                 .get("summary")
                 .and_then(Value::as_str)
@@ -191,13 +227,92 @@ fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
             out.push(Endpoint {
                 method: m,
                 path: normalize_params(path),
-                body: None,
+                body,
                 expect_status,
                 name,
             });
         }
     }
     out
+}
+
+/// Best-effort request body for an OpenAPI operation: a literal `example`, an
+/// `examples` value, or a dummy synthesized from the JSON schema (`$ref`
+/// resolved against the doc). `None` if there's no requestBody.
+fn openapi_body(op: &Value, root: &Value) -> Option<Value> {
+    let content = op.get("requestBody")?.get("content")?;
+    let media = content
+        .get("application/json")
+        .or_else(|| content.as_object().and_then(|o| o.values().next()))?;
+    let mut v = if let Some(ex) = media.get("example") {
+        ex.clone()
+    } else if let Some(val) = media
+        .get("examples")
+        .and_then(Value::as_object)
+        .and_then(|o| o.values().next())
+        .and_then(|e| e.get("value"))
+    {
+        val.clone()
+    } else {
+        synth_from_schema(media.get("schema")?, root, 0)
+    };
+    redact(&mut v);
+    Some(v)
+}
+
+/// A minimal dummy value from a JSON schema (type-based; resolves `$ref`).
+fn synth_from_schema(schema: &Value, root: &Value, depth: usize) -> Value {
+    if depth > 6 {
+        return Value::Null;
+    }
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        return match resolve_ref(root, r) {
+            Some(resolved) => synth_from_schema(&resolved, root, depth + 1),
+            None => Value::Null,
+        };
+    }
+    if let Some(ex) = schema.get("example") {
+        return ex.clone();
+    }
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        let mut o = serde_json::Map::new();
+        for (k, ps) in props {
+            o.insert(k.clone(), synth_from_schema(ps, root, depth + 1));
+        }
+        return Value::Object(o);
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("array") => Value::Array(vec![
+            schema
+                .get("items")
+                .map(|i| synth_from_schema(i, root, depth + 1))
+                .unwrap_or(Value::Null),
+        ]),
+        Some("integer") | Some("number") => json!(1),
+        Some("boolean") => json!(true),
+        Some("string") => match schema.get("format").and_then(Value::as_str) {
+            Some("uuid") => json!("00000000-0000-0000-0000-000000000001"),
+            Some("email") => json!("test@example.com"),
+            Some("date-time") => json!("2020-01-01T00:00:00Z"),
+            Some("date") => json!("2020-01-01"),
+            _ => schema
+                .get("enum")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first().cloned())
+                .unwrap_or_else(|| json!("string")),
+        },
+        _ => Value::Null,
+    }
+}
+
+/// Resolve a local `#/components/schemas/Foo` ref against the root doc.
+fn resolve_ref(root: &Value, r: &str) -> Option<Value> {
+    let path = r.strip_prefix("#/")?;
+    let mut cur = root;
+    for seg in path.split('/') {
+        cur = cur.get(seg)?;
+    }
+    Some(cur.clone())
 }
 
 fn har_endpoints(v: &Value) -> Vec<Endpoint> {
@@ -359,5 +474,37 @@ mod tests {
     fn non_api_doc_returns_none() {
         assert!(extract("# just a readme\n\nsome prose").is_none());
         assert!(extract(r#"{"random": "json"}"#).is_none());
+    }
+
+    #[test]
+    fn openapi_post_synthesizes_body_and_relaxes_status() {
+        let doc = r##"{
+          "openapi": "3.0.0",
+          "components": {"schemas": {"User": {"type": "object", "properties": {
+            "name": {"type": "string"}, "age": {"type": "integer"}, "password": {"type": "string"}}}}},
+          "paths": {"/users": {"post": {
+            "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/User"}}}},
+            "responses": {"201": {}}}}}
+        }"##;
+        let ex = extract(doc).unwrap();
+        let post = &ex.cases[0];
+        assert_eq!(post["spec"]["method"], "POST");
+        assert_eq!(post["spec"]["body"]["name"], "string");
+        assert_eq!(post["spec"]["body"]["age"], 1);
+        assert_eq!(post["spec"]["body"]["password"], "***");
+        assert!(post["spec"].get("expect_status").is_none());
+    }
+
+    #[test]
+    fn redacts_secrets_in_extracted_bodies() {
+        let doc = r#"{"info": {}, "item": [
+          {"name": "login", "request": {"method": "POST", "url": {"path": ["login"]},
+           "body": {"raw": "{\"user\":\"a\",\"password\":\"hunter2\",\"api_key\":\"sk-live-xyz\"}"}}}
+        ]}"#;
+        let ex = extract(doc).unwrap();
+        let b = &ex.cases[0]["spec"]["body"];
+        assert_eq!(b["user"], "a");
+        assert_eq!(b["password"], "***");
+        assert_eq!(b["api_key"], "***");
     }
 }

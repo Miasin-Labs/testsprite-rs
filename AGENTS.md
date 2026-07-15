@@ -246,6 +246,13 @@ to the LLM. This is what makes generated backend cases actually runnable — pai
 with `--serve` to exercise them live. Unreachable failures (connection-refused /
 urllib3 "error sending request"/"max retries") now classify as `network`/Blocked
 (env, not a bug) with a "run `test run --serve`" hint instead of a raw traceback.
+OpenAPI write methods (POST/PUT/PATCH) get a **synthesized request body** from the
+`requestBody` schema (`$ref` resolved; literal `example`/`examples` preferred) so
+they don't send an empty payload → spurious 400/422, and their status is left
+lenient (any non-5xx) since a best-effort body may not pass validation. Extracted
+bodies are **secret-redacted** (`password`/`token`/`api_key`/… → `"***"`) so a HAR
+or Postman login payload never lands in the stored/exported case — inject real
+values via `variables.json`.
 
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
