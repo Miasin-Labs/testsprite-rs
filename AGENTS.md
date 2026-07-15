@@ -188,6 +188,16 @@ executor); `test rerun --failed`; `doctor --json` (+docker check); **test lists*
 add|list|run|crontab` → OS cron). Precedence: `--group` beats `--id`; wave
 ordering also reorders explicit `--id` subsets by declared deps (no-op without).
 
+Execution model (`run_collect`): dependency **skips** (a failed/skipped
+producer marks downstream `needs` consumers `verdict=blocked` "skipped:
+dependency…" instead of running them into confusing failures; cascades
+transitively), **opt-in parallelism** (`test run --jobs N` runs independent
+same-level tests concurrently; default 1 sequential, since the community
+reported parallel-causes-failures), and **graceful teardown** (SIGINT via
+synchronous `unix::signal` stops launching new waves but still runs the
+teardown phase). Run history is bounded: `write_result` auto-prunes to
+`TESTSPRITE_RUN_HISTORY_KEEP` (default 200) per test; `test prune [--keep N]`.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors
