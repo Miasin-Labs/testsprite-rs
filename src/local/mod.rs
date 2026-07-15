@@ -20,6 +20,7 @@ pub mod store;
 pub mod triage;
 pub mod scaffold;
 pub mod schedule;
+pub mod serve;
 pub mod verdict;
 pub mod visual;
 pub mod waves;
@@ -38,6 +39,8 @@ pub struct Project {
     pub kind: TestKind,
     #[serde(rename = "targetUrl", default, skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
+    #[serde(rename = "startCommand", default, skip_serializing_if = "Option::is_none")]
+    pub start_command: Option<String>,
 }
 
 /// A stored local test case at `testsprite_tests/tests/<id>.json`.

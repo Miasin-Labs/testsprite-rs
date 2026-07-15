@@ -36,6 +36,15 @@ pub fn run_history_keep() -> usize {
         .unwrap_or(200)
 }
 
+/// Seconds to wait for the target app to become reachable when `test run
+/// --serve` starts it before the run (default 30).
+pub fn serve_ready_secs() -> u64 {
+    env::var("TESTSPRITE_SERVE_READY_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
+}
+
 /// The user's API key (encrypted AEAD token, `sk-user-...`).
 pub fn api_key() -> Option<String> {
     env::var("TSMCP_API_KEY")

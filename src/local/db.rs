@@ -53,6 +53,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await
         .context("applying schema")?;
+    // Additive column migrations (idempotent — the ALTER errors on the second
+    // run because the column already exists, which we ignore).
+    let _ = sqlx::query("ALTER TABLE project ADD COLUMN start_command TEXT")
+        .execute(pool)
+        .await;
     Ok(())
 }
 

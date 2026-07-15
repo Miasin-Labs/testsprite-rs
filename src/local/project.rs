@@ -35,17 +35,18 @@ pub async fn init(root: &Path, kind: TestKind, name: &str, url: Option<&str>) ->
 /// Read the project row.
 pub async fn load(root: &Path) -> anyhow::Result<Project> {
     let pool = crate::local::db::open(root).await?;
-    let row: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT name,kind,target_url FROM project WHERE id=1")
+    let row: Option<(String, String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT name,kind,target_url,start_command FROM project WHERE id=1")
             .fetch_optional(&pool)
             .await?;
 
     match row {
         None => Err(anyhow!("no project — run `testsprite-rs project init` first")),
-        Some((name, kind_str, target_url)) => Ok(Project {
+        Some((name, kind_str, target_url, start_command)) => Ok(Project {
             name,
             kind: TestKind::parse(&kind_str),
             target_url,
+            start_command,
         }),
     }
 }
@@ -54,6 +55,20 @@ pub async fn load(root: &Path) -> anyhow::Result<Project> {
 pub async fn show(root: &Path) -> anyhow::Result<()> {
     let project = load(root).await?;
     println!("{}", serde_json::to_string_pretty(&project)?);
+    Ok(())
+}
+
+/// Persist the command that starts the target app (for `test run --serve`).
+pub async fn set_start(root: &Path, command: &str) -> anyhow::Result<()> {
+    let pool = crate::local::db::open(root).await?;
+    let n = sqlx::query("UPDATE project SET start_command=? WHERE id=1")
+        .bind(command)
+        .execute(&pool)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        anyhow::bail!("no project — run `testsprite-rs project init` first");
+    }
     Ok(())
 }
 

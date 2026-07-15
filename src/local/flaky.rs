@@ -47,7 +47,7 @@ pub async fn flaky(root: &Path, id: &str, runs: usize, model: &str) -> anyhow::R
 
     for _ in 0..runs {
         let results =
-            crate::local::run::run_collect(root, std::slice::from_ref(&id.to_string()), None, model, false, None, 1)
+            crate::local::run::run_collect(root, std::slice::from_ref(&id.to_string()), None, model, false, None, 1, false)
                 .await?;
         for r in &results {
             match r.get("verdict").and_then(serde_json::Value::as_str) {

@@ -1,0 +1,19 @@
+test run --serve: bring the target app up so spec cases hit a LIVE server (2026-07-15)
+=====================================================================================
+project set-start "<cmd>" persists the app start command (project.start_command,
+DB column via idempotent ALTER). test run --serve (MCP testsprite_run serve:true):
+- parse host:port from target_url; if already reachable -> don't start a 2nd copy
+- else `sh -c "<cmd>"` (kill_on_drop), wait up to TESTSPRITE_SERVE_READY_SECS (30)
+  for the port via net::check_port_listening; bail if never reachable
+- RAII: the child is bound for the whole run and killed on drop (early return /
+  panic / SIGINT) -> no orphaned server
+
+Live e2e (spec GET /health expect 200; app NOT started manually):
+  test run --id h1            -> request failed (nothing listening) -> FAIL 0/1
+  project set-start "python3 app.py"
+  test run --id h1 --serve    -> "serve: starting target app... app reachable"
+                                 -> PASS 1/1
+  after run: 127.0.0.1:18055  -> down (teardown OK, no leak)
+
+This ends the "generated spec cases target a dead URL -> agent wraps cargo test"
+spiral: testsprite can now boot the app and exercise it. clippy 0, test 76/76 (+1).

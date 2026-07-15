@@ -13,7 +13,7 @@ use super::ts_dir;
 /// PR (via `gh`), and return `0` if every test passed, `1` otherwise. The
 /// exit code depends only on test results — `gh` failures never propagate.
 pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyhow::Result<i32> {
-    let results = crate::local::run::run_collect(root, &[], url_override, model, false, None, 1).await?;
+    let results = crate::local::run::run_collect(root, &[], url_override, model, false, None, 1, false).await?;
 
     let total = results.len();
     let failed = results

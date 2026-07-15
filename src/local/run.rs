@@ -29,8 +29,9 @@ pub async fn run(
     fix: bool,
     browser: Option<&str>,
     jobs: usize,
+    serve: bool,
 ) -> anyhow::Result<i32> {
-    let report = run_collect(root, ids, url_override, model, fix, browser, jobs).await?;
+    let report = run_collect(root, ids, url_override, model, fix, browser, jobs, serve).await?;
 
     if report.is_empty() {
         println!("no tests found; run `testsprite-rs test add <file>` first");
@@ -91,6 +92,7 @@ pub async fn run_collect(
     fix: bool,
     browser: Option<&str>,
     jobs: usize,
+    serve: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let project = project::load(root).await.ok();
 
@@ -112,6 +114,20 @@ pub async fn run_collect(
     if tests.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Optionally bring the target app up so backend/spec cases hit a LIVE server
+    // instead of env-failing on a dead URL. RAII: the handle is killed on drop,
+    // so the app stops even on early return / panic / SIGINT.
+    let _served = if serve {
+        let Some(cmd) = project.as_ref().and_then(|p| p.start_command.clone()) else {
+            anyhow::bail!(
+                "test run --serve needs a start command; set one with `testsprite-rs project set-start \"<cmd>\"`"
+            );
+        };
+        crate::local::serve::start_and_wait(&cmd, &target, crate::envs::serve_ready_secs()).await?
+    } else {
+        None
+    };
 
     let llm = crate::server::llm::LlmClient::from_env(model);
     let variables = project::load_variables(root);

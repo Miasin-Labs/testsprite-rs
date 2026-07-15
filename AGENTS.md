@@ -227,6 +227,15 @@ case is stamped with its `prdId`. Inspect via `testsprite-rs prd list` / `prd sh
 [<id>]`; MCP `testsprite_generate` returns `prdId`. The `doc → PRD → plan → cases`
 trail is now fully inspectable, not just the leaves.
 
+**Live-app serve** — backend/`spec` cases hit the project's `target_url`; if
+nothing is listening they env-fail (which is why agents used to degrade to `cargo
+test` wrappers). `project set-start "<cmd>"` persists a start command
+(`Project.start_command`, DB column via idempotent ALTER), and `test run --serve`
+(MCP `testsprite_run` `serve:true`) boots the app (`serve::start_and_wait`: skip if
+`target_url` already reachable, else `sh -c` + wait on `net::check_port_listening`
+up to `TESTSPRITE_SERVE_READY_SECS`=30), runs the cases against the LIVE server, and
+tears it down (`kill_on_drop` RAII — no orphan on early return/panic/SIGINT).
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

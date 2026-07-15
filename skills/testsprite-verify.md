@@ -47,7 +47,11 @@ For a repo with its own test runner (cargo/pytest/jest), the best flow is
 own tests for them, then register a `kind:"command"` test (code = the run command,
 e.g. `cargo test -p ers-api --test http_contract`) and `testsprite_run` it —
 deterministic, exit-0 = pass, no OpenAI key, tests live in the repo. Use kind
-backend/python only for black-box HTTP tests.
+backend/python only for black-box HTTP tests. Black-box `spec`/backend cases need
+the app running at the project's target URL: point at a live URL, or persist a
+start command with `testsprite-rs project set-start "<cmd>"` and run `test run
+--serve` (or MCP `testsprite_run` `serve:true`) — testsprite boots the app, runs,
+and tears it down. Prefer this over wrapping `cargo test` when you have real HTTP behavior to check.
 
 ### 3. Read the verdict, act on failure
 On failure the result carries `failureKind`, an LLM `cause`, and a suggested

@@ -227,6 +227,11 @@ enum ProjectCmd {
         /// Value to substitute (e.g. a real UUID or record id).
         value: String,
     },
+    /// Set the command that starts the target app (for `test run --serve`).
+    SetStart {
+        /// Shell command that starts the app on the project's target URL.
+        command: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -273,6 +278,9 @@ enum TestCmd {
         /// Run independent tests in the same dependency wave concurrently (default 1 = sequential).
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Start the target app before running (uses `project set-start`), stop it after.
+        #[arg(long)]
+        serve: bool,
         /// Code Diff Mode: run only tests affected by files changed since --since.
         #[arg(long)]
         changed: bool,
@@ -574,7 +582,7 @@ async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
                 return Ok(());
             }
             let code =
-                local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None, 1).await?;
+                local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None, 1, false).await?;
             std::process::exit(code);
         }
         ScheduleCmd::Crontab => {
@@ -661,6 +669,11 @@ async fn run_project(cmd: ProjectCmd) -> Result<()> {
         ProjectCmd::SetVar { key, value } => {
             let vars = local::project::set_variable(&root, &key, &value)?;
             println!("set {key} = {value}  ({} variable(s) total)", vars.len());
+            Ok(())
+        }
+        ProjectCmd::SetStart { command } => {
+            local::project::set_start(&root, &command).await?;
+            println!("start command set — `testsprite-rs test run --serve` will use it");
             Ok(())
         }
     }
@@ -776,6 +789,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             jobs,
             changed,
             since,
+            serve,
         } => {
             let ids = if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
@@ -816,6 +830,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 fix,
                 browser.as_deref(),
                 jobs,
+                serve,
             )
             .await?;
             std::process::exit(code);

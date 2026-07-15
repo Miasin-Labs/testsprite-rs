@@ -21,8 +21,8 @@ fn tool_list() -> Value {
               "description": "Generate local test cases with the LLM (needs an OpenAI key). Set changed=true to generate only for functions changed since a git ref (since, default HEAD); or doc=<path> to distill a normalized PRD from an arbitrary README/notes/spec.",
               "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_run",
-              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD) — the fast pre-merge loop.",
-              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string")]) },
+              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",
+              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean")]) },
             { "name": "testsprite_store_test",
               "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
               "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
@@ -138,7 +138,8 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             if changed_mode && ids.is_empty() {
                 return Ok(json!({ "results": [], "note": "no stored tests affected by the changes" }));
             }
-            let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1).await?;
+            let serve = args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false);
+            let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1, serve).await?;
             Ok(json!({ "results": results }))
         }
         "testsprite_store_test" => {
