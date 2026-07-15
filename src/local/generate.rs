@@ -39,11 +39,7 @@ pub async fn generate(
     // no LLM key needed. The fast, robust path: cases run via execute_spec
     // (reqwest) against the live target, not per-run LLM codegen.
     if let Some(dp) = doc {
-        if !dp.is_file() {
-            anyhow::bail!("--doc expects a readable file ({})", dp.display());
-        }
-        let text = std::fs::read_to_string(dp)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", dp.display()))?;
+        let text = read_doc(dp).await?;
         if let Some(ex) = crate::local::apidoc::extract(&text) {
             eprintln!(
                 "generate: parsed {} endpoint(s) from {} ({} format) — deterministic spec cases (no LLM)",
@@ -227,4 +223,31 @@ async fn store_cases(
         ids.push(id);
     }
     Ok(ids)
+}
+
+/// Read a `--doc` source: fetch it when it's an `http(s)` URL (e.g. a utoipa
+/// app's served `/api-docs/openapi.json`), else read the local file.
+async fn read_doc(dp: &Path) -> anyhow::Result<String> {
+    let s = dp.to_string_lossy();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()?;
+        let resp = client
+            .get(s.as_ref())
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("fetching {s}: {e}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("{s} returned HTTP {}", resp.status());
+        }
+        return Ok(resp.text().await?);
+    }
+    if !dp.is_file() {
+        anyhow::bail!(
+            "--doc expects a readable file or http(s) URL ({})",
+            dp.display()
+        );
+    }
+    std::fs::read_to_string(dp).map_err(|e| anyhow::anyhow!("reading {}: {e}", dp.display()))
 }

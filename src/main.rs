@@ -328,7 +328,7 @@ enum TestCmd {
         cover: bool,
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Distill a normalized PRD from an arbitrary doc (README/notes/Jira/spec), then plan.
+        /// A Postman/OpenAPI/HAR doc → deterministic spec cases (no key), or a README/notes doc → LLM PRD. Accepts a file path OR an http(s) URL (e.g. a utoipa app's /api-docs/openapi.json).
         #[arg(long)]
         doc: Option<PathBuf>,
         /// Code Diff Mode: generate tests only for functions changed since --since.

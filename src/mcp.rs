@@ -18,7 +18,7 @@ fn tool_list() -> Value {
     json!({
         "tools": [
             { "name": "testsprite_generate",
-              "description": "Generate local test cases with the LLM (needs an OpenAI key). Set changed=true to generate only for functions changed since a git ref (since, default HEAD); or doc=<path> to distill a normalized PRD from an arbitrary README/notes/spec.",
+              "description": "Generate local test cases. doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref.",
               "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",

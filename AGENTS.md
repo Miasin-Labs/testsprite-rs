@@ -253,6 +253,10 @@ lenient (any non-5xx) since a best-effort body may not pass validation. Extracte
 bodies are **secret-redacted** (`password`/`token`/`api_key`/… → `"***"`) so a HAR
 or Postman login payload never lands in the stored/exported case — inject real
 values via `variables.json`.
+`--doc` accepts a **file path or an `http(s)` URL**, so a code-first OpenAPI app
+(e.g. utoipa, which serves its generated 3.1 spec at `/api-docs/openapi.json`) is
+tested with zero manual export: boot it (`--serve`), then `test generate --doc
+http://localhost:<port>/api-docs/openapi.json`.
 
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
