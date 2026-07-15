@@ -50,6 +50,8 @@ pub async fn rerun(
         target: target.clone(),
         llm: llm.clone(),
         prd: Arc::new(serde_json::json!({})),
+        browser: None,
+        shots_dir: None,
     };
 
     let mut failed = 0;

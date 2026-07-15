@@ -52,6 +52,11 @@ pub struct ExecCtx {
     pub llm: Option<LlmClient>,
     /// PRD context for LLM artifact generation.
     pub prd: Arc<Value>,
+    /// Which browser engine the frontend executor should launch
+    /// (`chromium` | `firefox` | `webkit`); `None` defaults to `chromium`.
+    pub browser: Option<String>,
+    /// Directory to write per-case screenshots into; `None` skips screenshots.
+    pub shots_dir: Option<std::path::PathBuf>,
 }
 
 /// The outcome of executing one case.

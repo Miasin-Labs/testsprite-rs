@@ -24,8 +24,9 @@ pub async fn run(
     model: &str,
     json: bool,
     fix: bool,
+    browser: Option<&str>,
 ) -> anyhow::Result<i32> {
-    let report = run_collect(root, ids, url_override, model, fix).await?;
+    let report = run_collect(root, ids, url_override, model, fix, browser).await?;
 
     if report.is_empty() {
         println!("no tests found; run `testsprite-rs test add <file>` first");
@@ -84,6 +85,7 @@ pub async fn run_collect(
     url_override: Option<&str>,
     model: &str,
     fix: bool,
+    browser: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
     let project = project::load(root)?;
 
@@ -109,6 +111,8 @@ pub async fn run_collect(
         target: target.clone(),
         llm: llm.clone(),
         prd: Arc::new(serde_json::json!({})),
+        browser: browser.map(str::to_string),
+        shots_dir: browser.map(|_| super::ts_dir(root).join("shots")),
     };
 
     let mut report = Vec::with_capacity(tests.len());

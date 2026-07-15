@@ -1,0 +1,10 @@
+### visual: identical PNGs (expect diff 0, exit 0)
+same_dimensions: true
+diff_ratio: 0.000000
+OK (within threshold 0.0200)
+exit=0
+### visual: different-colour PNGs (expect REGRESSION, exit 1)
+same_dimensions: true
+diff_ratio: 1.000000
+REGRESSION (threshold 0.0200)
+exit=1

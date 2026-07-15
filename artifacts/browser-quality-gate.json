@@ -1,0 +1,40 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of the cross-browser + visual change (G003). ExecCtx gained two optional fields (browser, shots_dir) with every construction site updated (rerun.rs, api.rs, gate.rs, mcp.rs pass None — behavior-preserving); browser.rs launches ctx.browser (default chromium) and screenshots to shots/<id>-<browser>.png only when shots_dir is set, keeping the prior chromium/no-shot path identical when the fields are None. run/run_collect gained a trailing browser param, threaded only from `test run --browser`; gate/MCP paths pass None so they're byte-identical. visual.rs uses the image crate (trimmed to png-only, good dep hygiene) for a real pixel-diff with a sensible tolerance + 2% regression threshold. Honest engineering: chromium needed --no-sandbox/--disable-gpu to screenshot in this container (applied for chromium only, empirically verified); webkit's missing-.so failure is surfaced as a real test failure, never faked. Small, cohesive, no slop.",
+    "commands": ["read browser.rs + visual.rs + ExecCtx", "cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "LIVE Playwright proof (executor 10-CrossBrowserVisual): `test run --browser chromium` and `--browser firefox` against a local static server both PASSED and wrote real screenshots (home-chromium.png 7254 bytes, home-firefox.png 9068 bytes, both valid PNGs) — this is the FIRST live verification that the frontend Playwright executor actually launches a browser. `test run` with no --browser stays byte-identical (deterministic, no shots). webkit FAILs with Playwright's real missing-.so block (no sudo to fix) and exit 1 — surfaced honestly, not faked. Visual diff verified by BOTH the executor and the leader (artifacts/visual-e2e.txt): identical PNGs -> diff_ratio 0.000000 / OK / exit 0; different PNGs -> diff_ratio 1.000000 / REGRESSION / exit 1. build clean, clippy 0, cargo test 16/16.",
+    "e2eCommands": ["testsprite-rs test run --browser chromium", "testsprite-rs test run --browser firefox", "testsprite-rs visual --baseline a.png --current b.png"],
+    "redTeamCommands": ["run a frontend test on 2 distinct browsers (must produce distinct real screenshots)", "webkit with missing libs (must fail honestly, exit 1, not fake pass)", "visual on a changed page (must flag REGRESSION + exit 1)"],
+    "artifactRefs": [
+      { "id": "vis", "kind": "package-test-report", "path": "artifacts/visual-e2e.txt", "description": "leader-run visual diff: identical=0.0/OK/exit0, different=1.0/REGRESSION/exit1" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G003: cross-browser frontend run + per-test screenshot + visual diff regression", "obligation": "run on chromium|firefox|webkit, capture screenshots, diff vs baseline flags regression", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a2"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs frontend executor (Playwright) + visual command", "surface": "package", "invocation": "test run --browser <b> / visual --baseline --current", "verdict": "passed", "artifactRefs": ["vis"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G003: visual regression detection", "scenario": "a page changed (bg/text/added div) vs its baseline", "expectedBehavior": "diff_ratio well above threshold, REGRESSION, exit 1; identical -> 0.0/exit 0", "verdict": "passed", "artifactRefs": ["vis"] },
+      { "id": "a2", "contractRef": "G003: honest failure, no fake pass", "scenario": "webkit cannot launch (missing system libs)", "expectedBehavior": "the real Playwright error surfaces as a test failure, exit 1 — not a fabricated pass", "verdict": "passed", "artifactRefs": ["vis"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; chromium+firefox live-proven, visual diff verified by leader + executor; webkit env-limitation documented honestly (code path correct).",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  }
+}

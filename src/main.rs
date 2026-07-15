@@ -87,6 +87,16 @@ enum Command {
         #[command(subcommand)]
         cmd: TestCmd,
     },
+    /// Compare two PNG screenshots and report a pixel-diff ratio; exits 1 on
+    /// a visual regression (see local::visual::REGRESSION_THRESHOLD).
+    Visual {
+        /// Baseline (known-good) screenshot.
+        #[arg(long)]
+        baseline: PathBuf,
+        /// Current screenshot to compare against the baseline.
+        #[arg(long)]
+        current: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +144,10 @@ enum TestCmd {
         /// On failure, write an LLM fix recommendation to testsprite_tests/fixes/<id>.md.
         #[arg(long)]
         fix: bool,
+        /// Browser engine for frontend tests: chromium | firefox | webkit.
+        /// Also enables per-case screenshots under testsprite_tests/shots/.
+        #[arg(long)]
+        browser: Option<String>,
     },
     /// Re-run stored tests; --heal regenerates fragility-failing LLM tests.
     Rerun {
@@ -205,6 +219,21 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
         Command::Test { cmd } => run_test(cmd).await,
+        Command::Visual { baseline, current } => {
+            let diff = local::visual::diff(&baseline, &current)?;
+            let regression = diff.is_regression();
+            println!("same_dimensions: {}", diff.same_dimensions);
+            println!("diff_ratio: {:.6}", diff.diff_ratio);
+            if regression {
+                println!(
+                    "REGRESSION (threshold {:.4})",
+                    local::visual::REGRESSION_THRESHOLD
+                );
+            } else {
+                println!("OK (within threshold {:.4})", local::visual::REGRESSION_THRESHOLD);
+            }
+            std::process::exit(if regression { 1 } else { 0 });
+        }
     }
 }
 
@@ -270,8 +299,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             model,
             json,
             fix,
+            browser,
         } => {
-            let code = local::run::run(&root, &id, url.as_deref(), &model, json, fix).await?;
+            let code =
+                local::run::run(&root, &id, url.as_deref(), &model, json, fix, browser.as_deref())
+                    .await?;
             std::process::exit(code);
         }
         TestCmd::Rerun {

@@ -9,6 +9,7 @@ pub mod project;
 pub mod run;
 pub mod rerun;
 pub mod store;
+pub mod visual;
 
 use std::path::{Path, PathBuf};
 

@@ -36,29 +36,60 @@ impl BrowserExecutor {
                 Err(e) => tracing::warn!("LLM playwright gen failed ({e}); using smoke template"),
             }
         }
-        Ok(smoke_template(&ctx.target))
+        let browser = ctx.browser.as_deref().unwrap_or("chromium");
+        let shot_path = match &ctx.shots_dir {
+            Some(dir) => match tokio::fs::create_dir_all(dir).await {
+                Ok(()) => {
+                    let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
+                    Some(dir.join(format!("{id}-{browser}.png")))
+                }
+                Err(e) => {
+                    tracing::warn!("could not create shots dir {dir:?}: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        Ok(smoke_template(&ctx.target, browser, shot_path.as_deref()))
     }
 }
 
 /// Deterministic Playwright smoke test: navigate, assert a 2xx-3xx response and
 /// no uncaught page errors.
-fn smoke_template(url: &str) -> String {
+fn smoke_template(url: &str, browser: &str, shot_path: Option<&std::path::Path>) -> String {
+    // Headless Chromium under this executor's sandboxless environment needs
+    // `--no-sandbox` or `page.screenshot()` fails with a protocol error.
+    let launch_args = if browser == "chromium" {
+        "{ args: ['--no-sandbox', '--disable-gpu'] }"
+    } else {
+        "{}"
+    };
+    let screenshot_line = match shot_path {
+        Some(p) => format!(
+            "  await page.screenshot({{ path: {:?}, fullPage: true }});\n",
+            p.display().to_string()
+        ),
+        None => String::new(),
+    };
     format!(
-        r#"const {{ chromium }} = require('playwright');
+        r#"const {{ {browser} }} = require('playwright');
 (async () => {{
-  const browser = await chromium.launch();
+  const browser = await {browser}.launch({launch_args});
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   const resp = await page.goto({url:?}, {{ waitUntil: 'load', timeout: 20000 }});
   const status = resp ? resp.status() : 0;
-  await browser.close();
+{screenshot_line}  await browser.close();
   if (status >= 400) {{ console.error('bad status ' + status); process.exit(1); }}
   if (errors.length) {{ console.error('page errors: ' + errors.join('; ')); process.exit(1); }}
   console.log('ok ' + status);
 }})().catch(e => {{ console.error(e); process.exit(1); }});
 "#,
-        url = url
+        browser = browser,
+        launch_args = launch_args,
+        url = url,
+        screenshot_line = screenshot_line,
     )
 }
 
