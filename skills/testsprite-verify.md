@@ -62,22 +62,21 @@ Say so explicitly: "Shipped but I could not run any testsprite-rs test because
 - One verb per step; describe outcomes, not selectors.
 - Presence ≠ working: assert the thing is correct, not just that a tag exists.
 - Keep flows that depend on external state (OAuth, native dialogs, iframes) out of scope.
-## Test like a real user hunting bugs
+## Hunt the edges — but derive them from THIS system, not a checklist
 
-Bugs hide at the edges a real user trips over, not the happy path. For every
-endpoint/resolver/flow you cover, ask the questions a user would and assert the
-answer:
+Bugs live where the code's own assumptions break — and those are specific to the
+system in front of you, not a fixed list you can pre-print. Don't run a canned
+checklist; **read the actual code/contract (use the code map) and ask, for each
+seam, "what does a real user do that this code doesn't handle?"** The sophisticated
+bugs — the cross-source join that's only right down one path, the invariant that
+holds for admin but leaks for a scoped caller, the value that's correct in
+isolation but wrong after a migration — only surface when you reason about *that*
+resolver's real behavior, not a generic template.
 
-- **Empty / null / zero / missing:** empty password, no bearer, a client with 0
-  policies, a field that comes back `null` or the literal `"0"`, an absent record.
-- **Wrong / unexpected input:** a filter field that doesn't exist, a bad
-  `grant_type`, a malformed id, an out-of-range value.
-- **Boundaries:** first/last page, limit 0, a count that should be > 0, a date at
-  the range edge.
-- **Cross-source / joins:** a value that's only correct when *every* source is
-  joined (e.g. a count that's right via one path but 0 via another).
-- **Auth & config:** unauthorized caller must be rejected; an origin/redirect/scope
-  that must be allowed; a public route that must stay public.
+Use the obvious classes (empty/null/zero, malformed or unexpected input,
+boundaries, auth/scope, config) as *spark* to get started — then keep going past
+them into what's actually risky here. If the code has a branch, a join, a cache, a
+scope check, or a fallback, there's an edge; test the one a user would hit.
 
 Assert the **concrete observable** a user sees (a status, a field value, a count),
 never "it works".
