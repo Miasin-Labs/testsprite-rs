@@ -227,6 +227,9 @@ enum TestCmd {
         /// Run only tests tagged with this group/list.
         #[arg(long)]
         group: Option<String>,
+        /// Run independent tests in the same dependency wave concurrently (default 1 = sequential).
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Re-run stored tests; --heal regenerates fragility-failing LLM tests.
     Rerun {
@@ -494,7 +497,8 @@ async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
                 println!("schedule '{name}': no tests in group '{}'", s.group);
                 return Ok(());
             }
-            let code = local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None).await?;
+            let code =
+                local::run::run(&root, &ids, None, "gpt-4o-mini", false, false, None, 1).await?;
             std::process::exit(code);
         }
         ScheduleCmd::Crontab => {
@@ -645,6 +649,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             fix,
             browser,
             group,
+            jobs,
         } => {
             let ids = match group.as_deref() {
                 Some(g) => {
@@ -663,7 +668,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 None => id,
             };
             let code =
-                local::run::run(&root, &ids, url.as_deref(), &model, json, fix, browser.as_deref())
+                local::run::run(&root, &ids, url.as_deref(), &model, json, fix, browser.as_deref(), jobs)
                     .await?;
             std::process::exit(code);
         }

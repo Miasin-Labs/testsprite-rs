@@ -245,7 +245,7 @@ pub async fn resolve(
                         .collect()
                 })
                 .unwrap_or_default();
-            let results = run::run_collect(root, &ids, None, model, false, None).await?;
+            let results = run::run_collect(root, &ids, None, model, false, None, 1).await?;
             let passed = results
                 .iter()
                 .filter(|r| r["passed"].as_bool() == Some(true))

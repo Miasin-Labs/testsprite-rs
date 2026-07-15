@@ -30,6 +30,11 @@ pub fn classify(passed: bool, error: &str) -> (Verdict, Option<&'static str>) {
 
     let lower = error.to_lowercase();
 
+    // Dependency-wave skip: a test not run because an upstream producer failed.
+    if lower.starts_with("skipped: dependency") {
+        return (Verdict::Blocked, Some("dependency"));
+    }
+
     if lower.contains("could not write test file")
         || lower.contains("python3 failed to launch")
         || lower.contains("no spec and no llm")
@@ -139,6 +144,14 @@ mod tests {
         assert_eq!(
             classify(false, "webkit: missing shared library libicudata.so.74"),
             (Verdict::Blocked, Some("browser_crash"))
+        );
+    }
+
+    #[test]
+    fn dependency_skip_is_blocked() {
+        assert_eq!(
+            classify(false, "skipped: dependency 'auth_token' unmet (upstream producer failed)"),
+            (Verdict::Blocked, Some("dependency"))
         );
     }
 }

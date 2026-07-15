@@ -1,0 +1,9 @@
+G-review big feature e2e 2026-07-15 (skips + parallelism + graceful teardown)
+==============================================================================
+SKIPS: producer(exit 1, produces tok) -> consumer(needs tok) verdict=BLOCKED
+  "skipped: dependency \x27tok\x27 unmet"; teardown ran (PASS). Cascades downstream.
+PARALLELISM: 3x (sleep 1) independent -> jobs=1: 3.05s, jobs=3: 1.06s
+GRACEFUL TEARDOWN (SIGINT via python single-PID): interrupt during level0 'a'(sleep2)
+  -> a completes, level1 'b' SKIPPED (b_ran absent), teardown 'td' RAN (td_ran present), rc=0
+  (synchronous unix::signal registration; process survives SIGINT, runs teardown)
+waves: level-BFS (Vec<Vec>); cycle-safe/total. cargo test 64/64, clippy 0.

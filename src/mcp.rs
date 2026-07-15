@@ -142,7 +142,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 None => vec![],
             };
             let root = std::env::current_dir()?;
-            let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None).await?;
+            let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1).await?;
             Ok(json!({ "results": results }))
         }
         "testsprite_store_test" => {
