@@ -128,3 +128,14 @@ Amplify/Cognito config — **zero `ApiRequest` data-layer calls, no new endpoint
 Route UIs import the already-mined shared wrappers. The `/v3/*` dashboard plane
 is cloud-only (testsprite-rs mirrors `/api/cli/v1`). Mining is exhaustively
 complete across dump + lazy + auth-gated chunks: no new locally-buildable signal.
+
+Live API capture (read-only, Cognito session, 2026-07-15): with the user's own
+valid dashboard session, GET-only probes of `api.testsprite.com` (redacted):
+- `GET /v3/agent/settings` -> `{autoApprove: false}` — **actionable**: TestSprite's
+  agent has an auto-approve toggle. Shipped locally as `agent message
+  --auto-approve` + MCP `auto_approve` (executes the proposed action immediately).
+- `GET /feature-flags` -> `{testSpriteV3Enabled:false, memoryEnabled:false,
+  tunnelV2RolloutPercentage:100}` — `/v3/*` gated off for this (V2) account.
+- `GET /user/me` -> cloud billing/org schema (credits, overage, org roles) — cloud-only.
+- `GET /v3/agent/conversations` -> `[]` (works; empty). `/v3/project` -> 403 (V3 gated).
+Net new local feature from the whole mining effort: **1** (agent auto-approve).

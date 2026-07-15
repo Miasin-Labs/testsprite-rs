@@ -197,6 +197,8 @@ reported parallel-causes-failures), and **graceful teardown** (SIGINT via
 synchronous `unix::signal` stops launching new waves but still runs the
 teardown phase). Run history is bounded: `write_result` auto-prunes to
 `TESTSPRITE_RUN_HISTORY_KEEP` (default 200) per test; `test prune [--keep N]`.
+Agent **auto-approve** (`agent message --auto-approve`, MCP `auto_approve`) executes
+the proposed action immediately — mirrors TestSprite's `/v3/agent/settings.autoApprove`.
 
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
