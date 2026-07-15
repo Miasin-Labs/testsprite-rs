@@ -70,6 +70,9 @@ fn tool_list() -> Value {
             { "name": "testsprite_flaky",
               "description": "Replay a stored test N times (default 5) and report a stability score; blocked/auth-failure runs are excluded, not scored as flaky.",
               "inputSchema": obj_schema(&[("id","string"),("runs","number"),("model","string")]) },
+            { "name": "testsprite_run_history",
+              "description": "Show a stored test's full run history (append-only): every recorded run newest-first with pass/fail, verdict, failureKind, and timestamp. Use it to spot regressions and intermittent failures over time.",
+              "inputSchema": obj_schema(&[("id","string")]) },
         ]
     })
 }
@@ -246,6 +249,17 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             Ok(serde_json::to_value(
                 crate::local::flaky::flaky(&root, id, runs, model).await?,
             )?)
+        }
+        "testsprite_run_history" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "runs": crate::local::store::run_history(&root, id).await?
+            }))
         }
         other => anyhow::bail!("Unknown tool: {other}"),
     }

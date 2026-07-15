@@ -212,6 +212,37 @@ pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>>
     Ok(Some(record))
 }
 
+/// Full append-only run history for `id`, newest first. Surfaces the `runs`
+/// table the executor appends to on every run — the local analogue of the
+/// official CLI's `test result --history`. The data was already being
+/// collected; this just exposes it.
+pub async fn run_history(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let rows: Vec<(i64, i64, Option<String>, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT run_id,passed,verdict,failure_kind,error,created_at \
+         FROM runs WHERE test_id=? ORDER BY run_id DESC",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(run_id, passed, verdict, failure_kind, error, created_at)| {
+                serde_json::json!({
+                    "run_id": run_id,
+                    "passed": passed != 0,
+                    "verdict": verdict,
+                    "failureKind": failure_kind,
+                    "error": error,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect())
+}
+
 /// Write an LLM-proposed fix recommendation to `fixes/<id>.md` for a coding
 /// agent to pick up. `fix` is `{explanation, patch}`; returns the file path.
 pub fn write_fix(

@@ -316,6 +316,13 @@ enum TestCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show a test's full run history (append-only runs table, newest first).
+    History {
+        #[arg()]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -614,6 +621,29 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Flaky { id, runs, model, json } => {
             let code = local::flaky::flaky_report(&root, &id, runs, &model, json).await?;
             std::process::exit(code);
+        }
+        TestCmd::History { id, json } => {
+            let runs = local::store::run_history(&root, &id).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&runs)?);
+            } else if runs.is_empty() {
+                println!("no runs recorded for {id}");
+            } else {
+                println!("{} run(s) for {id} (newest first):", runs.len());
+                for r in &runs {
+                    let run_id = r.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let mark = if r.get("passed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    };
+                    let verdict = r.get("verdict").and_then(|v| v.as_str()).unwrap_or("-");
+                    let fk = r.get("failureKind").and_then(|v| v.as_str()).unwrap_or("-");
+                    let when = r.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("  #{run_id}  {when}  {mark}  verdict={verdict}  failureKind={fk}");
+                }
+            }
+            Ok(())
         }
     }
 }
