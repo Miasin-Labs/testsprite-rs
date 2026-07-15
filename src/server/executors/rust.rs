@@ -9,7 +9,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{ExecCtx, Executor, Outcome};
+use super::{clip, ExecCtx, Executor, Outcome};
 
 pub struct RustExecutor;
 
@@ -52,7 +52,7 @@ async fn cargo_build(crate_dir: &str) -> Outcome {
         .await;
     match out {
         Ok(o) if o.status.success() => Outcome::pass(code),
-        Ok(o) => Outcome::fail(tail(&String::from_utf8_lossy(&o.stderr), 1200), code),
+        Ok(o) => Outcome::fail(clip(&String::from_utf8_lossy(&o.stderr), 2000), code),
         Err(e) => Outcome::fail(format!("cargo failed to launch: {e}"), code),
     }
 }
@@ -85,17 +85,8 @@ async fn run_cargo_test(crate_dir: &str, code: &str) -> Outcome {
         Ok(o) => {
             let mut msg = String::from_utf8_lossy(&o.stdout).to_string();
             msg.push_str(&String::from_utf8_lossy(&o.stderr));
-            Outcome::fail(tail(&msg, 1500), code.to_string())
+            Outcome::fail(clip(&msg, 2000), code.to_string())
         }
         Err(e) => Outcome::fail(format!("cargo failed to launch: {e}"), code.to_string()),
-    }
-}
-
-/// Keep the last `n` chars (compiler/test errors are most useful at the tail).
-fn tail(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.trim().to_string()
-    } else {
-        format!("…{}", &s[s.len() - n..])
     }
 }

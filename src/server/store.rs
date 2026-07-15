@@ -150,7 +150,7 @@ pub async fn execute_python(code: &str) -> (bool, String, String) {
     match output {
         Ok(out) if out.status.success() => (true, String::new(), code.to_string()),
         Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let err = crate::server::executors::clip(&String::from_utf8_lossy(&out.stderr), 2000);
             (false, err, code.to_string())
         }
         Err(e) => (

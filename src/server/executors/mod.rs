@@ -110,3 +110,54 @@ pub fn for_kind(kind: TestKind) -> Arc<dyn Executor> {
         TestKind::Command => Arc::new(command::CommandExecutor),
     }
 }
+
+/// Bound subprocess output to `max` chars while preserving BOTH ends.
+///
+/// Compiler/build/test failures put the root cause at the TOP (e.g.
+/// `error[E0308]: mismatched types`) and a long backtrace at the bottom, so
+/// tail-only truncation drops the single most useful line. This keeps the head
+/// (biased larger) and the tail with an elision marker between them. UTF-8-safe:
+/// counts by `char` and never slices mid-codepoint.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    let s = s.trim();
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let head = (max * 3 / 5).max(1);
+    let tail = max.saturating_sub(head);
+    let chars: Vec<char> = s.chars().collect();
+    let head_str: String = chars[..head].iter().collect();
+    let tail_str: String = chars[n - tail..].iter().collect();
+    let elided = n - head - tail;
+    format!("{head_str}\n…[{elided} chars elided]…\n{tail_str}")
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::clip;
+
+    #[test]
+    fn short_output_passes_through_trimmed() {
+        assert_eq!(clip("  hello  ", 100), "hello");
+    }
+
+    #[test]
+    fn keeps_root_cause_head_and_tail() {
+        let input = format!("ROOT-CAUSE{}TRAILING-END", "M".repeat(400));
+        let out = clip(&input, 40);
+        assert!(out.starts_with("ROOT-CAUSE"), "head (root cause) kept: {out}");
+        assert!(out.ends_with("TRAILING-END"), "tail kept: {out}");
+        assert!(out.contains("elided"), "marker present: {out}");
+        assert!(out.chars().count() < input.chars().count(), "actually bounded");
+    }
+
+    #[test]
+    fn utf8_safe_on_multibyte_boundary() {
+        // Byte-slicing this mid-codepoint would panic; char-based clip must not.
+        let input = "🦀".repeat(500);
+        let out = clip(&input, 100);
+        assert!(out.contains("elided"));
+        assert!(out.chars().any(|c| c == '🦀'));
+    }
+}

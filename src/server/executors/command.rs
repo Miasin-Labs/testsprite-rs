@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use super::{ExecCtx, Executor, Outcome};
+use super::{clip, ExecCtx, Executor, Outcome};
 
 pub struct CommandExecutor;
 
@@ -38,9 +38,12 @@ impl Executor for CommandExecutor {
             Ok(o) => {
                 let mut buf = String::from_utf8_lossy(&o.stdout).into_owned();
                 buf.push_str(&String::from_utf8_lossy(&o.stderr));
-                let tail: String = buf.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
                 Outcome::fail(
-                    format!("command failed (exit {}): {}", o.status.code().unwrap_or(-1), tail.trim()),
+                    format!(
+                        "command failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        clip(&buf, 2000)
+                    ),
                     cmd.to_string(),
                 )
             }
