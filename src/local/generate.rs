@@ -1,5 +1,11 @@
 //! Generate local test cases with the LLM (PRD → plan → stored cases).
 //! Generated cases have no `spec`, so `test run` LLM-generates their code.
+//!
+//! The PRD and the test plan are persisted — the SQLite `prd` table plus the
+//! `standard_prd.json` / `*_test_plan.json` files the original plugin writes —
+//! so the whole flow (doc/summary → PRD → plan → cases) stays inspectable, not
+//! just the leaf cases. Each generated case is stamped with the `prdId` it came
+//! from.
 
 use std::path::Path;
 
@@ -10,10 +16,17 @@ use crate::server::llm::LlmClient;
 
 use super::store;
 
+/// Result of a generate run: the persisted PRD id (when a PRD was produced) and
+/// the stored test-case ids.
+pub struct GenSummary {
+    pub prd_id: Option<String>,
+    pub test_ids: Vec<String>,
+}
+
 /// Generate test cases from a code summary (`--from <file>`), a normalized PRD
 /// distilled from an arbitrary doc (`--doc <file>`: README / notes / Jira ticket
-/// / spec), or a plain instruction (`--instruction <text>`). Stores them and
-/// returns their ids.
+/// / spec), or a plain instruction (`--instruction <text>`). Persists the PRD +
+/// plan and the resulting cases (each stamped with its `prdId`).
 pub async fn generate(
     root: &Path,
     from: Option<&Path>,
@@ -21,22 +34,25 @@ pub async fn generate(
     doc: Option<&Path>,
     model: &str,
     kind: Option<TestKind>,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<GenSummary> {
     let Some(llm) = LlmClient::from_env(model) else {
         anyhow::bail!(
             "test generate needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
         )
     };
 
-    let prd = if let Some(dp) = doc {
+    let (prd, source) = if let Some(dp) = doc {
         if !dp.is_file() {
             anyhow::bail!("--doc expects a readable file ({})", dp.display());
         }
         let text = std::fs::read_to_string(dp)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", dp.display()))?;
-        llm.generate_prd_from_doc(&text).await?
+        (
+            llm.generate_prd_from_doc(&text).await?,
+            format!("doc:{}", dp.display()),
+        )
     } else {
-        let summary = if let Some(p) = from.filter(|p| p.is_file()) {
+        let (summary, source) = if let Some(p) = from.filter(|p| p.is_file()) {
             let body = std::fs::read_to_string(p)
                 .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
             let value: Value = serde_json::from_str(&body)
@@ -44,9 +60,15 @@ pub async fn generate(
             if !value.is_object() {
                 anyhow::bail!("{} does not contain a JSON object", p.display());
             }
-            value
+            (value, format!("from:{}", p.display()))
         } else if let Some(instruction) = instruction {
-            json!({ "project_name": "local", "description": instruction })
+            (
+                json!({ "project_name": "local", "description": instruction }),
+                format!(
+                    "instruction:{}",
+                    instruction.chars().take(80).collect::<String>()
+                ),
+            )
         } else if let Some(p) = from {
             anyhow::bail!(
                 "--from expects a code-summary JSON file, not a directory ({}); pass --instruction instead",
@@ -55,17 +77,50 @@ pub async fn generate(
         } else {
             anyhow::bail!("pass --from <code_summary.json>, --doc <file>, or --instruction <text>")
         };
-        llm.generate_prd(&summary).await?
+        (llm.generate_prd(&summary).await?, source)
     };
 
     let cases = llm.generate_plan(&prd).await?;
-    store_cases(root, cases, kind).await
+    let prd_id = persist_prd(root, &source, &prd, &cases, kind).await?;
+    let test_ids = store_cases(root, cases, kind, Some(&prd_id)).await?;
+    Ok(GenSummary {
+        prd_id: Some(prd_id),
+        test_ids,
+    })
+}
+
+/// Persist the PRD + plan to SQLite and mirror them to the on-disk artifact
+/// files (`standard_prd.json`, `testsprite_{backend,frontend}_test_plan.json`)
+/// the original plugin writes. Returns the new prd id.
+async fn persist_prd(
+    root: &Path,
+    source: &str,
+    prd: &Value,
+    plan: &[Value],
+    kind: Option<TestKind>,
+) -> anyhow::Result<String> {
+    let id = store::save_prd(root, source, prd, plan).await?;
+    // Best-effort file mirror (never fail generation over a file write).
+    let paths = crate::paths::Paths::new(root);
+    let _ = std::fs::create_dir_all(paths.dir());
+    let _ = std::fs::write(
+        paths.standard_prd(),
+        serde_json::to_string_pretty(prd).unwrap_or_default(),
+    );
+    let plan_path = match kind {
+        Some(TestKind::Frontend) => paths.frontend_test_plan(),
+        _ => paths.backend_test_plan(),
+    };
+    let _ = std::fs::write(
+        plan_path,
+        serde_json::to_string_pretty(&Value::Array(plan.to_vec())).unwrap_or_default(),
+    );
+    Ok(id)
 }
 
 /// Generate a test case per function found by the structural coverage surface
-/// under `path`, targeting each function's inputs/outputs and control-flow
-/// branches. Stores the cases and returns their ids.
-pub async fn generate_cover(root: &Path, path: &Path, model: &str) -> anyhow::Result<Vec<String>> {
+/// under `path`. No PRD is produced (functions → cases directly).
+pub async fn generate_cover(root: &Path, path: &Path, model: &str) -> anyhow::Result<GenSummary> {
     let units = crate::local::coverage::structural_surface(path)?;
     if units.is_empty() {
         anyhow::bail!("no functions found under {}", path.display());
@@ -73,14 +128,20 @@ pub async fn generate_cover(root: &Path, path: &Path, model: &str) -> anyhow::Re
     generate_for_units(root, &units, model, "test generate --cover").await
 }
 
-/// Code Diff Mode: generate a test for each function CHANGED since `since` (per
-/// `git diff`) that no stored test already covers. Returns the new ids — empty
-/// when nothing changed or every changed function is already covered.
-pub async fn generate_changed(root: &Path, since: &str, model: &str) -> anyhow::Result<Vec<String>> {
+/// Code Diff Mode: generate a test for each function CHANGED since `since` that
+/// no stored test already covers. No PRD (functions → cases directly).
+pub async fn generate_changed(
+    root: &Path,
+    since: &str,
+    model: &str,
+) -> anyhow::Result<GenSummary> {
     let changed = crate::local::changed::changed_surface(root, since)?;
     let targets = crate::local::changed::uncovered_changed_units(root, &changed).await?;
     if targets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GenSummary {
+            prd_id: None,
+            test_ids: Vec::new(),
+        });
     }
     generate_for_units(root, &targets, model, "test generate --changed").await
 }
@@ -91,7 +152,7 @@ async fn generate_for_units(
     units: &[crate::local::coverage::Unit],
     model: &str,
     what: &str,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<GenSummary> {
     let functions = Value::Array(
         units
             .iter()
@@ -105,14 +166,20 @@ async fn generate_for_units(
         )
     };
     let cases = llm.generate_from_functions(&functions).await?;
-    store_cases(root, cases, None).await
+    let test_ids = store_cases(root, cases, None, None).await?;
+    Ok(GenSummary {
+        prd_id: None,
+        test_ids,
+    })
 }
 
-/// Store generated cases, tagging `kind` when given. Returns the stored ids.
+/// Store generated cases, tagging `kind` and (when set) the originating
+/// `prd_id` so each case links back to the PRD it came from. Returns the ids.
 async fn store_cases(
     root: &Path,
     cases: Vec<Value>,
     kind: Option<TestKind>,
+    prd_id: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     let mut ids = Vec::new();
     for mut case in cases {
@@ -121,6 +188,9 @@ async fn store_cases(
         }
         if let Some(k) = kind {
             case["kind"] = serde_json::to_value(k)?;
+        }
+        if let Some(pid) = prd_id {
+            case["prdId"] = json!(pid);
         }
         let id = store::add_value(root, case).await?;
         ids.push(id);

@@ -106,6 +106,13 @@ CREATE TABLE IF NOT EXISTS pending_actions (
     result          TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS prd (
+    id         TEXT PRIMARY KEY,
+    source     TEXT NOT NULL DEFAULT '',
+    prd_json   TEXT NOT NULL,
+    plan_json  TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS pending_actions_conv_idx ON pending_actions (conversation_id, action_id);
 CREATE INDEX IF NOT EXISTS runs_test_id_idx ON runs (test_id, run_id DESC);
 ";

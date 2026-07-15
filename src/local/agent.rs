@@ -237,13 +237,16 @@ pub async fn resolve(
 
     let (result, summary) = match kind.as_str() {
         "generate" => {
-            let ids = if args["cover"].as_bool() == Some(true) {
+            let out = if args["cover"].as_bool() == Some(true) {
                 generate::generate_cover(root, root, model).await?
             } else {
                 generate::generate(root, None, args["instruction"].as_str(), None, model, None).await?
             };
-            let summary = format!("Generated {} test(s).", ids.len());
-            (json!({ "generated": ids.len(), "ids": ids }), summary)
+            let summary = format!("Generated {} test(s).", out.test_ids.len());
+            (
+                json!({ "generated": out.test_ids.len(), "ids": out.test_ids, "prdId": out.prd_id }),
+                summary,
+            )
         }
         "run" => {
             let ids: Vec<String> = args["ids"]

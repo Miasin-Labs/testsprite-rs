@@ -94,6 +94,11 @@ enum Command {
         #[command(subcommand)]
         cmd: CiCmd,
     },
+    /// Inspect generated PRDs + test plans (the doc/summary -> PRD -> plan trail).
+    Prd {
+        #[command(subcommand)]
+        cmd: PrdCmd,
+    },
     /// Local project lifecycle — no cloud (init / show).
     Project {
         #[command(subcommand)]
@@ -146,6 +151,19 @@ enum CiCmd {
         /// Overwrite an existing workflow file.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrdCmd {
+    /// List generated PRDs, newest first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a PRD's requirements + test plan (omit id for the latest).
+    Show {
+        id: Option<String>,
     },
 }
 
@@ -448,6 +466,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Command::Prd { cmd } => run_prd(cmd).await,
         Command::Visual { baseline, current } => {
             let diff = local::visual::diff(&baseline, &current)?;
             let regression = diff.is_regression();
@@ -647,6 +666,47 @@ async fn run_project(cmd: ProjectCmd) -> Result<()> {
     }
 }
 
+async fn run_prd(cmd: PrdCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        PrdCmd::List { json } => {
+            let prds = local::store::list_prds(&root).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&prds)?);
+            } else if prds.is_empty() {
+                println!(
+                    "no PRDs yet — run `testsprite-rs test generate --doc <file>` (or --instruction)"
+                );
+            } else {
+                for p in &prds {
+                    println!(
+                        "{}  {} feature(s), {} case(s)  [{}]  {}",
+                        p["id"].as_str().unwrap_or(""),
+                        p["features"],
+                        p["cases"],
+                        p["createdAt"].as_str().unwrap_or(""),
+                        p["source"].as_str().unwrap_or(""),
+                    );
+                }
+            }
+            Ok(())
+        }
+        PrdCmd::Show { id } => {
+            let id = match id {
+                Some(id) => id,
+                None => local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let prd = local::store::load_prd(&root, &id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no PRD with id {id}"))?;
+            println!("{}", serde_json::to_string_pretty(&prd)?);
+            Ok(())
+        }
+    }
+}
+
 async fn run_test(cmd: TestCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {
@@ -794,28 +854,28 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         } => {
             if cover {
                 let p = path.unwrap_or(std::env::current_dir()?);
-                let ids = local::generate::generate_cover(&root, &p, &model).await?;
-                println!("generated {} coverage test(s)", ids.len());
-                for id in &ids {
+                let out = local::generate::generate_cover(&root, &p, &model).await?;
+                println!("generated {} coverage test(s)", out.test_ids.len());
+                for id in &out.test_ids {
                     println!("  {id}");
                 }
                 return Ok(());
             }
             if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
-                let ids = local::generate::generate_changed(&root, since, &model).await?;
-                if ids.is_empty() {
+                let out = local::generate::generate_changed(&root, since, &model).await?;
+                if out.test_ids.is_empty() {
                     println!("no changed functions need new tests (nothing changed, or all covered)");
                 } else {
-                    println!("generated {} test(s) for changed functions", ids.len());
-                    for id in &ids {
+                    println!("generated {} test(s) for changed functions", out.test_ids.len());
+                    for id in &out.test_ids {
                         println!("  {id}");
                     }
                 }
                 return Ok(());
             }
             let kind = kind.as_deref().map(server::executors::TestKind::parse);
-            let ids = local::generate::generate(
+            let out = local::generate::generate(
                 &root,
                 from.as_deref(),
                 instruction.as_deref(),
@@ -824,8 +884,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 kind,
             )
             .await?;
-            println!("generated {} test(s)", ids.len());
-            for id in &ids {
+            if let Some(prd_id) = &out.prd_id {
+                println!("PRD {prd_id}  (inspect: testsprite-rs prd show {prd_id})");
+            }
+            println!("generated {} test(s)", out.test_ids.len());
+            for id in &out.test_ids {
                 println!("  {id}");
             }
             Ok(())

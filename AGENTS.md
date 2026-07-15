@@ -218,6 +218,15 @@ records (`/users/{id}` -> a real UUID) instead of 404ing. Map lives in
 `project set-var <key> <value>`. **Discord graceful shutdown** — `discord::run`
 traps Ctrl+C and calls `shard_manager.shutdown_all()` to close the gateway cleanly.
 
+**PRD persistence** — `test generate` (doc/summary/instruction) used to distill a
+PRD → plan → cases in memory and persist ONLY the leaf cases, so the SQLite DB had
+no record of *why* the cases exist. Now the PRD + plan are saved to a `prd` table
+(`store::{save_prd,list_prds,load_prd,latest_prd_id}`) and mirrored to
+`standard_prd.json` / `testsprite_{backend,frontend}_test_plan.json`; each generated
+case is stamped with its `prdId`. Inspect via `testsprite-rs prd list` / `prd show
+[<id>]`; MCP `testsprite_generate` returns `prdId`. The `doc → PRD → plan → cases`
+trail is now fully inspectable, not just the leaves.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

@@ -97,7 +97,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("gpt-4o-mini");
             let root = std::env::current_dir()?;
-            let ids = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
+            let out = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
                 crate::local::generate::generate_changed(&root, since, model).await?
             } else {
@@ -115,7 +115,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 )
                 .await?
             };
-            Ok(json!({ "generated": ids.len(), "ids": ids }))
+            Ok(json!({ "generated": out.test_ids.len(), "ids": out.test_ids, "prdId": out.prd_id }))
         }
         "testsprite_run" => {
             let model = args

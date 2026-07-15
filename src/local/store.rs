@@ -52,6 +52,83 @@ pub async fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     Ok(id)
 }
 
+/// Persist a generated PRD + its test plan; returns the new prd id. The PRD is
+/// the normalized "what this app should do" the cases were derived from — kept
+/// so the flow (doc/summary -> PRD -> plan -> cases) stays inspectable, not just
+/// the leaf cases.
+pub async fn save_prd(
+    root: &Path,
+    source: &str,
+    prd: &Value,
+    plan: &[Value],
+) -> anyhow::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let pool = crate::local::db::open(root).await?;
+    sqlx::query("INSERT INTO prd (id,source,prd_json,plan_json) VALUES (?,?,?,?)")
+        .bind(&id)
+        .bind(source)
+        .bind(serde_json::to_string(prd)?)
+        .bind(serde_json::to_string(&Value::Array(plan.to_vec()))?)
+        .execute(&pool)
+        .await?;
+    Ok(id)
+}
+
+/// List stored PRDs newest-first as `{id, source, features, cases, createdAt}`.
+pub async fn list_prds(root: &Path) -> anyhow::Result<Vec<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, source, prd_json, plan_json, created_at FROM prd ORDER BY created_at DESC, rowid DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, source, prd_json, plan_json, created_at)| {
+            let prd: Value = serde_json::from_str(&prd_json).unwrap_or(Value::Null);
+            let features = prd
+                .get("features")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let cases = serde_json::from_str::<Value>(&plan_json)
+                .ok()
+                .and_then(|p| p.as_array().map(|a| a.len()))
+                .unwrap_or(0);
+            serde_json::json!({ "id": id, "source": source, "features": features, "cases": cases, "createdAt": created_at })
+        })
+        .collect())
+}
+
+/// Load one PRD (its requirements + generated plan) by id.
+pub async fn load_prd(root: &Path, id: &str) -> anyhow::Result<Option<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let row: Option<(String, String, String, String, String)> =
+        sqlx::query_as("SELECT id, source, prd_json, plan_json, created_at FROM prd WHERE id=?")
+            .bind(id)
+            .fetch_optional(&pool)
+            .await?;
+    Ok(row.map(|(id, source, prd_json, plan_json, created_at)| {
+        serde_json::json!({
+            "id": id,
+            "source": source,
+            "createdAt": created_at,
+            "prd": serde_json::from_str::<Value>(&prd_json).unwrap_or(Value::Null),
+            "plan": serde_json::from_str::<Value>(&plan_json).unwrap_or(Value::Null),
+        })
+    }))
+}
+
+/// The most recent PRD id, if any.
+pub async fn latest_prd_id(root: &Path) -> anyhow::Result<Option<String>> {
+    let pool = crate::local::db::open(root).await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM prd ORDER BY created_at DESC, rowid DESC LIMIT 1")
+            .fetch_optional(&pool)
+            .await?;
+    Ok(row.map(|(id,)| id))
+}
+
 /// List every stored test case, sorted by id.
 pub async fn list(root: &Path) -> anyhow::Result<Vec<LocalTest>> {
     let pool = crate::local::db::open(root).await?;
@@ -566,6 +643,33 @@ mod tests {
         let out = root.join("e2.rs");
         let err = emit(&root, "e2", &out).await.unwrap_err();
         assert!(err.to_string().contains("no `code` to emit"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_prd_then_load_and_list_round_trips() {
+        let root = crate::local::tmp_root();
+        let prd = serde_json::json!({
+            "product_overview": "a todo api",
+            "features": [{"name": "Create"}, {"name": "List"}],
+        });
+        let plan = vec![
+            serde_json::json!({"id": "TC001", "title": "create"}),
+            serde_json::json!({"id": "TC002", "title": "list"}),
+        ];
+        let id = save_prd(&root, "instruction:todo", &prd, &plan).await.unwrap();
+
+        let listed = list_prds(&root).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], id);
+        assert_eq!(listed[0]["features"], 2);
+        assert_eq!(listed[0]["cases"], 2);
+
+        let loaded = load_prd(&root, &id).await.unwrap().unwrap();
+        assert_eq!(loaded["prd"]["product_overview"], "a todo api");
+        assert_eq!(loaded["plan"].as_array().unwrap().len(), 2);
+        assert_eq!(latest_prd_id(&root).await.unwrap().as_deref(), Some(id.as_str()));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
