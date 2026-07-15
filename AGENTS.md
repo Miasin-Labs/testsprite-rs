@@ -141,6 +141,193 @@ Minor, optional items (in priority order):
    test`) executors build with deterministic fallbacks but were never run e2e.
    Exercise them before claiming those modalities work.
 
-Uncommitted at time of writing: `server/llm.rs` omits `temperature` for newer
-OpenAI models (gpt-5/6, o1/o3/o4) that reject an explicit `0.2` — a sensible fix
-worth committing.
+Recently landed (branch `feat/cli-v3-parity`): `server/llm.rs` now omits
+`temperature` for models that reject an explicit value (gpt-5/6, o1/o3/o4).
+
+## The official TestSprite today (reverse-engineered, 2026-07)
+
+TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors
+the older one.
+
+- **MCP plugin** `@testsprite/testsprite-mcp` — what this repo reimplements. 7
+  stdio MCP tools; the agent writes `code_summary.yaml`, the cloud generates
+  PRD → plan, a reverse tunnel exposes localhost, tests run in the cloud. **V2**
+  backend (`/mcp/*`).
+- **CLI** `@testsprite/testsprite-cli` v0.3.0 — the current official tool. An
+  imperative `testsprite <cmd>` binary (commander + undici + valibot) driven by
+  two bundled Claude skills (`testsprite-onboard`, `testsprite-verify`). Talks to
+  a **V3 multi-tenant** backend and routes internally between V2/V3. Tests run
+  against a **deployed URL** — no reverse tunnel; localhost/RFC1918 is rejected.
+
+### V3 platform features (2026-07 dashboard dump)
+
+Full analysis: `~/VulnerabilityResearch/testspite/V3-DASHBOARD-FINDINGS.md`.
+
+- **Multi-tenant orgs / workspaces** — members + roles, invitations, per-org
+  billing/usage metering (`/v3/org/*`); `crossTenantOrMissing` isolation flag.
+- **Agentic conversation API** — `/v3/agent/conversations` (pending-actions,
+  assistant messages, image upload).
+- **Project "resources" (agent inputs)** — GitHub codebase, agent web-exploration
+  (with instruction), design URLs, Linear tickets, documents, crawled pages, env.
+- **Integrations** — GitHub App, Slack (`/v3/project/{id}/slack`), Jira/Asana,
+  Linear. Slack + Jira/Asana are paid-tier gated.
+- **Monitoring & schedules** — cron-style re-verification (Hourly/Daily/Weekly/
+  Monthly → AWS cron).
+- **Feature flags** — `GET /feature-flags`; `testSpriteV3Enabled` gates the
+  `/dashboard-v3` rollout.
+- **Auth / stack** — two Cognito pools (V2 `us-east-1_5oj3Bv3Ob`, V3
+  `us-east-1_WKiyYnrKI`), Amplify Gen2, an AppSync GraphQL plane; Next.js 15.5 /
+  React 19.2-canary; Intercom support chat.
+
+> **Security:** the dump exposes a live-looking AppSync API key with `allow:
+> public` CRUD model rules over `User`/`Project`/`BackendProject.credential`. See
+> the findings doc; treat as needs-verification — do **not** probe prod without
+> authorization.
+
+## CLI parity target — 1:1 with `@testsprite/testsprite-cli` v0.3.0
+
+Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
+
+| Official CLI command | Purpose | Backend | rs |
+|---|---|---|---|
+| `setup` (alias `init`) | onboard: auth + skills install | — | ❌ |
+| `auth configure [--from-env]` | store API key | `/me` | 🟡 (`API_KEY` env) |
+| `auth whoami` | identity | `GET /me` | 🟡 (`account`) |
+| `auth logout` | clear creds | `/auth/logout` | ❌ |
+| `usage` | credits + plan | `GET /me` | 🟡 (`account`) |
+| `doctor` | env diagnostic (ok/warn/fail) | — | ❌ |
+| `agent install\|list\|status` | install/verify IDE skills | — | ❌ |
+| `project create --type fe\|be --name [--url --username --password-file]` | create project | `POST /v3/project` | ❌ |
+| `project list` | list | `GET /v3/project` | ❌ |
+| `project get <id>` | detail | `GET /v3/project/{id}` | ❌ |
+| `project update <id>` | edit | `PATCH /v3/project/{id}` | ❌ |
+| `project credential <id> --type … --credential …` | static auth cred | `/v3/project/{id}/…` | ❌ |
+| `project auto-auth <id> …` | auto-refresh login | — | ❌ |
+| `test create --type backend --code-file --project` | create BE test | `POST /tests` | ❌ |
+| `test create --plan-from plan.json` | create FE test | `POST /tests` | ❌ |
+| `test create-batch --plans jsonl\|--plan-from-dir` | batch FE (≤50) | `POST /tests/batch` | ❌ |
+| `test list --project [--status]` | list tests | `GET /tests` | ❌ |
+| `test get <id>` | detail | `GET /tests/{id}` | ❌ |
+| `test update <id>` | edit metadata | `PATCH /tests/{id}` | ❌ |
+| `test delete <id> --confirm` / `delete-batch` / `delete --all` | delete | `DELETE /tests/{id}` | ❌ |
+| `test plan put <id> --steps` | replace FE steps | `PUT /tests/{id}/plan-steps` | ❌ |
+| `test code get\|put <id> --code-file --expected-version` | BE code (etag concurrency) | `…/code` | ❌ |
+| `test steps <id>` | recorded steps | `GET /tests/{id}/steps` | ❌ |
+| `test result <id> [--history]` | latest/historical result | `…/result` | ❌ |
+| `test run <id> [--target-url --wait]` | run one | trigger + poll | 🟡 (batch-only) |
+| `test run --all --project` | wave-ordered BE batch | batch | ❌ |
+| `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | ❌ |
+| `test wait <run-id…>` | attach to dispatched run(s) | poll | 🟡 (internal) |
+| `test artifact get <run-id> --out` | download failure bundle | artifact | ❌ |
+| `test failure get\|summary <id>` | agent-facing root-cause bundle | `…/failure/*` | ❌ |
+| `test diff <runA> <runB>` | isolate regression | — | ❌ |
+| `test lint` | OFFLINE plan/steps validation | — | ❌ |
+| `test scaffold --type backend` | emit starter test | — | 🟡 (engine synthesizes) |
+| `test flaky <id>` | replay N, stability score | — | ❌ |
+
+Contract details to match for true 1:1:
+
+- **Exit codes:** `0` passed · `1` failed/blocked/cancelled · `5` VALIDATION_ERROR
+  (backend-only flag with `--type frontend`; `--max-concurrency > 100`) · `6`
+  stale etag (re-fetch + retry) · `7` timeout (inconclusive) · `11` RATE_LIMITED.
+- **Statuses:** `draft|ready|queued|running|passed|failed|blocked|cancelled|
+  unknown`; verdict `passed|failed|blocked`; `failureKind` ∈ assertion /
+  assertion_blocked / routing_404 / network_timeout / network / timeout /
+  browser_crash / infra / unknown; `fixKind` ∈ code/selector/data/env/unknown.
+- **Batch:** default concurrency 50, hard max 100, client throttle 50/60s under
+  the server 60/min/key cap; deferred-retry ≤ 3.
+- **BE dependency waves:** `--produces` / `--needs` (repeatable, BE-only),
+  `--category teardown` runs last; `run --all` = fresh wave, `rerun` expands the
+  producer/teardown closure.
+- **Idempotency:** auto-minted `Idempotency-Key`; replays within 24h return the
+  original test/run.
+
+## Beyond parity — where `testsprite-rs` is already *better*
+
+Keep the strengths this repo has that the official CLI lacks:
+
+1. **Coverage Guard** (`server/coverage.rs`) — declared-vs-exercised surface gate.
+   No CLI equivalent; expose as `testsprite-rs coverage`.
+2. **Local / no-cloud backend** — the whole pipeline offline (deterministic or
+   OpenAI); CI without credits or a reverse tunnel.
+3. **Multi-modality Executor seam** — `backend|frontend|mcp|rust` behind one
+   trait; extend, don't fork.
+4. **Single native binary** — no node runtime, no 3-dep bundle.
+
+"Even-better parity" roadmap (in order):
+
+- **P0 command shell** — imperative `testsprite-rs <group> <cmd>` (clap
+  subcommands mirroring the table) *alongside* the MCP server, one shared client.
+- **P0 V3 client** — a `backend.rs` sibling targeting `/v3/*` (orgs, projects,
+  tests, runs) + the exit-code/status contract above.
+- **P1 test lifecycle** — `test {create,list,get,run,rerun,wait,result,artifact}`
+  with wave scheduling.
+- **P1 offline verbs** — `test lint` / `test scaffold` / `coverage`: pure-local,
+  no account — the real differentiator.
+- **P2 agent/doctor** — `agent install` (ship this `AGENTS.md` + skills),
+  `doctor` env checks.
+- **P2 resources/integrations** — GitHub/Linear/Slack ingestion where it fits.
+
+> Maintenance constraint: the official `agent` installer enforces a **32 KiB
+> AGENTS.md budget** for Codex (`AGENTS_MD_CODEX_BUDGET_BYTES`). Keep this file
+> under it; move exhaustive detail to `docs/` if it grows.
+
+## Flowcharts
+
+### 1. Universal pipeline + Executor seam (this repo's core)
+
+```mermaid
+flowchart LR
+  S["surface (code summary)"] --> P["plan (edge cases)"]
+  P --> G["generate (artifact JSON)"]
+  G --> X{"Executor by TestKind"}
+  X -->|backend| H["http.rs → app URL"]
+  X -->|frontend| B["browser.rs → Playwright"]
+  X -->|mcp| M["mcp.rs → stdio JSON-RPC"]
+  X -->|rust| R["rust.rs → cargo test"]
+  H --> Rep["report + Coverage Guard"]
+  B --> Rep
+  M --> Rep
+  R --> Rep
+```
+
+### 2. Two client generations (official) vs this repo
+
+```mermaid
+flowchart TB
+  subgraph V2["MCP plugin (V2) — what testsprite-rs mirrors"]
+    A1["IDE agent"] -->|stdio MCP| A2["testsprite-mcp"]
+    A2 -->|"/mcp/*"| A3["api.testsprite.com (V2)"]
+    A2 -->|reverse tunnel| A4["cloud runners → localhost"]
+  end
+  subgraph V3["CLI (V3) — current official"]
+    B1["IDE agent + skills"] -->|argv| B2["testsprite CLI"]
+    B2 -->|"/v3/*"| B3["api.testsprite.com (V3): orgs, projects, tests, agent"]
+    B2 -->|deployed URL| B4["cloud runs vs your prod/preview"]
+  end
+```
+
+### 3. CLI command → backend (the parity target)
+
+```mermaid
+flowchart LR
+  setup --> auth["auth configure / whoami"]
+  auth --> proj["project create / list / get"]
+  proj --> tc["test create / create-batch"]
+  tc --> tr["test run / run --all / rerun"]
+  tr --> tw["test wait"]
+  tw --> tres["test result / failure get"]
+  tres --> tart["test artifact get"]
+  proj -.paid.-> integ["Slack / Jira / Linear / GitHub App"]
+```
+
+### 4. Auth planes (three separate realms)
+
+```mermaid
+flowchart TB
+  key["sk-user- API key"] --> plane1["/api/* + /mcp/* (test plane)"]
+  jwt["Cognito JWT (browser session)"] --> plane2["/user/* /billing/* /auth/* (dashboard)"]
+  appsync["AppSync API key da2-…"] --> gql["GraphQL models: User / Project / BackendTest"]
+  key -.rejected.-> plane2
+  jwt -.rejected.-> plane1
+```
