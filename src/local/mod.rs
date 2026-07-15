@@ -3,6 +3,7 @@
 //! local target; there is no server and no tunnel.
 
 pub mod coverage;
+pub mod db;
 pub mod diff;
 pub mod doctor;
 pub mod gate;
@@ -52,15 +53,6 @@ pub struct LocalTest {
 
 pub fn ts_dir(root: &Path) -> PathBuf {
     root.join(TESTSPRITE_DIR)
-}
-pub fn project_json(root: &Path) -> PathBuf {
-    ts_dir(root).join("project.json")
-}
-pub fn tests_dir(root: &Path) -> PathBuf {
-    ts_dir(root).join("tests")
-}
-pub fn results_dir(root: &Path) -> PathBuf {
-    ts_dir(root).join("results")
 }
 pub fn fixes_dir(root: &Path) -> PathBuf {
     ts_dir(root).join("fixes")

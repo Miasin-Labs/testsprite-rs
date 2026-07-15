@@ -1,13 +1,12 @@
-//! `testsprite-rs test diff` — compare two stored results
-//! (`results/<id>.json`) offline. CI-scriptable: exits 0 when verdicts
+//! `testsprite-rs test diff` — compare two stored results (`runs` table,
+//! latest row per test id) offline. CI-scriptable: exits 0 when verdicts
 //! match, 1 when they differ (mirrors the real CLI's `CliRunDiff`).
 
 use std::path::Path;
 
-use anyhow::Context;
 use serde_json::Value;
 
-use super::results_dir;
+use super::store;
 use super::verdict::{self, Verdict};
 
 struct Summary {
@@ -17,23 +16,17 @@ struct Summary {
     error: Option<String>,
 }
 
-fn load(root: &Path, id: &str) -> anyhow::Result<Summary> {
-    let path = results_dir(root).join(format!("{id}.json"));
-    let body = match std::fs::read_to_string(&path) {
-        Ok(body) => body,
-        Err(_) => {
-            // Missing result file: treat verdict as "unknown" rather than
-            // erroring the whole comparison out.
-            return Ok(Summary {
-                passed: None,
-                verdict: None,
-                failure_kind: None,
-                error: None,
-            });
-        }
+async fn load(root: &Path, id: &str) -> anyhow::Result<Summary> {
+    let Some(value) = store::load_result(root, id).await? else {
+        // Missing result: treat verdict as "unknown" rather than erroring
+        // the whole comparison out.
+        return Ok(Summary {
+            passed: None,
+            verdict: None,
+            failure_kind: None,
+            error: None,
+        });
     };
-    let value: Value =
-        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
 
     let passed = value.get("passed").and_then(Value::as_bool);
     let error = value
@@ -69,9 +62,9 @@ fn verdict_str(verdict: Option<Verdict>) -> &'static str {
 
 /// Print a compact comparison of two stored results. Returns `0` when both
 /// verdicts match, `1` when they differ.
-pub fn diff(root: &Path, id_a: &str, id_b: &str, json: bool) -> anyhow::Result<i32> {
-    let a = load(root, id_a)?;
-    let b = load(root, id_b)?;
+pub async fn diff(root: &Path, id_a: &str, id_b: &str, json: bool) -> anyhow::Result<i32> {
+    let a = load(root, id_a).await?;
+    let b = load(root, id_b).await?;
 
     let verdict_changed = a.verdict != b.verdict;
     let failure_kind_changed = a.failure_kind != b.failure_kind;

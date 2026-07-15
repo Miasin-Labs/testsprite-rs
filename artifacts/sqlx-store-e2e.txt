@@ -1,0 +1,20 @@
+### SQLite store — on-disk layout (only the db, no tests/*.json or results/*.json)
+testsprite_tests/testsprite.db
+testsprite_tests/testsprite.db-shm
+testsprite_tests/testsprite.db-wal
+
+### tests table
+   id     title   kind
+--------  -----  -------
+1d89bbed  root   backend
+
+### runs table (append-only history: 2 rows after 2 runs)
+run_id    tid     passed  verdict  failure_kind
+------  --------  ------  -------  ------------
+     1  1d89bbed       1  passed
+     2  1d89bbed       1  passed
+
+### project table
+name   kind         target_url
+----  -------  ---------------------
+onyx  backend  http://127.0.0.1:8080

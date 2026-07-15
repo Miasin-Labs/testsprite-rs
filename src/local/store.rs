@@ -1,4 +1,4 @@
-//! `testsprite_tests/tests/` and `testsprite_tests/results/` storage.
+//! SQLite-backed test case + run-result store (see [`super::db`]).
 
 use std::path::Path;
 
@@ -7,25 +7,21 @@ use serde_json::Value;
 
 use crate::server::executors::Outcome;
 
-use super::{LocalTest, results_dir, tests_dir};
-
-fn test_path(root: &Path, id: &str) -> std::path::PathBuf {
-    tests_dir(root).join(format!("{id}.json"))
-}
+use super::LocalTest;
 
 /// Read `file` as a JSON object, assign a uuid `id` if missing/empty, and
-/// store it under `tests/<id>.json`. Returns the id.
-pub fn add(root: &Path, file: &Path) -> anyhow::Result<String> {
+/// upsert it into the `tests` table. Returns the id.
+pub async fn add(root: &Path, file: &Path) -> anyhow::Result<String> {
     let body =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let value: Value =
         serde_json::from_str(&body).with_context(|| format!("parsing {}", file.display()))?;
-    add_value(root, value)
+    add_value(root, value).await
 }
 
-/// Assign a uuid `id` if missing/empty, and store `value` under
-/// `tests/<id>.json`. Returns the id.
-pub fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
+/// Assign a uuid `id` if missing/empty, and upsert `value` into the `tests`
+/// table. Returns the id.
+pub async fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     let mut obj = match value {
         Value::Object(obj) => obj,
         _ => bail!("test case is not a JSON object"),
@@ -37,79 +33,109 @@ pub fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
     };
     obj.insert("id".to_string(), Value::String(id.clone()));
 
-    let dir = tests_dir(root);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let title = obj.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+    let kind = obj.get("kind").and_then(Value::as_str).map(str::to_string);
+    let body = serde_json::to_string(&Value::Object(obj))?;
 
-    let path = test_path(root, &id);
-    let mut out = serde_json::to_string_pretty(&Value::Object(obj))?;
-    out.push('\n');
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    let pool = crate::local::db::open(root).await?;
+    sqlx::query(
+        "INSERT INTO tests (id,title,kind,body,updated_at) VALUES (?,?,?,?,datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title, kind=excluded.kind, body=excluded.body, updated_at=datetime('now')",
+    )
+    .bind(&id)
+    .bind(&title)
+    .bind(kind.as_deref())
+    .bind(&body)
+    .execute(&pool)
+    .await?;
+
     Ok(id)
 }
 
 /// List every stored test case, sorted by id.
-pub fn list(root: &Path) -> anyhow::Result<Vec<LocalTest>> {
-    let dir = tests_dir(root);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+pub async fn list(root: &Path) -> anyhow::Result<Vec<LocalTest>> {
+    let pool = crate::local::db::open(root).await?;
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM tests ORDER BY id")
+        .fetch_all(&pool)
+        .await?;
 
-    let mut tests = Vec::new();
-    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let body =
-            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let test: LocalTest =
-            serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
+    let mut tests = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        let test: LocalTest = serde_json::from_str(&body).context("parsing stored test body")?;
         tests.push(test);
     }
-    tests.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(tests)
 }
 
 /// Load one stored test case by id.
-pub fn load_one(root: &Path, id: &str) -> anyhow::Result<LocalTest> {
-    let path = test_path(root, id);
-    let body = match std::fs::read_to_string(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(anyhow!("no test {id} at {}", path.display()));
+pub async fn load_one(root: &Path, id: &str) -> anyhow::Result<LocalTest> {
+    let pool = crate::local::db::open(root).await?;
+    let body: Option<String> = sqlx::query_scalar("SELECT body FROM tests WHERE id=?")
+        .bind(id)
+        .fetch_optional(&pool)
+        .await?;
+
+    match body {
+        None => Err(anyhow!("no test {id}")),
+        Some(body) => {
+            let test: LocalTest =
+                serde_json::from_str(&body).context("parsing stored test body")?;
+            Ok(test)
         }
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let test: LocalTest =
-        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(test)
+    }
 }
 
-/// Write the outcome of running a test case to `results/<id>.json`.
-pub fn write_result(
+/// Append the outcome of running a test case to the `runs` table.
+pub async fn write_result(
     root: &Path,
     id: &str,
     outcome: &Outcome,
     analysis: Option<&Value>,
 ) -> anyhow::Result<()> {
-    let dir = results_dir(root);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let (v, fk) = crate::local::verdict::classify(outcome.passed, &outcome.error);
+    let analysis_str = analysis.map(serde_json::to_string).transpose()?;
+
+    let pool = crate::local::db::open(root).await?;
+    sqlx::query(
+        "INSERT INTO runs (test_id,passed,verdict,failure_kind,error,code,analysis) VALUES (?,?,?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(outcome.passed as i64)
+    .bind(v.as_str())
+    .bind(fk)
+    .bind(&outcome.error)
+    .bind(&outcome.code)
+    .bind(analysis_str)
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Load the most recent run result for `id`, if any.
+pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>> {
+    let pool = crate::local::db::open(root).await?;
+    let row: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT passed,error,code,analysis FROM runs WHERE test_id=? ORDER BY run_id DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&pool)
+    .await?;
+
+    let Some((passed, error, code, analysis)) = row else {
+        return Ok(None);
+    };
 
     let mut record = serde_json::json!({
         "id": id,
-        "passed": outcome.passed,
-        "error": outcome.error,
-        "code": outcome.code,
+        "passed": passed != 0,
+        "error": error,
+        "code": code,
     });
     if let Some(analysis) = analysis {
-        record["analysis"] = analysis.clone();
+        record["analysis"] = serde_json::from_str(&analysis).context("parsing stored analysis")?;
     }
-    let path = dir.join(format!("{id}.json"));
-    let mut body = serde_json::to_string_pretty(&record)?;
-    body.push('\n');
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    Ok(Some(record))
 }
 
 /// Write an LLM-proposed fix recommendation to `fixes/<id>.md` for a coding
@@ -155,8 +181,8 @@ pub fn write_fix(
 mod tests {
     use super::*;
 
-    #[test]
-    fn add_with_explicit_id_stores_under_that_id() {
+    #[tokio::test]
+    async fn add_with_explicit_id_stores_under_that_id() {
         let root = crate::local::tmp_root();
         let src = root.join("case.json");
         std::fs::write(
@@ -165,10 +191,10 @@ mod tests {
         )
         .unwrap();
 
-        let id = add(&root, &src).unwrap();
+        let id = add(&root, &src).await.unwrap();
         assert_eq!(id, "my-id");
 
-        let loaded = load_one(&root, "my-id").unwrap();
+        let loaded = load_one(&root, "my-id").await.unwrap();
         assert_eq!(loaded.id, "my-id");
         assert_eq!(loaded.title, "t1");
         assert_eq!(
@@ -179,24 +205,24 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn add_without_id_assigns_uuid() {
+    #[tokio::test]
+    async fn add_without_id_assigns_uuid() {
         let root = crate::local::tmp_root();
         let src = root.join("case.json");
         std::fs::write(&src, r#"{"title":"no id here"}"#).unwrap();
 
-        let id = add(&root, &src).unwrap();
+        let id = add(&root, &src).await.unwrap();
         assert!(!id.is_empty());
         assert!(uuid::Uuid::parse_str(&id).is_ok());
 
-        let loaded = load_one(&root, &id).unwrap();
+        let loaded = load_one(&root, &id).await.unwrap();
         assert_eq!(loaded.id, id);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn list_returns_all_added_tests() {
+    #[tokio::test]
+    async fn list_returns_all_added_tests() {
         let root = crate::local::tmp_root();
 
         let src_a = root.join("a.json");
@@ -204,10 +230,10 @@ mod tests {
         let src_b = root.join("b.json");
         std::fs::write(&src_b, r#"{"id":"b","title":"B"}"#).unwrap();
 
-        add(&root, &src_a).unwrap();
-        add(&root, &src_b).unwrap();
+        add(&root, &src_a).await.unwrap();
+        add(&root, &src_b).await.unwrap();
 
-        let tests = list(&root).unwrap();
+        let tests = list(&root).await.unwrap();
         assert_eq!(tests.len(), 2);
         assert_eq!(tests[0].id, "a");
         assert_eq!(tests[1].id, "b");
@@ -215,18 +241,78 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn add_value_without_id_assigns_uuid() {
+    #[tokio::test]
+    async fn add_value_without_id_assigns_uuid() {
         let root = crate::local::tmp_root();
 
-        let id = add_value(&root, serde_json::json!({"title": "generated"})).unwrap();
+        let id = add_value(&root, serde_json::json!({"title": "generated"}))
+            .await
+            .unwrap();
         assert!(!id.is_empty());
         assert!(uuid::Uuid::parse_str(&id).is_ok());
 
-        let loaded = load_one(&root, &id).unwrap();
+        let loaded = load_one(&root, &id).await.unwrap();
         assert_eq!(loaded.id, id);
         assert_eq!(loaded.title, "generated");
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_value_with_explicit_id_upserts() {
+        let root = crate::local::tmp_root();
+
+        let id = add_value(&root, serde_json::json!({"id":"dup","title":"first"}))
+            .await
+            .unwrap();
+        add_value(&root, serde_json::json!({"id":"dup","title":"second"}))
+            .await
+            .unwrap();
+
+        let tests = list(&root).await.unwrap();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].id, id);
+        assert_eq!(tests[0].title, "second");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_result_then_load_result_returns_latest() {
+        let root = crate::local::tmp_root();
+        add_value(&root, serde_json::json!({"id":"t1","title":"T"}))
+            .await
+            .unwrap();
+
+        let outcome = Outcome {
+            passed: false,
+            error: "AssertionError: boom".to_string(),
+            code: "print(1)".to_string(),
+        };
+        write_result(&root, "t1", &outcome, None).await.unwrap();
+
+        let result = load_result(&root, "t1").await.unwrap().unwrap();
+        assert_eq!(result["passed"], false);
+        assert_eq!(result["error"], "AssertionError: boom");
+
+        let ok = Outcome {
+            passed: true,
+            error: String::new(),
+            code: String::new(),
+        };
+        write_result(&root, "t1", &ok, None).await.unwrap();
+
+        let latest = load_result(&root, "t1").await.unwrap().unwrap();
+        assert_eq!(latest["passed"], true);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_result_missing_returns_none() {
+        let root = crate::local::tmp_root();
+        let result = load_result(&root, "nope").await.unwrap();
+        assert!(result.is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

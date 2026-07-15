@@ -25,7 +25,7 @@ pub async fn rerun(
     heal: bool,
     json: bool,
 ) -> anyhow::Result<i32> {
-    let project = project::load(root)?;
+    let project = project::load(root).await?;
 
     let target = url_override
         .map(str::to_string)
@@ -33,11 +33,15 @@ pub async fn rerun(
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
 
     let tests = if ids.is_empty() {
-        store::list(root)?
+        store::list(root).await?
     } else {
-        ids.iter()
-            .map(|id| store::load_one(root, id))
-            .collect::<anyhow::Result<Vec<_>>>()?
+        {
+            let mut loaded = Vec::with_capacity(ids.len());
+            for id in ids {
+                loaded.push(store::load_one(root, id).await?);
+            }
+            loaded
+        }
     };
 
     if tests.is_empty() {
@@ -93,7 +97,7 @@ pub async fn rerun(
                 match c.heal_test(&case, &outcome.code, &outcome.error).await {
                     Ok(Value::Object(mut improved)) => {
                         improved.insert("id".to_string(), Value::String(t.id.clone()));
-                        match store::add_value(root, Value::Object(improved.clone())) {
+                        match store::add_value(root, Value::Object(improved.clone())).await {
                             Ok(_) => {
                                 let healed_case = Value::Object(improved);
                                 let retry = ex.run(&healed_case, &ctx).await;
@@ -154,7 +158,7 @@ pub async fn rerun(
             }
         }
 
-        store::write_result(root, &t.id, &outcome, analysis.as_ref())?;
+        store::write_result(root, &t.id, &outcome, analysis.as_ref()).await?;
     }
 
     if json {

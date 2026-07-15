@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
         Command::Backend { port, model, kind } => {
             server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
         }
-        Command::Project { cmd } => run_project(cmd),
+        Command::Project { cmd } => run_project(cmd).await,
         Command::Coverage { path, json } => {
             let root = path.unwrap_or(std::env::current_dir()?);
             let code = local::coverage::coverage(&root, json).await?;
@@ -294,16 +294,16 @@ async fn run_console_execute() -> Result<()> {
     Ok(())
 }
 
-fn run_project(cmd: ProjectCmd) -> Result<()> {
+async fn run_project(cmd: ProjectCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {
         ProjectCmd::Init { kind, name, url } => {
             let kind = server::executors::TestKind::parse(&kind);
-            let path = local::project::init(&root, kind, &name, url.as_deref())?;
+            let path = local::project::init(&root, kind, &name, url.as_deref()).await?;
             println!("wrote {}", path.display());
             Ok(())
         }
-        ProjectCmd::Show => local::project::show(&root),
+        ProjectCmd::Show => local::project::show(&root).await,
     }
 }
 
@@ -311,12 +311,12 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {
         TestCmd::Add { file } => {
-            let id = local::store::add(&root, &file)?;
+            let id = local::store::add(&root, &file).await?;
             println!("added test {id}");
             Ok(())
         }
         TestCmd::List => {
-            for t in local::store::list(&root)? {
+            for t in local::store::list(&root).await? {
                 println!("{}  {}", t.id, t.title);
             }
             Ok(())
@@ -377,11 +377,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             Ok(())
         }
         TestCmd::Lint { json } => {
-            let code = local::lint::lint(&root, json)?;
+            let code = local::lint::lint(&root, json).await?;
             std::process::exit(code);
         }
         TestCmd::Diff { a, b, json } => {
-            let code = local::diff::diff(&root, &a, &b, json)?;
+            let code = local::diff::diff(&root, &a, &b, json).await?;
             std::process::exit(code);
         }
         TestCmd::Scaffold { kind, json } => {

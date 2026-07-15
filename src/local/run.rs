@@ -87,7 +87,7 @@ pub async fn run_collect(
     fix: bool,
     browser: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
-    let project = project::load(root)?;
+    let project = project::load(root).await?;
 
     let target = url_override
         .map(str::to_string)
@@ -95,11 +95,13 @@ pub async fn run_collect(
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
 
     let tests = if ids.is_empty() {
-        store::list(root)?
+        store::list(root).await?
     } else {
-        ids.iter()
-            .map(|id| store::load_one(root, id))
-            .collect::<anyhow::Result<Vec<_>>>()?
+        let mut loaded = Vec::with_capacity(ids.len());
+        for id in ids {
+            loaded.push(store::load_one(root, id).await?);
+        }
+        loaded
     };
 
     if tests.is_empty() {
@@ -178,7 +180,7 @@ pub async fn run_collect(
         }
         report.push(entry);
 
-        store::write_result(root, &t.id, &outcome, analysis.as_ref())?;
+        store::write_result(root, &t.id, &outcome, analysis.as_ref()).await?;
     }
 
     Ok(report)

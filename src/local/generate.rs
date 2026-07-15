@@ -48,7 +48,7 @@ pub async fn generate(
         if let Some(k) = kind {
             case["kind"] = serde_json::to_value(k)?;
         }
-        let id = store::add_value(root, case)?;
+        let id = store::add_value(root, case).await?;
         ids.push(id);
     }
     Ok(ids)
@@ -87,7 +87,7 @@ pub async fn generate_cover(
         if !case.is_object() {
             continue;
         }
-        let id = store::add_value(root, case)?;
+        let id = store::add_value(root, case).await?;
         ids.push(id);
     }
     Ok(ids)

@@ -21,8 +21,8 @@ enum Issue {
 /// `[issue] <id>: <problem>` per test plus a summary line (or a single
 /// `CliLintReport` JSON object when `json` is set). Returns exit code `5`
 /// (VALIDATION_ERROR) if any hard issue was found, else `0`.
-pub fn lint(root: &Path, json: bool) -> anyhow::Result<i32> {
-    let tests = store::list(root)?;
+pub async fn lint(root: &Path, json: bool) -> anyhow::Result<i32> {
+    let tests = store::list(root).await?;
     let mut issue_count = 0usize;
     let mut hard_found = false;
     let mut valid_count = 0usize;
