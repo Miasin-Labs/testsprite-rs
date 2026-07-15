@@ -206,7 +206,7 @@ attributed to enclosing functions (via the tree-sitter structural surface,
 declared surface (the `mentions` whole-word matcher): `test run --changed
 [--since <ref>]` runs ONLY affected tests, `test generate --changed` synthesizes
 tests for changed functions no test covers, `test changed` inspects. Also over MCP
-(`testsprite_local_run`/`_generate` `changed`/`since`). This is TestSprite's "test
+(`testsprite_run`/`testsprite_generate` `changed`/`since`). This is TestSprite's "test
 what you just changed" pre-merge loop, local. `ci init` writes a `pull_request`
 GitHub Actions workflow that runs `gate` (2.1's "PR blocks merge"). `test generate
 --doc <file>` distills a normalized PRD from an arbitrary README/notes/Jira/spec.

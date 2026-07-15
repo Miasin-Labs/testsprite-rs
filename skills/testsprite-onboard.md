@@ -32,9 +32,9 @@ testsprite-rs test generate --instruction "cover <the key behaviors you found>"
 testsprite-rs test generate --cover        # one test per currently-uncovered function
 testsprite-rs test generate --doc README.md   # distill a PRD from a README/notes/spec, then plan
 ```
-Or from your coding agent over MCP: **`testsprite_local_generate`**. If you (the
+Or from your coding agent over MCP: **`testsprite_generate`**. If you (the
 coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
-(hand over your `spec` or `code`) + `testsprite_local_run` — it runs deterministically
+(hand over your `spec` or `code`) + `testsprite_run` — it runs deterministically
 with no OpenAI key. Aim for
 ~8–15 tests on the core behaviors; don't pad. Every assertion must name a
 **concrete, observable** outcome (status code, body field, element, count) — never
@@ -42,7 +42,7 @@ with no OpenAI key. Aim for
 prefer the repo-native loop: `testsprite_coverage_gaps` to find uncovered functions,
 write/extend the repo's own tests for them, then register a `kind:"command"` test
 (code = the run command, e.g. `cargo test -p ers-api --test http_contract`) and
-`testsprite_local_run` it — deterministic, exit-0 = pass, no OpenAI key, and the
+`testsprite_run` it — deterministic, exit-0 = pass, no OpenAI key, and the
 tests live in the repo (cargo/CI own them). Use kind backend/python only for
 black-box HTTP tests.
 
@@ -55,7 +55,7 @@ not `failed`, and you'll chase a phantom bug. Use a dedicated test user (e.g.
 ```bash
 testsprite-rs test run --json                 # all; or --id <id> for a subset
 ```
-Or **`testsprite_local_run`** over MCP. Each result carries `verdict`
+Or **`testsprite_run`** over MCP. Each result carries `verdict`
 (passed|failed|blocked), `failureKind`, and on failure an LLM `cause` + `fix`.
 
 ### 5. Report

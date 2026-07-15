@@ -11,7 +11,7 @@ SEO pages (`research/`), and the live V3 API probe.
 ## Closed this session (COMPARE-ANALYSIS.md marked these ❌)
 | capability | now | where |
 |---|---|---|
-| LLM test-code generation in the CLI | ✅ | `test generate`, `testsprite_local_generate` |
+| LLM test-code generation in the CLI | ✅ | `test generate`, `testsprite_generate` |
 | Failure classification (bug vs fragility) | ✅ | `verdict::classify`, `llm::analyze_failure` |
 | Root-cause analysis | ✅ | `analysis.cause` |
 | Autonomous fix recommendations | ✅ | `test run --fix` → `fixes/<id>.md` |

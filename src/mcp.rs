@@ -11,40 +11,20 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The 18 TestSprite tools (including the deterministic `testsprite_store_test`
-/// and the auth-aware `testsprite_flaky`), plus the 3 local conversational-agent tools.
+/// The local TestSprite MCP tools: generate/run/store test cases, coverage,
+/// emit/rename/triage/flaky/history, plus the 3 conversational-agent tools.
+/// (Cloud tools that need a TestSprite account are intentionally not advertised.)
 fn tool_list() -> Value {
     json!({
         "tools": [
-            { "name": "testsprite_bootstrap",
-              "description": "[cloud] First-time project initialization. Skip if testsprite_tests/tmp/config.json already exists. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("localPort","number"),("type","string"),("projectPath","string"),("testScope","string")]) },
-            { "name": "testsprite_generate_code_summary",
-              "description": "[cloud] Analyze the project repository and summarize the codebase. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("projectRootPath","string")]) },
-            { "name": "testsprite_generate_standardized_prd",
-              "description": "[cloud] Generate a structured standard PRD. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("projectPath","string")]) },
-            { "name": "testsprite_generate_frontend_test_plan",
-              "description": "[cloud] Generate a frontend test plan. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("projectPath","string")]) },
-            { "name": "testsprite_generate_backend_test_plan",
-              "description": "[cloud] Generate a backend test plan. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("projectPath","string")]) },
-            { "name": "testsprite_generate_code_and_execute",
-              "description": "[cloud] Open the tunnel, dispatch tests to the cloud, poll, and write the report. Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": obj_schema(&[("projectName","string"),("projectPath","string")]) },
-            { "name": "testsprite_check_account_info",
-              "description": "[cloud] Check the current user's TestSprite account (plan, credits, email). Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
-              "inputSchema": json!({ "type": "object", "properties": {}, "additionalProperties": false }) },
-            { "name": "testsprite_local_generate",
+            { "name": "testsprite_generate",
               "description": "Generate local test cases with the LLM (needs an OpenAI key). Set changed=true to generate only for functions changed since a git ref (since, default HEAD); or doc=<path> to distill a normalized PRD from an arbitrary README/notes/spec.",
               "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
-            { "name": "testsprite_local_run",
+            { "name": "testsprite_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD) — the fast pre-merge loop.",
               "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_store_test",
-              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_local_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
+              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
               "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
             { "name": "testsprite_coverage_gaps",
               "description": "List functions in the code surface that NO stored test references yet — the uncovered set to generate next. Loop this until empty for full coverage.",
@@ -111,7 +91,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "testsprite_generate_code_summary" => Ok(code_summary_instruction(&project_path)),
         "testsprite_bootstrap" => bootstrap(&project_path, args).await,
-        "testsprite_local_generate" => {
+        "testsprite_generate" => {
             let model = args
                 .get("model")
                 .and_then(|v| v.as_str())
@@ -137,7 +117,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             };
             Ok(json!({ "generated": ids.len(), "ids": ids }))
         }
-        "testsprite_local_run" => {
+        "testsprite_run" => {
             let model = args
                 .get("model")
                 .and_then(|v| v.as_str())
