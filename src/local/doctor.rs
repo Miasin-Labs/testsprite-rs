@@ -122,7 +122,13 @@ fn collect_checks() -> Vec<Check> {
 pub fn doctor(json_out: bool) -> anyhow::Result<i32> {
     let checks = collect_checks();
     let any_fail = checks.iter().any(|c| c.status == "fail");
+    print!("{}", render(&checks, json_out)?);
+    Ok(if any_fail { 1 } else { 0 })
+}
 
+/// Render checks as `[status] name: detail` lines, or a `DoctorReport` JSON
+/// (`{checks:[{name,status,detail}]}`). Pure — the unit-testable core of `doctor`.
+fn render(checks: &[Check], json_out: bool) -> anyhow::Result<String> {
     if json_out {
         let report = json!({
             "checks": checks
@@ -130,14 +136,14 @@ pub fn doctor(json_out: bool) -> anyhow::Result<i32> {
                 .map(|c| json!({ "name": c.name, "status": c.status, "detail": c.detail }))
                 .collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        Ok(format!("{}\n", serde_json::to_string_pretty(&report)?))
     } else {
-        for c in &checks {
-            println!("[{}] {}: {}", c.status, c.name, c.detail);
+        let mut out = String::new();
+        for c in checks {
+            out.push_str(&format!("[{}] {}: {}\n", c.status, c.name, c.detail));
         }
+        Ok(out)
     }
-
-    Ok(if any_fail { 1 } else { 0 })
 }
 
 fn playwright_status() -> Status {
@@ -178,4 +184,35 @@ fn playwright_status() -> Status {
 
 fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &'static str, status: &'static str) -> Check {
+        Check {
+            name,
+            status,
+            detail: "d".to_string(),
+        }
+    }
+
+    #[test]
+    fn render_json_is_valid_doctor_report() {
+        let out = render(&[check("x", "ok"), check("y", "fail")], true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v["checks"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(
+            arr.iter()
+                .all(|c| matches!(c["status"].as_str(), Some("ok" | "warn" | "fail")))
+        );
+        assert_eq!(arr[1]["name"], "y");
+    }
+
+    #[test]
+    fn render_text_is_status_lines() {
+        assert_eq!(render(&[check("x", "warn")], false).unwrap(), "[warn] x: d\n");
+    }
 }

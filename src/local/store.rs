@@ -502,6 +502,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn last_failed_ids_returns_only_latest_failures() {
+        let root = crate::local::tmp_root();
+        add_value(&root, serde_json::json!({"id":"pass","title":"P"}))
+            .await
+            .unwrap();
+        add_value(&root, serde_json::json!({"id":"fail","title":"F"}))
+            .await
+            .unwrap();
+
+        let ok = Outcome {
+            passed: true,
+            error: String::new(),
+            code: String::new(),
+        };
+        let bad = Outcome {
+            passed: false,
+            error: "boom".to_string(),
+            code: String::new(),
+        };
+        write_result(&root, "pass", &ok, None).await.unwrap();
+        write_result(&root, "fail", &bad, None).await.unwrap();
+
+        let reds = last_failed_ids(&root).await.unwrap();
+        assert_eq!(reds, vec!["fail".to_string()]);
+
+        // A later PASS on `fail` clears it — only the LATEST run counts.
+        write_result(&root, "fail", &ok, None).await.unwrap();
+        let reds = last_failed_ids(&root).await.unwrap();
+        assert!(reds.is_empty(), "latest pass clears the red: {reds:?}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
     async fn load_result_missing_returns_none() {
         let root = crate::local::tmp_root();
         let result = load_result(&root, "nope").await.unwrap();
