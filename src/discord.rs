@@ -1,24 +1,29 @@
 //! Discord front-end for the conversational test agent (`--features discord`).
 //!
-//! A thin [serenity](https://docs.rs/serenity) shell over [`crate::local::agent`]:
-//! a Discord message becomes `agent::message()`, each proposed action renders as a
-//! ✅ Approve / ❌ Reject button, and a button click calls `agent::resolve()`.
-//! One Discord channel maps to one conversation thread (the channel id is the
-//! conversation id), so the whole approval-gated loop happens in chat.
+//! A thin [serenity](https://docs.rs/serenity) shell over [`crate::local::agent`].
+//! You can reach the same engine four ways: a message starting with the
+//! configured prefix (default `ts `), an @mention of the bot, the
+//! `/testsprite <message>` slash command, or any message in a DM.
+//! Each proposed action renders as a ✅ Approve / ❌ Reject button; a click calls
+//! `agent::resolve()`. One Discord channel maps to one conversation thread.
 //!
 //! The bot token is read from a file (never inlined in config, never logged).
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, anyhow};
 use serde::Deserialize;
+use serde_json::Value;
 use serenity::async_trait;
 use serenity::builder::{
-    CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    EditInteractionResponse,
+    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
 };
 use serenity::model::prelude::*;
 use serenity::prelude::*;
+
+const SLASH_COMMAND: &str = "testsprite";
 
 /// Runtime settings for the bot (everything except the secret token).
 #[derive(Clone)]
@@ -101,45 +106,74 @@ fn read_token(token_override: Option<String>, token_file: Option<&str>) -> Resul
 
 struct Handler {
     cfg: BotConfig,
+    bot_id: OnceLock<UserId>,
 }
 
-impl Handler {
-    /// Build the reply message for an `agent::message` result: the assistant text
-    /// plus one Approve/Reject button pair per proposed action.
-    fn reply_message(&self, conv: &str, v: &serde_json::Value) -> CreateMessage {
-        let assistant = v["assistant"].as_str().unwrap_or("(no reply)");
-        let mut builder = CreateMessage::new().content(assistant);
-        if let Some(actions) = v["pendingActions"].as_array() {
-            for a in actions {
-                let aid = a["id"].as_i64().unwrap_or_default();
-                let kind = a["kind"].as_str().unwrap_or("action");
-                let summary = a["summary"].as_str().unwrap_or(kind);
-                let label = format!("✅ {}", truncate(summary, 74));
-                builder = builder
-                    .button(
-                        CreateButton::new(format!("approve:{conv}:{aid}"))
-                            .label(label)
-                            .style(ButtonStyle::Success),
-                    )
-                    .button(
-                        CreateButton::new(format!("reject:{conv}:{aid}"))
-                            .label("❌ Reject")
-                            .style(ButtonStyle::Danger),
-                    );
-            }
+/// ✅ Approve / ❌ Reject rows, one pair per proposed action. Reused by message
+/// replies (`CreateMessage`) and slash responses (`EditInteractionResponse`).
+fn action_rows(conv: &str, v: &Value) -> Vec<CreateActionRow> {
+    let mut rows = Vec::new();
+    if let Some(actions) = v["pendingActions"].as_array() {
+        for a in actions {
+            let aid = a["id"].as_i64().unwrap_or_default();
+            let kind = a["kind"].as_str().unwrap_or("action");
+            let summary = a["summary"].as_str().unwrap_or(kind);
+            rows.push(CreateActionRow::Buttons(vec![
+                CreateButton::new(format!("approve:{conv}:{aid}"))
+                    .label(format!("✅ {}", truncate(summary, 74)))
+                    .style(ButtonStyle::Success),
+                CreateButton::new(format!("reject:{conv}:{aid}"))
+                    .label("❌ Reject")
+                    .style(ButtonStyle::Danger),
+            ]));
         }
-        builder
     }
+    rows
 }
+
+/// Strip leading `<@id>` / `<@!id>` mention tokens from message content.
+fn strip_mentions(content: &str) -> String {
+    content
+        .split_whitespace()
+        .filter(|t| !(t.starts_with("<@") && t.ends_with('>')))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const HELP: &str = "I'm the testsprite agent. Say `ts generate a test that …` or `ts run them`, \
+mention me, or use `/testsprite`. I'll propose an action and you approve it with the buttons.";
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        let _ = self.bot_id.set(ready.user.id);
         tracing::info!(
             "discord: connected as {} — agent root {}",
             ready.user.name,
             self.cfg.root.display()
         );
+
+        // Register the slash command per-guild (instant) in every guild we're in.
+        let cmd = CreateCommand::new(SLASH_COMMAND)
+            .description("Ask the local test agent to generate or run tests")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "message",
+                    "what you want the agent to do",
+                )
+                .required(true),
+            );
+        for g in &ready.guilds {
+            match g.id.create_command(&ctx.http, cmd.clone()).await {
+                Ok(_) => tracing::info!("discord: registered /{SLASH_COMMAND} in guild {}", g.id),
+                Err(e) => tracing::warn!(
+                    "discord: /{SLASH_COMMAND} registration failed in guild {} \
+                     (invite the bot with the applications.commands scope): {e}",
+                    g.id
+                ),
+            }
+        }
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -147,20 +181,30 @@ impl EventHandler for Handler {
             return;
         }
         let content = msg.content.trim();
+        let mentioned = self
+            .bot_id
+            .get()
+            .is_some_and(|id| msg.mentions.iter().any(|u| u.id == *id));
+
         let text = match content.strip_prefix(self.cfg.prefix.trim()) {
             Some(rest) => rest.trim().to_string(),
+            None if mentioned => strip_mentions(content).trim().to_string(),
             None if msg.guild_id.is_none() => content.to_string(), // DMs need no prefix
             None => return,
         };
         if text.is_empty() {
+            let _ = msg.channel_id.say(&ctx.http, HELP).await;
             return;
         }
 
         let conv = msg.channel_id.to_string();
+        tracing::info!("discord: message in {conv}: {}", truncate(&text, 80));
         match crate::local::agent::message(&self.cfg.root, Some(&conv), &text, &self.cfg.model).await
         {
             Ok(v) => {
-                let builder = self.reply_message(&conv, &v);
+                let builder = CreateMessage::new()
+                    .content(reply_text(&v))
+                    .components(action_rows(&conv, &v));
                 if let Err(e) = msg.channel_id.send_message(&ctx.http, builder).await {
                     tracing::warn!("discord: send failed: {e}");
                 }
@@ -172,9 +216,62 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Component(c) = interaction else {
+        match interaction {
+            Interaction::Command(c) => self.handle_slash(&ctx, c).await,
+            Interaction::Component(c) => self.handle_button(&ctx, c).await,
+            _ => {}
+        }
+    }
+}
+
+impl Handler {
+    /// `/testsprite <message>` — same engine as a plain message.
+    async fn handle_slash(&self, ctx: &Context, c: CommandInteraction) {
+        if c.data.name != SLASH_COMMAND {
             return;
+        }
+        let message = c
+            .data
+            .options()
+            .into_iter()
+            .find(|o| o.name == "message")
+            .and_then(|o| match o.value {
+                ResolvedValue::String(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        // Ack within Discord's 3s window (agent may call the LLM).
+        if c.create_response(
+            &ctx.http,
+            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+
+        let conv = c.channel_id.to_string();
+        tracing::info!("discord: /{SLASH_COMMAND} in {conv}: {}", truncate(&message, 80));
+        let edit = match crate::local::agent::message(
+            &self.cfg.root,
+            Some(&conv),
+            &message,
+            &self.cfg.model,
+        )
+        .await
+        {
+            Ok(v) => EditInteractionResponse::new()
+                .content(reply_text(&v))
+                .components(action_rows(&conv, &v)),
+            Err(e) => EditInteractionResponse::new().content(format!("agent error: {e}")),
         };
+        let _ = c.edit_response(&ctx.http, edit).await;
+    }
+
+    /// A ✅/❌ button press → `agent::resolve`.
+    async fn handle_button(&self, ctx: &Context, c: ComponentInteraction) {
         // custom_id = "approve|reject:<conv>:<action_id>"
         let parts: Vec<&str> = c.data.custom_id.splitn(3, ':').collect();
         let [verb, conv, aid] = parts.as_slice() else {
@@ -184,11 +281,12 @@ impl EventHandler for Handler {
             return;
         };
         let approve = *verb == "approve";
+        tracing::info!("discord: {verb} action {action_id} in {conv}");
 
-        // Ack within Discord's 3s window (resolve may run an LLM + the pipeline).
-        if c.create_response(&ctx.http, CreateInteractionResponse::Defer(
-            CreateInteractionResponseMessage::new(),
-        ))
+        if c.create_response(
+            &ctx.http,
+            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+        )
         .await
         .is_err()
         {
@@ -208,9 +306,17 @@ impl EventHandler for Handler {
             Err(e) => format!("error: {e}"),
         };
         let _ = c
-            .edit_response(&ctx.http, EditInteractionResponse::new().content(truncate(&content, 1900)))
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new().content(truncate(&content, 1900)),
+            )
             .await;
     }
+}
+
+/// Assistant text plus a hint when actions are attached.
+fn reply_text(v: &Value) -> String {
+    v["assistant"].as_str().unwrap_or("(no reply)").to_string()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -229,7 +335,10 @@ pub async fn run(token_override: Option<String>) -> Result<()> {
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler { cfg })
+        .event_handler(Handler {
+            cfg,
+            bot_id: OnceLock::new(),
+        })
         .await
         .context("building the Discord client")?;
     client.start().await.context("Discord client error")?;
