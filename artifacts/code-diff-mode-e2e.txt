@@ -1,0 +1,26 @@
+Code Diff Mode + ci init + PRD-from-docs — live e2e (2026-07-15)
+================================================================
+Throwaway git repo: src/lib.rs with fn alpha/beta/gamma; tests t-alpha (covers alpha),
+t-beta (covers beta). gamma uncovered. difftastic is the user's external diff driver —
+changed.rs forces `git --no-ext-diff` to get plain unified hunks.
+
+Change ONLY alpha:
+  $ test changed --since HEAD
+    changed since HEAD: 1 file(s), 1 function(s)
+      ~ alpha  (src/lib.rs:1)
+    affected tests: t-alpha                      # beta NOT selected — line-precise
+  $ test run --changed
+    PASS  t-alpha  alpha check                   # ran ONLY t-alpha, exit 0
+
+Also change gamma (uncovered):
+  $ test changed --since HEAD   -> 2 function(s): alpha, gamma; affected: t-alpha
+  $ test generate --changed     -> generated 1 test(s)   # only gamma (alpha already covered)
+
+PRD-from-docs:
+  $ test generate --doc README.md -> generated 8 test(s)  # PRD distilled from a README
+
+ci init:
+  $ ci init -> wrote .github/workflows/testsprite.yml (on: pull_request -> gate)
+
+MCP: testsprite_local_run/testsprite_local_generate gained changed/since (+doc); the agent
+can now "run/generate only what I changed" over MCP. cargo test 73/73, clippy 0.

@@ -408,7 +408,7 @@ pub struct GapReport {
 /// True iff `name` (case-insensitive) occurs in `haystack` as a whole word:
 /// the characters immediately before and after the match (if any) are not
 /// `[a-z0-9_]`. Empty names never match.
-fn mentions(haystack: &str, name: &str) -> bool {
+pub(crate) fn mentions(haystack: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -428,6 +428,27 @@ fn mentions(haystack: &str, name: &str) -> bool {
     false
 }
 
+/// The lowercased text of one stored test (title + description + spec + code) —
+/// the surface a coverage/diff matcher searches for unit names.
+pub(crate) fn test_haystack(t: &super::LocalTest) -> String {
+    let mut s = String::new();
+    s.push_str(&t.title);
+    s.push('\n');
+    s.push_str(&t.description);
+    s.push('\n');
+    if let Some(spec) = &t.spec
+        && let Ok(j) = serde_json::to_string(spec)
+    {
+        s.push_str(&j);
+        s.push('\n');
+    }
+    if let Some(code) = t.extra.get("code").and_then(|v| v.as_str()) {
+        s.push_str(code);
+        s.push('\n');
+    }
+    s.to_lowercase()
+}
+
 /// Compute [`GapReport`] for `scan`'s structural surface against `root`'s
 /// stored tests.
 pub async fn gaps(root: &Path, scan: &Path) -> anyhow::Result<GapReport> {
@@ -436,22 +457,8 @@ pub async fn gaps(root: &Path, scan: &Path) -> anyhow::Result<GapReport> {
 
     let mut haystack = String::new();
     for t in &tests {
-        haystack.push_str(&t.title);
-        haystack.push('\n');
-        haystack.push_str(&t.description);
-        haystack.push('\n');
-        if let Some(spec) = &t.spec
-            && let Ok(s) = serde_json::to_string(spec)
-        {
-            haystack.push_str(&s);
-            haystack.push('\n');
-        }
-        if let Some(code) = t.extra.get("code").and_then(|v| v.as_str()) {
-            haystack.push_str(code);
-            haystack.push('\n');
-        }
+        haystack.push_str(&test_haystack(t));
     }
-    let haystack = haystack.to_lowercase();
 
     let mut covered = 0usize;
     let mut uncovered = Vec::new();

@@ -200,6 +200,17 @@ teardown phase). Run history is bounded: `write_result` auto-prunes to
 Agent **auto-approve** (`agent message --auto-approve`, MCP `auto_approve`) executes
 the proposed action immediately — mirrors TestSprite's `/v3/agent/settings.autoApprove`.
 
+**Code Diff Mode** (`src/local/changed.rs`) — `git diff <ref>` → changed lines
+attributed to enclosing functions (via the tree-sitter structural surface,
+`--no-ext-diff` so difftastic/delta don't interfere) → intersect with each test's
+declared surface (the `mentions` whole-word matcher): `test run --changed
+[--since <ref>]` runs ONLY affected tests, `test generate --changed` synthesizes
+tests for changed functions no test covers, `test changed` inspects. Also over MCP
+(`testsprite_local_run`/`_generate` `changed`/`since`). This is TestSprite's "test
+what you just changed" pre-merge loop, local. `ci init` writes a `pull_request`
+GitHub Actions workflow that runs `gate` (2.1's "PR blocks merge"). `test generate
+--doc <file>` distills a normalized PRD from an arbitrary README/notes/Jira/spec.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

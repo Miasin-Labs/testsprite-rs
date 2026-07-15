@@ -38,11 +38,11 @@ fn tool_list() -> Value {
               "description": "[cloud] Check the current user's TestSprite account (plan, credits, email). Needs a TestSprite account; for local/offline use prefer testsprite_store_test / testsprite_local_generate / testsprite_local_run.",
               "inputSchema": json!({ "type": "object", "properties": {}, "additionalProperties": false }) },
             { "name": "testsprite_local_generate",
-              "description": "Generate local test cases with the LLM (needs an OpenAI key).",
-              "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("type","string"),("model","string")]) },
+              "description": "Generate local test cases with the LLM (needs an OpenAI key). Set changed=true to generate only for functions changed since a git ref (since, default HEAD); or doc=<path> to distill a normalized PRD from an arbitrary README/notes/spec.",
+              "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_local_run",
-              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch.",
-              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean")]) },
+              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD) — the fast pre-merge loop.",
+              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_store_test",
               "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_local_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
               "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
@@ -117,18 +117,24 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("gpt-4o-mini");
             let root = std::env::current_dir()?;
-            let kind = args
-                .get("type")
-                .and_then(|v| v.as_str())
-                .map(crate::server::executors::TestKind::parse);
-            let ids = crate::local::generate::generate(
-                &root,
-                args.get("from").and_then(|v| v.as_str()).map(std::path::Path::new),
-                args.get("instruction").and_then(|v| v.as_str()),
-                model,
-                kind,
-            )
-            .await?;
+            let ids = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
+                let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
+                crate::local::generate::generate_changed(&root, since, model).await?
+            } else {
+                let kind = args
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(crate::server::executors::TestKind::parse);
+                crate::local::generate::generate(
+                    &root,
+                    args.get("from").and_then(|v| v.as_str()).map(std::path::Path::new),
+                    args.get("instruction").and_then(|v| v.as_str()),
+                    args.get("doc").and_then(|v| v.as_str()).map(std::path::Path::new),
+                    model,
+                    kind,
+                )
+                .await?
+            };
             Ok(json!({ "generated": ids.len(), "ids": ids }))
         }
         "testsprite_local_run" => {
@@ -137,11 +143,21 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("gpt-4o-mini");
             let fix = args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
-            let ids: Vec<String> = match args.get("id").and_then(|v| v.as_str()) {
-                Some(id) => vec![id.to_string()],
-                None => vec![],
-            };
             let root = std::env::current_dir()?;
+            let changed_mode = args.get("changed").and_then(|v| v.as_bool()) == Some(true);
+            let ids: Vec<String> = if changed_mode {
+                let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
+                let cs = crate::local::changed::changed_surface(&root, since)?;
+                crate::local::changed::affected_test_ids(&root, &cs).await?
+            } else {
+                match args.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => vec![id.to_string()],
+                    None => vec![],
+                }
+            };
+            if changed_mode && ids.is_empty() {
+                return Ok(json!({ "results": [], "note": "no stored tests affected by the changes" }));
+            }
             let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1).await?;
             Ok(json!({ "results": results }))
         }

@@ -240,7 +240,7 @@ pub async fn resolve(
             let ids = if args["cover"].as_bool() == Some(true) {
                 generate::generate_cover(root, root, model).await?
             } else {
-                generate::generate(root, None, args["instruction"].as_str(), model, None).await?
+                generate::generate(root, None, args["instruction"].as_str(), None, model, None).await?
             };
             let summary = format!("Generated {} test(s).", ids.len());
             (json!({ "generated": ids.len(), "ids": ids }), summary)

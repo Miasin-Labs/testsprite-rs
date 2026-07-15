@@ -127,6 +127,18 @@ impl LlmClient {
         serde_json::from_str(&out).context("PRD was not valid JSON")
     }
 
+    /// Normalize an arbitrary product document (README, notes, a Jira ticket, a
+    /// design doc, or a spec — any format) into the standard PRD JSON shape.
+    pub async fn generate_prd_from_doc(&self, doc: &str) -> Result<Value> {
+        let system = "You are TestSprite's PRD normalizer. Given an arbitrary product document \
+            (README, notes, a Jira ticket, a design doc, or a spec) in ANY format, extract and \
+            produce a concise PRD as JSON with keys: meta{project,prepared_by}, product_overview \
+            (string), core_goals (string[]), features (array of {name, description, \
+            user_flows:string[]}). Infer sensibly from whatever is present. Respond with JSON only.";
+        let out = self.chat(system, &format!("Document:\n{doc}"), true).await?;
+        serde_json::from_str(&out).context("normalized PRD was not valid JSON")
+    }
+
     /// Generate a backend test plan (array of {id,title,description}) from a PRD.
     pub async fn generate_plan(&self, prd: &Value) -> Result<Vec<Value>> {
         let system = "You are TestSprite's test planner. Given a PRD, produce backend API test \

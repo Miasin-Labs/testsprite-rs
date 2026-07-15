@@ -89,6 +89,11 @@ enum Command {
         #[arg(long, default_value = "gpt-4o-mini")]
         model: String,
     },
+    /// Emit CI config — a GitHub Actions workflow that runs the gate on every PR.
+    Ci {
+        #[command(subcommand)]
+        cmd: CiCmd,
+    },
     /// Local project lifecycle — no cloud (init / show).
     Project {
         #[command(subcommand)]
@@ -131,6 +136,16 @@ enum Command {
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum CiCmd {
+    /// Write .github/workflows/testsprite.yml (gate on pull_request).
+    Init {
+        /// Overwrite an existing workflow file.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -233,6 +248,12 @@ enum TestCmd {
         /// Run independent tests in the same dependency wave concurrently (default 1 = sequential).
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Code Diff Mode: run only tests affected by files changed since --since.
+        #[arg(long)]
+        changed: bool,
+        /// Git ref to diff against for --changed (default: HEAD = uncommitted changes).
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Re-run stored tests; --heal regenerates fragility-failing LLM tests.
     Rerun {
@@ -274,6 +295,24 @@ enum TestCmd {
         cover: bool,
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Distill a normalized PRD from an arbitrary doc (README/notes/Jira/spec), then plan.
+        #[arg(long)]
+        doc: Option<PathBuf>,
+        /// Code Diff Mode: generate tests only for functions changed since --since.
+        #[arg(long)]
+        changed: bool,
+        /// Git ref to diff against for --changed (default: HEAD).
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Code Diff Mode: show which functions changed (git) and which tests they affect.
+    Changed {
+        /// Git ref to diff against (default: HEAD = uncommitted changes).
+        #[arg(long)]
+        since: Option<String>,
+        /// Print a single JSON object instead of human lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Validate stored test JSON offline.
     Lint {
@@ -394,6 +433,14 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
         Command::Test { cmd } => run_test(cmd).await,
+        Command::Ci { cmd } => match cmd {
+            CiCmd::Init { force } => {
+                let root = std::env::current_dir()?;
+                let path = local::ci::init(&root, force)?;
+                println!("wrote {}", path.display());
+                Ok(())
+            }
+        },
         Command::Visual { baseline, current } => {
             let diff = local::visual::diff(&baseline, &current)?;
             let regression = diff.is_regression();
@@ -655,26 +702,50 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             browser,
             group,
             jobs,
+            changed,
+            since,
         } => {
-            let ids = match group.as_deref() {
-                Some(g) => {
-                    let matched: Vec<String> = local::store::list(&root)
-                        .await?
-                        .into_iter()
-                        .filter(|t| t.group() == Some(g))
-                        .map(|t| t.id)
-                        .collect();
-                    if matched.is_empty() {
-                        println!("no tests in group '{g}'");
-                        return Ok(());
-                    }
-                    matched
+            let ids = if changed {
+                let since = since.as_deref().unwrap_or("HEAD");
+                let cs = local::changed::changed_surface(&root, since)?;
+                let affected = local::changed::affected_test_ids(&root, &cs).await?;
+                if affected.is_empty() {
+                    println!(
+                        "no stored tests affected by changes since {since} ({} function(s) changed)",
+                        cs.units.len()
+                    );
+                    return Ok(());
                 }
-                None => id,
+                affected
+            } else {
+                match group.as_deref() {
+                    Some(g) => {
+                        let matched: Vec<String> = local::store::list(&root)
+                            .await?
+                            .into_iter()
+                            .filter(|t| t.group() == Some(g))
+                            .map(|t| t.id)
+                            .collect();
+                        if matched.is_empty() {
+                            println!("no tests in group '{g}'");
+                            return Ok(());
+                        }
+                        matched
+                    }
+                    None => id,
+                }
             };
-            let code =
-                local::run::run(&root, &ids, url.as_deref(), &model, json, fix, browser.as_deref(), jobs)
-                    .await?;
+            let code = local::run::run(
+                &root,
+                &ids,
+                url.as_deref(),
+                &model,
+                json,
+                fix,
+                browser.as_deref(),
+                jobs,
+            )
+            .await?;
             std::process::exit(code);
         }
         TestCmd::Rerun {
@@ -705,6 +776,9 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             model,
             cover,
             path,
+            doc,
+            changed,
+            since,
         } => {
             if cover {
                 let p = path.unwrap_or(std::env::current_dir()?);
@@ -715,11 +789,25 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 }
                 return Ok(());
             }
+            if changed {
+                let since = since.as_deref().unwrap_or("HEAD");
+                let ids = local::generate::generate_changed(&root, since, &model).await?;
+                if ids.is_empty() {
+                    println!("no changed functions need new tests (nothing changed, or all covered)");
+                } else {
+                    println!("generated {} test(s) for changed functions", ids.len());
+                    for id in &ids {
+                        println!("  {id}");
+                    }
+                }
+                return Ok(());
+            }
             let kind = kind.as_deref().map(server::executors::TestKind::parse);
             let ids = local::generate::generate(
                 &root,
                 from.as_deref(),
                 instruction.as_deref(),
+                doc.as_deref(),
                 &model,
                 kind,
             )
@@ -729,6 +817,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 println!("  {id}");
             }
             Ok(())
+        }
+        TestCmd::Changed { since, json } => {
+            let since = since.as_deref().unwrap_or("HEAD");
+            let code = local::changed::changed_report(&root, since, json).await?;
+            std::process::exit(code);
         }
         TestCmd::Lint { json } => {
             let code = local::lint::lint(&root, json).await?;
