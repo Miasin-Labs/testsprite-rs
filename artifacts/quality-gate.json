@@ -1,0 +1,40 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of AGENTS.md across three lanes. Architecture: the two-halves (client vs local server) + Executor-seam description matches src/server/executors/mod.rs (trait Executor, TestKind, for_kind), src/main.rs subcommands, and the real module tree from codegraph_arch. Product: the doc is complete and useful (build/test/lint commands, env-var table, module map, conventions, and an honest cleanup/modularization section). Code: every factual claim was verified against source; the review caught and fixed a real inaccuracy — the doc had inherited the README's '8 MCP tools' but mcp.rs::tool_list exposes 7. No design or maintainability concerns for a documentation deliverable.",
+    "commands": ["codegraph_arch", "codegraph_status", "codegraph_vuln", "read src/mcp.rs::tool_list", "read src/server/executors/mod.rs"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Leader-run verification of the documentation surface: cargo build (0 errors), cargo test (4 passed / 0 failed), cargo clippy --all-targets (0 warnings), codegraph vuln (0 findings / 592 fns). Red-team pass tried to break the doc's factual claims by re-deriving each from source: api.rs line count (346, via wc), MCP tool count (7, via mcp.rs::tool_list — the doc originally said 8 and was corrected), clean build/test/clippy. All confirmed after correction.",
+    "e2eCommands": ["cargo build", "cargo test"],
+    "redTeamCommands": ["cargo clippy --all-targets", "wc -l src/server/api.rs", "verify mcp.rs::tool_list tool count"],
+    "artifactRefs": [
+      { "id": "build-verif", "kind": "package-test-report", "path": "artifacts/build-verification.json", "description": "Real cargo build/test/clippy results plus the doc-claim verification set that backs AGENTS.md" }
+    ],
+    "contractCoverage": [
+      { "id": "cc-accuracy", "contractRef": "brief: every AGENTS.md claim verified against real source + a clean cargo build/test/clippy", "obligation": "AGENTS.md is accurate and fully grounded in the codebase", "status": "covered", "surfaceEvidenceRefs": ["surf-doc"], "adversarialCaseRefs": ["adv-toolcount", "adv-clean"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "surf-doc", "contractRef": "AGENTS.md documentation over the testsprite-rs Rust package", "surface": "package", "invocation": "cargo build && cargo test && cargo clippy --all-targets", "verdict": "passed", "artifactRefs": ["build-verif"] }
+    ],
+    "adversarialCases": [
+      { "id": "adv-toolcount", "contractRef": "brief: no fabricated claims; report the codebase as it is", "scenario": "The doc inherited the README's '8 MCP tools' figure, which could be wrong", "expectedBehavior": "mcp.rs::tool_list actually exposes 7 tools; the doc must state 7 and note the discrepancy", "verdict": "passed", "artifactRefs": ["build-verif"] },
+      { "id": "adv-clean", "contractRef": "brief: verify claims against a clean build", "scenario": "The doc asserts clippy=0 warnings and 4/4 tests and no monoliths", "expectedBehavior": "running the commands confirms 0 warnings, 4 passed, largest file api.rs=346 lines", "verdict": "passed", "artifactRefs": ["build-verif"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "One review iteration found the 7-vs-8 MCP tool inaccuracy; AGENTS.md was corrected in two places and the full verification loop was rerun clean.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo test", "cargo clippy --all-targets"],
+    "blockers": []
+  }
+}

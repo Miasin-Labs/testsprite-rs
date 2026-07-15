@@ -1,0 +1,9 @@
+=== cargo build ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+=== cargo test ===
+running 4 tests
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== cargo clippy --all-targets ===
+clippy warning count: 0
+=== codegraph vuln (from MCP) ===
+0 findings across 592 functions

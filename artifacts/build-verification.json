@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "kind": "package-test-report",
+  "surface": "package",
+  "crate": "testsprite-rs",
+  "edition": "2024",
+  "commands": {
+    "cargo build": "Finished dev profile (0 errors)",
+    "cargo test": "test result: ok. 4 passed; 0 failed",
+    "cargo clippy --all-targets": "0 warnings"
+  },
+  "docClaimsVerified": {
+    "largest_file_api_rs_lines": 346,
+    "no_monoliths": true,
+    "clippy_zero_warnings": true,
+    "tests_pass": "4/4",
+    "vuln_findings": 0,
+    "functions_scanned": 592,
+    "parse_endpoint_name_collision": ["src/tools/execute.rs", "src/server/engine.rs"],
+    "intentional_noop_sinks": ["log_sink", "test_summary"]
+  },
+  "verdict": "passed"
+}
