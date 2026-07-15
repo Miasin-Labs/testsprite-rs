@@ -36,6 +36,12 @@ fn tool_list() -> Value {
             { "name": "testsprite_check_account_info",
               "description": "Check the current user's TestSprite account (plan, credits, email).",
               "inputSchema": json!({ "type": "object", "properties": {}, "additionalProperties": false }) },
+            { "name": "testsprite_local_generate",
+              "description": "Generate local test cases with the LLM (needs an OpenAI key).",
+              "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("type","string"),("model","string")]) },
+            { "name": "testsprite_local_run",
+              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch.",
+              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean")]) },
         ]
     })
 }
@@ -74,6 +80,40 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "testsprite_generate_code_summary" => Ok(code_summary_instruction(&project_path)),
         "testsprite_bootstrap" => bootstrap(&project_path, args).await,
+        "testsprite_local_generate" => {
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let root = std::env::current_dir()?;
+            let kind = args
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(crate::server::executors::TestKind::parse);
+            let ids = crate::local::generate::generate(
+                &root,
+                args.get("from").and_then(|v| v.as_str()).map(std::path::Path::new),
+                args.get("instruction").and_then(|v| v.as_str()),
+                model,
+                kind,
+            )
+            .await?;
+            Ok(json!({ "generated": ids.len(), "ids": ids }))
+        }
+        "testsprite_local_run" => {
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let fix = args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ids: Vec<String> = match args.get("id").and_then(|v| v.as_str()) {
+                Some(id) => vec![id.to_string()],
+                None => vec![],
+            };
+            let root = std::env::current_dir()?;
+            let results = crate::local::run::run_collect(&root, &ids, None, model, fix).await?;
+            Ok(json!({ "results": results }))
+        }
         other => anyhow::bail!("Unknown tool: {other}"),
     }
 }

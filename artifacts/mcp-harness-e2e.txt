@@ -1,0 +1,9 @@
+### drive the MCP harness: tools/call testsprite_local_run over stdio
+{
+  "content": [
+    {
+      "text": "{\n  \"results\": [\n    {\n      \"error\": \"\",\n      \"id\": \"m1\",\n      \"passed\": true,\n      \"title\": \"root 200\"\n    }\n  ]\n}",
+      "type": "text"
+    }
+  ]
+}

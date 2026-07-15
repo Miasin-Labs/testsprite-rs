@@ -1,0 +1,39 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of the run.rs refactor + mcp.rs additions. run.rs now extracts the per-test execute+analyze+fix+write_result loop into `run_collect(...) -> Vec<Value>` (no printing/exit) and `run(...)` (unchanged signature) delegates to it then prints/exits — so the CLI is behaviorally identical (spot-checked: `test run` human + `--json` output unchanged, 13/13 tests) and there is NO forked logic. mcp.rs adds two tools to tool_list() and two `call_tool` arms (testsprite_local_generate → local::generate::generate; testsprite_local_run → local::run::run_collect) returning `Ok(json!({...}))` exactly per the existing arms' `Result<Value>` convention (auto-wrapped by route()'s as_content). No slop, no duplication. The harness now drives the same local intelligence an IDE agent needs.",
+    "commands": ["read src/mcp.rs call_tool + tool_list", "read src/local/run.rs run_collect", "cargo build", "cargo clippy --all-targets", "cargo test", "live MCP tools/call"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Live end-to-end over stdio JSON-RPC (artifacts/mcp-harness-e2e.txt): after `initialize`, a `tools/call testsprite_local_run {id:m1}` against a scratch backend project returned `{content:[{type:text,text:'{results:[{id:m1,passed:true,title:root 200}]}'}]}` — the MCP harness executed a local test and returned the structured result inline. `tools/list` advertises 9 tools including testsprite_local_generate + testsprite_local_run. CLI unchanged (run delegates to run_collect); build clean, clippy 0, cargo test 13/13.",
+    "e2eCommands": ["testsprite-rs serve <- initialize + tools/list", "testsprite-rs serve <- tools/call testsprite_local_run"],
+    "redTeamCommands": ["drive tools/call testsprite_local_run over stdio and confirm inline results", "confirm the CLI `test run --json` output shape is unchanged after the run_collect refactor"],
+    "artifactRefs": [
+      { "id": "mcp", "kind": "package-test-report", "path": "artifacts/mcp-harness-e2e.txt", "description": "live stdio JSON-RPC: tools/call testsprite_local_run returns {results:[...]} inline" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G004: MCP serve tools expose local generate + run (execute+analyze+fix), reusing local logic", "obligation": "IDE agent can drive the harness over stdio; no forked logic", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs MCP server (stdio JSON-RPC) over the compiled package", "surface": "package", "invocation": "testsprite-rs serve <- {initialize, tools/list, tools/call}", "verdict": "passed", "artifactRefs": ["mcp"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G004: the harness must actually execute, not just steer", "scenario": "tools/call testsprite_local_run against a real stored test + reachable app", "expectedBehavior": "returns {results:[{id,passed,...}]} inline (real execution), not a next_action stub", "verdict": "passed", "artifactRefs": ["mcp"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; MCP harness verified live end-to-end; CLI parity preserved by the run_collect refactor; no fix loop needed.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  }
+}

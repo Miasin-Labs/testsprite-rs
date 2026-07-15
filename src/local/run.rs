@@ -25,6 +25,66 @@ pub async fn run(
     json: bool,
     fix: bool,
 ) -> anyhow::Result<i32> {
+    let report = run_collect(root, ids, url_override, model, fix).await?;
+
+    if report.is_empty() {
+        println!("no tests found; run `testsprite-rs test add <file>` first");
+        return Ok(0);
+    }
+
+    let total = report.len();
+    let failed = report
+        .iter()
+        .filter(|e| !e.get("passed").and_then(Value::as_bool).unwrap_or(false))
+        .count();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for entry in &report {
+            let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+            let title = entry.get("title").and_then(Value::as_str).unwrap_or("");
+            let passed = entry.get("passed").and_then(Value::as_bool).unwrap_or(false);
+            let error = entry.get("error").and_then(Value::as_str).unwrap_or("");
+            if passed {
+                println!("PASS  {id}  {title}");
+            } else {
+                println!("FAIL  {id}  {title}");
+                if !error.is_empty() {
+                    println!("      {error}");
+                }
+                if let Some(analysis) = entry.get("analysis") {
+                    let verdict = analysis
+                        .get("verdict")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let cause = analysis.get("cause").and_then(Value::as_str).unwrap_or("?");
+                    let fx = analysis.get("fix").and_then(Value::as_str).unwrap_or("?");
+                    println!("      [{verdict}] {cause} — fix: {fx}");
+                }
+                if let Some(p) = entry.get("fixPath").and_then(Value::as_str) {
+                    println!("      fix → {p}");
+                }
+            }
+        }
+        let passed = total - failed;
+        println!("\n{passed}/{total} passed");
+    }
+
+    Ok(if failed == 0 { 0 } else { 1 })
+}
+
+/// Run the given test ids (all tests if `ids` is empty), executing each case,
+/// running LLM failure analysis on failures, optionally proposing a fix, and
+/// writing the result to disk — without printing or exiting. Returns one JSON
+/// object per test: `{id,title,passed,error,analysis?,fixPath?}`.
+pub async fn run_collect(
+    root: &Path,
+    ids: &[String],
+    url_override: Option<&str>,
+    model: &str,
+    fix: bool,
+) -> anyhow::Result<Vec<Value>> {
     let project = project::load(root)?;
 
     let target = url_override
@@ -41,8 +101,7 @@ pub async fn run(
     };
 
     if tests.is_empty() {
-        println!("no tests found; run `testsprite-rs test add <file>` first");
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let llm = crate::server::llm::LlmClient::from_env(model);
@@ -52,9 +111,7 @@ pub async fn run(
         prd: Arc::new(serde_json::json!({})),
     };
 
-    let mut failed = 0;
-    let total = tests.len();
-    let mut report = Vec::with_capacity(total);
+    let mut report = Vec::with_capacity(tests.len());
     for t in &tests {
         let kind = t.kind.unwrap_or(project.kind);
         let ex = crate::server::executors::for_kind(kind);
@@ -97,54 +154,22 @@ pub async fn run(
             None
         };
 
-        if !outcome.passed {
-            failed += 1;
+        let mut entry = serde_json::json!({
+            "id": t.id,
+            "title": t.title,
+            "passed": outcome.passed,
+            "error": outcome.error,
+        });
+        if let Some(analysis) = &analysis {
+            entry["analysis"] = analysis.clone();
         }
-
-        if json {
-            let mut entry = serde_json::json!({
-                "id": t.id,
-                "title": t.title,
-                "passed": outcome.passed,
-                "error": outcome.error,
-            });
-            if let Some(analysis) = &analysis {
-                entry["analysis"] = analysis.clone();
-            }
-            if let Some(p) = &fix_path {
-                entry["fixPath"] = serde_json::json!(p);
-            }
-            report.push(entry);
-        } else if outcome.passed {
-            println!("PASS  {}  {}", t.id, t.title);
-        } else {
-            println!("FAIL  {}  {}", t.id, t.title);
-            if !outcome.error.is_empty() {
-                println!("      {}", outcome.error);
-            }
-            if let Some(analysis) = &analysis {
-                let verdict = analysis
-                    .get("verdict")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
-                let cause = analysis.get("cause").and_then(Value::as_str).unwrap_or("?");
-                let fix = analysis.get("fix").and_then(Value::as_str).unwrap_or("?");
-                println!("      [{verdict}] {cause} — fix: {fix}");
-            }
-            if let Some(p) = &fix_path {
-                println!("      fix → {p}");
-            }
+        if let Some(p) = &fix_path {
+            entry["fixPath"] = serde_json::json!(p);
         }
+        report.push(entry);
 
         store::write_result(root, &t.id, &outcome, analysis.as_ref())?;
     }
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        let passed = total - failed;
-        println!("\n{passed}/{total} passed");
-    }
-
-    Ok(if failed == 0 { 0 } else { 1 })
+    Ok(report)
 }
