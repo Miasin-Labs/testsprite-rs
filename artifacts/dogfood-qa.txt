@@ -1,0 +1,37 @@
+=== Check 1: contract validation of dogfood/tests.json ===
+CONTRACT OK: ['df-build', 'df-test', 'df-clippy']
+EXIT=0
+
+=== Check 2: FAIL path (qa-neg) ===
+added test qa-neg
+FAIL  qa-neg  neg
+      command failed (exit 7): boom
+      [bug] The command is designed to exit with a non-zero status, which is expected behavior. — fix: Change the test expectation to allow for a non-zero exit status.
+
+0/1 passed
+EXIT=1
+
+=== Check 3: PASS path (qa-pos) ===
+added test qa-pos
+PASS  qa-pos  pos
+
+1/1 passed
+EXIT=0
+
+=== Check 4: bash -n dogfood/run.sh + cd/TESTSPRITE_RS check ===
+SYNTAX OK
+EXIT_SYNTAX=0
+14:cd "$(dirname "$0")/.."
+10:# Override the binary with TESTSPRITE_RS=/path/to/testsprite-rs (defaults to
+15:BIN="${TESTSPRITE_RS:-testsprite-rs}"
+
+=== Check 5: idempotent import (run twice) ===
+imported 3 test(s)
+imported 3 test(s)
+6 6
+
+=== Note: store also contained pre-existing 'df-neg' test (not part of dogfood/tests.json); idempotent-import check still valid (6 ids, 6 unique after double import) ===
+
+=== Check: node -e contract replay command (for cli-replay artifact) ===
+dogfood-gates-ok:df-build,df-clippy,df-test
+EXIT=0

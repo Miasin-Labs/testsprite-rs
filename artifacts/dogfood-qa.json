@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "cli-replay",
+  "replaySafe": true,
+  "command": ["node", "-e", "const t=require('./dogfood/tests.json'); if(!Array.isArray(t)||t.length!==3){process.exit(1)}; const ids=t.map(x=>x.id).sort().join(','); if(t.some(x=>x.kind!=='command')){process.exit(2)}; console.log('dogfood-gates-ok:'+ids)"],
+  "cwd": ".",
+  "env": { "LC_ALL": "C" },
+  "timeoutMs": 30000,
+  "expectedExitCode": 0,
+  "recordedStdout": "dogfood-gates-ok:df-build,df-clippy,df-test\n",
+  "recordedStderr": "",
+  "invariants": [
+    { "type": "substring", "value": "dogfood-gates-ok:df-build,df-clippy,df-test" },
+    { "type": "not-substring", "value": "error" }
+  ]
+}
