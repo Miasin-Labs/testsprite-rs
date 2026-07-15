@@ -113,3 +113,10 @@ Positive validations of already-shipped local features:
 The dump (`~/VulnerabilityResearch/testspite/dump-0715`, target
 `dashboard/settings/apikey`) is fully handled: present, extracted (479/479), and
 mined twice. Nothing to build from it.
+
+Lazy-chunk fetch (`curl_chrome120`, 2026-07-15): pulled the 9 dynamically-
+importable chunks in the webpack `.u` map that were missing from the dump — all
+third-party libs (Monaco editor, recharts, react-redux), **zero API/product
+signal**. The API wrappers live in the already-mined shared chunks; the only
+un-fetchable chunks are auth-gated dashboard route UIs that call the known
+endpoints. Mining is complete: no new locally-buildable signal.
