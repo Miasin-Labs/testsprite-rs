@@ -112,6 +112,45 @@ pub fn write_result(
     Ok(())
 }
 
+/// Write an LLM-proposed fix recommendation to `fixes/<id>.md` for a coding
+/// agent to pick up. `fix` is `{explanation, patch}`; returns the file path.
+pub fn write_fix(
+    root: &Path,
+    id: &str,
+    title: &str,
+    analysis: Option<&Value>,
+    fix: &Value,
+) -> anyhow::Result<std::path::PathBuf> {
+    let dir = super::fixes_dir(root);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let explanation = fix.get("explanation").and_then(Value::as_str).unwrap_or("");
+    let patch = fix.get("patch").and_then(Value::as_str).unwrap_or("");
+    let field = |key: &str| {
+        analysis
+            .and_then(|a| a.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let verdict = {
+        let v = field("verdict");
+        if v.is_empty() { "unknown" } else { v }
+    };
+
+    let mut body = format!("# Fix recommendation — {title}\n\n- test: `{id}`\n- verdict: **{verdict}**\n");
+    let cause = field("cause");
+    if !cause.is_empty() {
+        body.push_str(&format!("- root cause: {cause}\n"));
+    }
+    body.push_str(&format!(
+        "\n## What to change\n\n{explanation}\n\n## Proposed patch\n\n```diff\n{patch}\n```\n"
+    ));
+
+    let path = dir.join(format!("{id}.md"));
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

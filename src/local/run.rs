@@ -23,6 +23,7 @@ pub async fn run(
     url_override: Option<&str>,
     model: &str,
     json: bool,
+    fix: bool,
 ) -> anyhow::Result<i32> {
     let project = project::load(root)?;
 
@@ -75,6 +76,27 @@ pub async fn run(
             None
         };
 
+        let fix_path: Option<String> = if fix && !outcome.passed {
+            match &llm {
+                Some(c) => match c.propose_fix(&case, &outcome.code, &outcome.error).await {
+                    Ok(f) => match store::write_fix(root, &t.id, &t.title, analysis.as_ref(), &f) {
+                        Ok(p) => Some(p.display().to_string()),
+                        Err(e) => {
+                            tracing::warn!("writing fix for {} failed: {e}", t.id);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("fix proposal for {} failed: {e}", t.id);
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
         if !outcome.passed {
             failed += 1;
         }
@@ -88,6 +110,9 @@ pub async fn run(
             });
             if let Some(analysis) = &analysis {
                 entry["analysis"] = analysis.clone();
+            }
+            if let Some(p) = &fix_path {
+                entry["fixPath"] = serde_json::json!(p);
             }
             report.push(entry);
         } else if outcome.passed {
@@ -105,6 +130,9 @@ pub async fn run(
                 let cause = analysis.get("cause").and_then(Value::as_str).unwrap_or("?");
                 let fix = analysis.get("fix").and_then(Value::as_str).unwrap_or("?");
                 println!("      [{verdict}] {cause} — fix: {fix}");
+            }
+            if let Some(p) = &fix_path {
+                println!("      fix → {p}");
             }
         }
 

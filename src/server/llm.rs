@@ -219,6 +219,26 @@ impl LlmClient {
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("failure analysis was not valid JSON")
     }
+
+    /// Propose the smallest fix to the CODE UNDER TEST that would make this case
+    /// pass — returns `{explanation, patch}` where `patch` is a unified-diff hunk
+    /// a coding agent can apply. The autonomous fix-recommendation output.
+    pub async fn propose_fix(&self, case: &Value, code: &str, error: &str) -> Result<Value> {
+        let system = "You are TestSprite's autonomous fix engine. Given a failing test case, the \
+            test code that ran, and the failure output, propose the SMALLEST change to the code \
+            UNDER TEST (never the test) that would make it pass. Respond with JSON only: \
+            {\"explanation\":\"what to change and why, 1-3 sentences\",\"patch\":\"a unified-diff \
+            hunk (--- a/file, +++ b/file, @@, +/- lines) a coding agent can apply; best-effort when \
+            the exact file is unknown, but always a concrete diff\"}.";
+        let user = format!(
+            "Case:\n{}\n\nTest code:\n{}\n\nFailure output:\n{}",
+            serde_json::to_string_pretty(case)?,
+            code,
+            error
+        );
+        let out = self.chat(system, &user, true).await?;
+        serde_json::from_str(&out).context("fix proposal was not valid JSON")
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.

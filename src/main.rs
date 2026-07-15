@@ -113,6 +113,9 @@ enum TestCmd {
         /// Print a single JSON array of results instead of PASS/FAIL lines.
         #[arg(long)]
         json: bool,
+        /// On failure, write an LLM fix recommendation to testsprite_tests/fixes/<id>.md.
+        #[arg(long)]
+        fix: bool,
     },
     /// Generate test cases with the LLM (needs an OpenAI key).
     Generate {
@@ -215,8 +218,9 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             url,
             model,
             json,
+            fix,
         } => {
-            let code = local::run::run(&root, &id, url.as_deref(), &model, json).await?;
+            let code = local::run::run(&root, &id, url.as_deref(), &model, json, fix).await?;
             std::process::exit(code);
         }
         TestCmd::Generate {

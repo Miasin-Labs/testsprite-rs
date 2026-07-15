@@ -49,6 +49,10 @@ testsprite-rs test add --file plan.json      # → testsprite_tests/tests/<id>.j
 testsprite-rs test list
 testsprite-rs test run                        # all tests; --id <id> for a subset
 #   exit 0 if every test passed else 1; writes testsprite_tests/results/<id>.json
+testsprite-rs test generate --instruction "…" --type backend  # LLM plans cases (needs OPENAI_API_KEY)
+testsprite-rs test run --json --fix                            # LLM code-gen + failure analysis + fix patch
+#   with a key: spec-less {title,description} cases get LLM-generated code; failures
+#   get a bug/fragility verdict, and --fix writes a repair diff to fixes/<id>.md for your agent
 ```
 
 A test case is just JSON; the backend deterministic path needs no LLM:
@@ -59,8 +63,9 @@ A test case is just JSON; the backend deterministic path needs no LLM:
 ```
 
 `test run` loads the project + each test and calls
-`executors::for_kind(kind).run(case, &ExecCtx{ target, llm: None, prd })` — the
-same seam the cloud path uses. Code: `src/local/{project,store,run}.rs`.
+`executors::for_kind(kind).run(case, &ExecCtx{ target, llm, prd })` — the same
+seam the cloud path uses; `llm` is `LlmClient::from_env(model)` (`None` =
+deterministic). Code: `src/local/{project,store,run,generate}.rs`.
 
 ## Environment
 

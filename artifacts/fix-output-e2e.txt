@@ -1,0 +1,35 @@
+### test run --fix (real LLM: writes a repair patch on failure)
+FAIL  e718a7ac-14a7-4cb8-a3bd-3035791a2e4f  health endpoint returns 200
+      expected Some(200), got 404
+      [bug] The health endpoint is returning a 404 status code instead of the expected 200. — fix: Ensure that the health endpoint is correctly implemented and accessible at the specified path.
+      fix → /tmp/tsrs-fix.bTG8RT/testsprite_tests/fixes/e718a7ac-14a7-4cb8-a3bd-3035791a2e4f.md
+
+0/1 passed
+exit=1
+
+### generated fix file: testsprite_tests/fixes/e718a7ac-14a7-4cb8-a3bd-3035791a2e4f.md
+-------------------------------------------------------------
+# Fix recommendation — health endpoint returns 200
+
+- test: `e718a7ac-14a7-4cb8-a3bd-3035791a2e4f`
+- verdict: **bug**
+- root cause: The health endpoint is returning a 404 status code instead of the expected 200.
+
+## What to change
+
+The health endpoint is returning a 404 status code, indicating that the endpoint is not found. To resolve this, ensure that the route for '/health' is correctly defined in the application code, so it responds with a 200 status code when accessed.
+
+## Proposed patch
+
+```diff
+--- a/app.py
++++ b/app.py
+@@ -1,5 +1,6 @@
+ from flask import Flask
+ 
+ app = Flask(__name__)
++
+ @app.route('/health')
+ def health():
+     return 'OK', 200
+```

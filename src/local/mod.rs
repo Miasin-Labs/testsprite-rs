@@ -53,6 +53,9 @@ pub fn tests_dir(root: &Path) -> PathBuf {
 pub fn results_dir(root: &Path) -> PathBuf {
     ts_dir(root).join("results")
 }
+pub fn fixes_dir(root: &Path) -> PathBuf {
+    ts_dir(root).join("fixes")
+}
 
 /// Shared test helper: a fresh, unique temp dir under the OS temp dir.
 #[cfg(test)]
