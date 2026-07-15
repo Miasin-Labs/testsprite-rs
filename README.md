@@ -10,6 +10,58 @@ yamux v2), and exposes the same MCP tools over stdio.
 > test plan, the cloud reaches your localhost through the tunnel, runs the
 > generated Python test, and returns `PASSED`. (1 credit per test case.)
 
+## Quickstart — code-first API → deterministic tests (no cloud, no OpenAI key)
+
+`testsprite-rs` is **local-first**: point it at your API's OpenAPI/Postman/HAR — a
+file *or* a live URL — and it turns the surface into deterministic, re-runnable
+HTTP cases and fires them at your app. No cloud, no reverse tunnel, no OpenAI key.
+
+```bash
+# 1. teach it how to reach + boot your app (once)
+testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:9200
+testsprite-rs project set-start "cargo run -- serve --port 9200"
+
+# 2. import the API surface -> deterministic {method,path,expect_status,body?} cases + a PRD
+#    (a utoipa / code-first app's SERVED spec works straight from the URL)
+testsprite-rs test generate --doc http://127.0.0.1:9200/api-docs/openapi.json
+testsprite-rs prd show                       # the doc -> PRD -> plan -> cases trail, in SQLite
+
+# 3. auth + path params (kept in gitignored variables.json, never in the stored case)
+testsprite-rs project set-var authToken <bearer>
+testsprite-rs project set-var id <a-real-uuid>
+
+# 4. boot the app, run the whole suite against it (exit 0 = all pass), gate CI
+testsprite-rs test run --serve
+testsprite-rs gate                           # re-run everything + JUnit + PR comment + exit 1 on red
+```
+
+The `apidoc` importer (Postman · OpenAPI 3.1 incl. `$ref` + dummy-body synthesis ·
+HAR, all secret-redacted) produces real `spec` cases the executor fires with
+`reqwest`; the LLM is only a **fallback** for unstructured docs (README/notes/Jira).
+
+### Local-first features (no account needed)
+
+- **API-doc ingestion** — `test generate --doc <file|URL>` → deterministic `spec`
+  cases + a synthesized PRD, no key. Secrets masked; OpenAPI write-bodies synthesized.
+- **PRD persistence** — `doc → PRD → plan → cases` stored (`prd` table, `prd
+  list`/`show`, cases linked by `prdId`) + mirrored to `standard_prd.json`.
+- **Live-app serve** — `project set-start "<cmd>"` + `test run --serve` boots your
+  app, waits on the port, runs, and tears it down (RAII — no orphan).
+- **Auth + path-param seeding** — `project set-var authToken <t>` sends a bearer on
+  every run; `{id}` seeds from `variables.json`; per-case `spec.headers` too.
+- **Code Diff Mode** — `test run --changed [--since <ref>]`: `git diff` → changed
+  functions (tree-sitter) → run only the tests that touch them.
+- **Agent** — DB-backed conversational agent (CLI/MCP/Discord): generate, run,
+  self-heal (`rerun --heal`), propose fixes; approval-gated or `--auto-approve`.
+- **CI / orchestration** — `gate` (JUnit + PR comment + exit code), `ci init`
+  (GitHub Actions), dependency **waves**, opt-in `--jobs N`, `flaky`, `test
+  history`, `schedule` (cron), `coverage --gaps`.
+- **Multi-modal executor seam** — `backend | frontend` (Playwright, webkit via
+  Docker) `| mcp | rust`, all behind one trait.
+
+The rest of this README documents the original **cloud** protocol this project also
+reimplements (tunnel + the `api.testsprite.com` flow) — kept for fidelity, but the
+local-first path above needs none of it.
 ## What TestSprite is
 
 An AI testing agent delivered as an **MCP server** that plugs into your coding
@@ -262,16 +314,17 @@ GET  /api/tunnel/v2/version
 
 ## Status
 
-Builds clean (`cargo build`, `cargo clippy` — 0 warnings; `cargo test` — 11
-pass). Verified live: the local `project → test → run` flow (deterministic, LLM
-`generate`, failure analysis, `--fix` repair patch), the account check, MCP
-`initialize`/`tools/list`/
-`tools/call`, the tunnel, a full backend `generate-code-and-execute` run, the
-local backend (deterministic + LLM), the **mcp** executor against this binary's
-own MCP server, and the **Coverage Guard** flagging an untested endpoint (2/3,
-67%). The `frontend` (Playwright) and `rust` (`cargo test`) executors build and
-have deterministic fallbacks but were not run end-to-end here. Tunnel **v2** is
-implemented; v1 (legacy HMAC-challenge TCP tunnel) is detected and rejected.
+Builds clean (`cargo build`, `cargo clippy` — **0 warnings**; `cargo test` — **81
+pass**). Verified live end-to-end: **API-doc ingestion** (Postman/OpenAPI/HAR →
+`spec` cases, incl. fetching a served spec by URL), **`--serve`** boot+teardown,
+**spec-case bearer auth**, **PRD persistence** + `prd show`, **Code Diff Mode**
+(`--changed`), **path-param seeding**, the `project → test → run` flow
+(deterministic + LLM `generate`, failure analysis + `--fix`), the **agent**
+(CLI/MCP/Discord, `--auto-approve`, self-heal), **`gate`** + JUnit, dependency
+**waves** + `--jobs`, the account check, MCP `initialize`/`tools/list`/`tools/call`,
+the tunnel, a full cloud `generate-code-and-execute` run, the local backend, the
+`backend`/`frontend` (webkit-via-Docker)/`mcp`/`rust` executors, and the **Coverage
+Guard**. Tunnel **v2** implemented; v1 (legacy HMAC-challenge TCP) detected and rejected.
 
 This is a research reimplementation for understanding the protocol; it is not
 affiliated with TestSprite.
