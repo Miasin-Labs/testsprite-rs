@@ -1,0 +1,223 @@
+=== ENV ===
+PWD=/tmp/g004-qa BIN=/home/cole/.cargo/bin/testsprite-rs VERSION=testsprite-rs 0.1.0
+
+=== GROUPS: create test JSON files ===
+{"id":"a1","title":"a1 test","kind":"command","code":"true","group":"A"}
+{"id":"a2","title":"a2 test","kind":"command","code":"true","group":"A"}
+{"id":"b1","title":"b1 test","kind":"command","code":"true","group":"B"}
+{"id":"plain","title":"plain test","kind":"command","code":"true"}
+$ OPENAI_API_KEY= testsprite-rs test add --file a1.json
+added test a1
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file a2.json
+added test a2
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file b1.json
+added test b1
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file plain.json
+added test plain
+[exit 0]
+[exit 0]
+
+=== CHECK: group filter (test list) ===
+$ OPENAI_API_KEY= testsprite-rs test list --group A
+a1  a1 test
+a2  a2 test
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test list --group B
+b1  b1 test
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test list
+a1  a1 test
+a2  a2 test
+b1  b1 test
+plain  plain test
+[exit 0]
+[exit 0]
+
+=== CHECK: run --group A (only a1,a2) ===
+$ OPENAI_API_KEY= testsprite-rs test run --group A
+PASS  a1  a1 test
+PASS  a2  a2 test
+
+2/2 passed
+[exit 0]
+[exit 0]
+
+=== CHECK: run --group ZZZ (no tests in group; exit 0) ===
+$ OPENAI_API_KEY= testsprite-rs test run --group ZZZ
+no tests in group 'ZZZ'
+[exit 0]
+[exit 0]
+
+=== WAVES: group W, add consumer FIRST, then producer, then teardown ===
+{"id":"consumer","title":"consumer","kind":"command","code":"true","group":"W","needs":["tok"]}
+{"id":"producer","title":"producer","kind":"command","code":"true","group":"W","produces":["tok"]}
+{"id":"teardown","title":"teardown","kind":"command","code":"true","group":"W","category":"teardown"}
+$ OPENAI_API_KEY= testsprite-rs test add --file consumer.json
+added test consumer
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file producer.json
+added test producer
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file teardown.json
+added test teardown
+[exit 0]
+[exit 0]
+
+=== WAVES: run --group W  -> expect PASS order: producer, consumer, teardown ===
+$ OPENAI_API_KEY= testsprite-rs test run --group W
+PASS  producer  producer
+PASS  consumer  consumer
+PASS  teardown  teardown
+
+3/3 passed
+[exit 0]
+[exit 0]
+
+=== ADVERSARIAL: 2-node CYCLE, group C: x(needs=[p],produces=[q]), y(needs=[q],produces=[p]) ===
+{"id":"x","title":"x","kind":"command","code":"true","group":"C","needs":["p"],"produces":["q"]}
+{"id":"y","title":"y","kind":"command","code":"true","group":"C","needs":["q"],"produces":["p"]}
+$ OPENAI_API_KEY= testsprite-rs test add --file x.json
+added test x
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file y.json
+added test y
+[exit 0]
+[exit 0]
+
+=== CYCLE run --group C -- timeout 15s guard against hang ===
+$ OPENAI_API_KEY= testsprite-rs test run --group C
+PASS  x  x
+PASS  y  y
+
+2/2 passed
+[exit 0]
+[exit 0]
+
+=== ADVERSARIAL: ghost need, group G2: ghost(needs=[nobodyproduces]) + plain2 ===
+{"id":"ghost","title":"ghost","kind":"command","code":"true","group":"G2","needs":["nobodyproduces"]}
+{"id":"plain2","title":"plain2","kind":"command","code":"true","group":"G2"}
+$ OPENAI_API_KEY= testsprite-rs test add --file ghost.json
+added test ghost
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs test add --file plain2.json
+added test plain2
+[exit 0]
+[exit 0]
+
+=== run --group G2 -- both must run despite unsatisfied need ===
+$ OPENAI_API_KEY= testsprite-rs test run --group G2
+PASS  ghost  ghost
+PASS  plain2  plain2
+
+2/2 passed
+[exit 0]
+[exit 0]
+
+=== SCHEDULE ===
+$ OPENAI_API_KEY= testsprite-rs schedule add nightly --group A --cadence daily
+scheduled 'nightly' -> group 'A' (daily)
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs schedule list
+nightly  group=A  cadence=daily
+[exit 0]
+[exit 0]
+--- upsert: same name, new group/cadence ---
+$ OPENAI_API_KEY= testsprite-rs schedule add nightly --group B --cadence weekly
+scheduled 'nightly' -> group 'B' (weekly)
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs schedule list
+nightly  group=B  cadence=weekly
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs schedule list --json
+[
+  {
+    "name": "nightly",
+    "group": "B",
+    "cadence": "weekly"
+  }
+]
+[exit 0]
+[exit 0]
+--- invalid cadence ---
+$ OPENAI_API_KEY= testsprite-rs schedule add bad --group A --cadence yearly
+Error: invalid cadence "yearly": expected one of hourly, daily, weekly, monthly
+
+Stack backtrace:
+   0: <unknown>
+   1: <unknown>
+   2: <unknown>
+   3: <unknown>
+   4: <unknown>
+   5: <unknown>
+   6: <unknown>
+   7: <unknown>
+   8: <unknown>
+   9: <unknown>
+  10: <unknown>
+  11: <unknown>
+  12: <unknown>
+  13: __libc_start_main
+  14: <unknown>
+--- invalid cadence ---
+$ OPENAI_API_KEY= testsprite-rs schedule add bad --group A --cadence yearly
+Error: invalid cadence "yearly": expected one of hourly, daily, weekly, monthly
+
+Stack backtrace:
+   0: <unknown>
+   1: <unknown>
+   2: <unknown>
+   3: <unknown>
+   4: <unknown>
+   5: <unknown>
+   6: <unknown>
+   7: <unknown>
+   8: <unknown>
+   9: <unknown>
+  10: <unknown>
+  11: <unknown>
+  12: <unknown>
+  13: __libc_start_main
+  14: <unknown>
+[exit 1]
+[exit 1]
+--- schedule list (bad should NOT be present) ---
+$ OPENAI_API_KEY= testsprite-rs schedule list
+nightly  group=B  cadence=weekly
+[exit 0]
+[exit 0]
+--- schedule run nightly (should run group B -> b1) ---
+$ OPENAI_API_KEY= testsprite-rs schedule run nightly
+PASS  b1  b1 test
+
+1/1 passed
+[exit 0]
+[exit 0]
+--- crontab ---
+$ OPENAI_API_KEY= testsprite-rs schedule crontab
+0 9 * * 1 cd /tmp/g004-qa && /home/cole/.cargo/bin/testsprite-rs test run --group B  # testsprite-rs:nightly
+[exit 0]
+[exit 0]
+--- remove ---
+$ OPENAI_API_KEY= testsprite-rs schedule remove nightly
+removed schedule 'nightly'
+[exit 0]
+[exit 0]
+$ OPENAI_API_KEY= testsprite-rs schedule list
+no schedules
+[exit 0]
+[exit 0]
