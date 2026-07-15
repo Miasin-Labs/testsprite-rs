@@ -17,8 +17,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
+    CreateActionRow, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditInteractionResponse,
 };
 use serenity::model::prelude::*;
 use serenity::prelude::*;
@@ -293,7 +294,7 @@ impl Handler {
             return;
         }
 
-        let content = match crate::local::agent::resolve(
+        let (content, files) = match crate::local::agent::resolve(
             &self.cfg.root,
             conv,
             action_id,
@@ -302,15 +303,14 @@ impl Handler {
         )
         .await
         {
-            Ok(v) => self.render(&v).await,
-            Err(e) => format!("error: {e}"),
+            Ok(v) => (self.render(&v).await, self.source_files(&v).await),
+            Err(e) => (format!("error: {e}"), Vec::new()),
         };
-        let _ = c
-            .edit_response(
-                &ctx.http,
-                EditInteractionResponse::new().content(truncate(&content, 1900)),
-            )
-            .await;
+        let mut edit = EditInteractionResponse::new().content(truncate(&content, 1900));
+        for f in files {
+            edit = edit.new_attachment(f);
+        }
+        let _ = c.edit_response(&ctx.http, edit).await;
     }
 
     /// Render a resolve result richly: a per-test code-block table for a run, a
@@ -337,6 +337,34 @@ impl Handler {
             }
             _ => v["assistant"].as_str().unwrap_or("done").to_string(),
         }
+    }
+
+    /// The executed source (`<id>.py`) of each failed test in a run, so you can
+    /// open the actual code in Discord. Capped at 5 files; empty for non-runs.
+    async fn source_files(&self, v: &Value) -> Vec<CreateAttachment> {
+        let mut files = Vec::new();
+        if v["kind"].as_str() != Some("run") {
+            return files;
+        }
+        let Some(results) = v["result"]["results"].as_array() else {
+            return files;
+        };
+        for r in results
+            .iter()
+            .filter(|r| r["passed"].as_bool() != Some(true))
+            .take(5)
+        {
+            let Some(id) = r["id"].as_str() else { continue };
+            if let Ok(Some(res)) = crate::local::store::load_result(&self.cfg.root, id).await
+                && let Some(code) = res["code"].as_str().filter(|c| !c.is_empty())
+            {
+                files.push(CreateAttachment::bytes(
+                    code.as_bytes().to_vec(),
+                    format!("{id}.py"),
+                ));
+            }
+        }
+        files
     }
 }
 
