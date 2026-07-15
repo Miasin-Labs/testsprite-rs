@@ -1,0 +1,139 @@
+//! `testsprite-rs doctor` — offline environment diagnostics. Checks the LLM
+//! key, cargo/coverage/node/gh/python3 toolchains, and Playwright browser
+//! caches. Never prints secrets; only reports presence/absence.
+
+use std::process::Command;
+
+/// Run one probe command and return its trimmed stdout on success, `None` on
+/// spawn error or non-zero exit.
+fn probe(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = if out.stdout.is_empty() {
+        out.stderr
+    } else {
+        out.stdout
+    };
+    let text = String::from_utf8_lossy(&text).trim().to_string();
+    Some(text)
+}
+
+enum Status {
+    Ok(String),
+    Warn(String),
+    Fail(String),
+}
+
+fn report(name: &str, status: Status) -> bool {
+    let (tag, detail, is_fail) = match status {
+        Status::Ok(d) => ("ok", d, false),
+        Status::Warn(d) => ("warn", d, false),
+        Status::Fail(d) => ("fail", d, true),
+    };
+    println!("[{tag}] {name}: {detail}");
+    is_fail
+}
+
+/// Run every diagnostic check, printing one `[ok]/[warn]/[fail]` line each.
+/// Returns exit code 1 if any check failed, else 0.
+pub fn doctor() -> anyhow::Result<i32> {
+    let mut any_fail = false;
+
+    any_fail |= report(
+        "openai key",
+        if crate::server::llm::resolve_key().is_some() {
+            Status::Ok("configured, LLM features enabled".to_string())
+        } else {
+            Status::Warn("no key — deterministic mode only".to_string())
+        },
+    );
+
+    any_fail |= report(
+        "cargo",
+        match probe("cargo", &["--version"]) {
+            Some(v) => Status::Ok(v),
+            None => Status::Fail("not found on PATH".to_string()),
+        },
+    );
+
+    any_fail |= report(
+        "cargo-llvm-cov",
+        match probe("cargo", &["llvm-cov", "--version"]) {
+            Some(v) => Status::Ok(v),
+            None => Status::Warn("coverage --rust unavailable".to_string()),
+        },
+    );
+
+    any_fail |= report(
+        "node",
+        match probe("node", &["--version"]) {
+            Some(v) => Status::Ok(v),
+            None => Status::Warn("frontend/Playwright unavailable".to_string()),
+        },
+    );
+
+    any_fail |= report("playwright browsers", playwright_status());
+
+    any_fail |= report(
+        "gh",
+        match probe("gh", &["--version"]) {
+            Some(v) => Status::Ok(v.lines().next().unwrap_or("").to_string()),
+            None => Status::Warn("PR gating unavailable".to_string()),
+        },
+    );
+
+    any_fail |= report(
+        "python3",
+        match probe("python3", &["--version"]) {
+            Some(v) => Status::Ok(v),
+            None => Status::Warn(
+                "backend deterministic executor still works via reqwest; python only needed for LLM python tests"
+                    .to_string(),
+            ),
+        },
+    );
+
+    Ok(if any_fail { 1 } else { 0 })
+}
+
+fn playwright_status() -> Status {
+    let Some(home) = dirs_home() else {
+        return Status::Warn("no home directory to locate ~/.cache/ms-playwright".to_string());
+    };
+    let cache = home.join(".cache").join("ms-playwright");
+    if !cache.exists() {
+        return Status::Warn("~/.cache/ms-playwright not found".to_string());
+    }
+    let engines = ["chromium", "firefox", "webkit"];
+    let found: Vec<&str> = engines
+        .iter()
+        .copied()
+        .filter(|engine| {
+            std::fs::read_dir(&cache)
+                .map(|mut entries| {
+                    entries.any(|e| {
+                        e.ok()
+                            .map(|e| {
+                                e.file_name()
+                                    .to_string_lossy()
+                                    .to_ascii_lowercase()
+                                    .starts_with(engine)
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if found.is_empty() {
+        Status::Warn("no browsers found under ~/.cache/ms-playwright".to_string())
+    } else {
+        Status::Ok(found.join(", "))
+    }
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}

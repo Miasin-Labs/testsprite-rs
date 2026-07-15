@@ -1,0 +1,23 @@
+### doctor
+[ok] openai key: configured, LLM features enabled
+[ok] cargo: cargo 1.99.0-nightly (7e707bd34 2026-07-13)
+[ok] cargo-llvm-cov: cargo-llvm-cov 0.6.18
+[ok] node: v26.4.0
+[ok] playwright browsers: chromium, firefox, webkit
+[ok] gh: gh version 2.81.0 (2026-04-11)
+[ok] python3: Python 3.13.14
+exit=0
+
+### test lint (1 valid + 1 malformed)
+[issue] bad: invalid spec.method "FETCH"
+[issue] bad: spec.path "x" must start with '/'
+[issue] bad: spec.expect_status must be an integer in 100..=599
+[ok] good
+lint: 2 tests, 3 issues
+exit=1
+
+### test diff good bad
+good: PASS verdict=- error=
+bad: FAIL verdict=bug error=boom
+changed: passed=true verdict=true
+exit=0

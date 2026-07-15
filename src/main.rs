@@ -37,6 +37,8 @@ struct Cli {
 enum Command {
     /// Run as a stdio MCP server (default when no subcommand is given).
     Serve,
+    /// Diagnose the local environment (LLM key, cargo, coverage, node/playwright, gh, python).
+    Doctor,
     /// Show the current account (plan, credits, email).
     Account,
     /// Alias for `account` — verify the API key.
@@ -187,6 +189,15 @@ enum TestCmd {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Validate stored test JSON offline.
+    Lint,
+    /// Compare two stored test results (results/<id>.json).
+    Diff {
+        #[arg()]
+        a: String,
+        #[arg()]
+        b: String,
+    },
 }
 
 #[tokio::main]
@@ -202,6 +213,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => mcp::serve().await,
+        Command::Doctor => std::process::exit(local::doctor::doctor()?),
         Command::Account | Command::Check => run_account().await,
         Command::GenerateCodeAndExecute => run_console_execute().await,
         Command::Backend { port, model, kind } => {
@@ -347,6 +359,14 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 println!("  {id}");
             }
             Ok(())
+        }
+        TestCmd::Lint => {
+            let code = local::lint::lint(&root)?;
+            std::process::exit(code);
+        }
+        TestCmd::Diff { a, b } => {
+            let code = local::diff::diff(&root, &a, &b)?;
+            std::process::exit(code);
         }
     }
 }
