@@ -120,3 +120,11 @@ third-party libs (Monaco editor, recharts, react-redux), **zero API/product
 signal**. The API wrappers live in the already-mined shared chunks; the only
 un-fetchable chunks are auth-gated dashboard route UIs that call the known
 endpoints. Mining is complete: no new locally-buildable signal.
+
+Authenticated route-chunk mining (Cognito session, 2026-07-15): with a live
+dashboard session, enumerated + fetched the auth-gated `/dashboard-v3/*` route
+chunks (22 not in the dump). All are React UI (radix-ui, framer-motion) + the
+Amplify/Cognito config — **zero `ApiRequest` data-layer calls, no new endpoints**.
+Route UIs import the already-mined shared wrappers. The `/v3/*` dashboard plane
+is cloud-only (testsprite-rs mirrors `/api/cli/v1`). Mining is exhaustively
+complete across dump + lazy + auth-gated chunks: no new locally-buildable signal.
