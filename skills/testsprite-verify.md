@@ -62,3 +62,30 @@ Say so explicitly: "Shipped but I could not run any testsprite-rs test because
 - One verb per step; describe outcomes, not selectors.
 - Presence ≠ working: assert the thing is correct, not just that a tag exists.
 - Keep flows that depend on external state (OAuth, native dialogs, iframes) out of scope.
+## Test like a real user hunting bugs
+
+Bugs hide at the edges a real user trips over, not the happy path. For every
+endpoint/resolver/flow you cover, ask the questions a user would and assert the
+answer:
+
+- **Empty / null / zero / missing:** empty password, no bearer, a client with 0
+  policies, a field that comes back `null` or the literal `"0"`, an absent record.
+- **Wrong / unexpected input:** a filter field that doesn't exist, a bad
+  `grant_type`, a malformed id, an out-of-range value.
+- **Boundaries:** first/last page, limit 0, a count that should be > 0, a date at
+  the range edge.
+- **Cross-source / joins:** a value that's only correct when *every* source is
+  joined (e.g. a count that's right via one path but 0 via another).
+- **Auth & config:** unauthorized caller must be rejected; an origin/redirect/scope
+  that must be allowed; a public route that must stay public.
+
+Assert the **concrete observable** a user sees (a status, a field value, a count),
+never "it works".
+
+## Regression rule — a bug report is a test you haven't written yet
+
+When a bug is reported, FIRST write a test that reproduces it — it should **fail**
+against the current code (red), proving you caught the real defect. Store it
+(`testsprite_store_test` / `test emit`), fix the code, then the same test passes
+(green) and guards that bug forever. Turn every "it's returning null/0/an error"
+into a permanent assertion.
