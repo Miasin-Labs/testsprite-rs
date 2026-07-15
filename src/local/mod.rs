@@ -19,6 +19,7 @@ pub mod triage;
 pub mod scaffold;
 pub mod verdict;
 pub mod visual;
+pub mod waves;
 
 use std::path::{Path, PathBuf};
 
@@ -52,6 +53,39 @@ pub struct LocalTest {
     pub spec: Option<serde_json::Value>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LocalTest {
+    /// The `group`/list tag (free-form) this test belongs to, if any.
+    pub fn group(&self) -> Option<&str> {
+        self.extra.get("group").and_then(serde_json::Value::as_str)
+    }
+    /// Dependency-wave category; `Some("teardown")` runs last.
+    pub fn category(&self) -> Option<&str> {
+        self.extra.get("category").and_then(serde_json::Value::as_str)
+    }
+    /// Capabilities this test `produces` (for dependency-wave ordering).
+    pub fn produces(&self) -> Vec<String> {
+        str_list(&self.extra, "produces")
+    }
+    /// Capabilities this test `needs` (runs after their producers).
+    pub fn needs(&self) -> Vec<String> {
+        str_list(&self.extra, "needs")
+    }
+}
+
+/// Read a `["a","b"]` string array from a flattened `extra` map; `[]` if absent
+/// or the wrong shape.
+fn str_list(extra: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
+    extra
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn ts_dir(root: &Path) -> PathBuf {

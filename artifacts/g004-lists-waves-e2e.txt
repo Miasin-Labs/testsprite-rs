@@ -1,0 +1,13 @@
+G004 (a) test lists/grouping + (b) dependency waves — e2e 2026-07-15
+======================================================================
+$ test list --group g1        => consumer, producer, teardown (NOT ungrouped "other")
+$ test run  --group g1        => wave order:
+    PASS producer (produces tok)
+    PASS consumer (needs tok)   <- runs AFTER producer
+    PASS teardown (category=teardown)  <- runs LAST
+    3/3 passed
+$ test run --group nope       => "no tests in group 'nope'"
+$ test list                   => all 4 incl ungrouped "other"
+
+waves unit tests: 6/6 (producer-before-consumer, teardown-last, transitive chain,
+  cycle-no-drop, unsatisfied-need-no-block, independent-input-order). cargo test 53/53, clippy 0.

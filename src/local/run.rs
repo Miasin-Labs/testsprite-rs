@@ -108,6 +108,10 @@ pub async fn run_collect(
         return Ok(Vec::new());
     }
 
+    // Dependency-wave ordering: producers before consumers, teardown last.
+    // A no-op when no test declares produces/needs/category.
+    let tests = crate::local::waves::order_by_waves(tests);
+
     let llm = crate::server::llm::LlmClient::from_env(model);
     let ctx = ExecCtx {
         target: target.clone(),

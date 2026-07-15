@@ -194,6 +194,9 @@ enum TestCmd {
         /// Output format: text | json | csv | ndjson.
         #[arg(long, default_value = "text")]
         output: String,
+        /// Only list tests in this group/list.
+        #[arg(long)]
+        group: Option<String>,
     },
     /// Run stored tests locally through the executor seam (all, or only --id).
     Run {
@@ -216,6 +219,9 @@ enum TestCmd {
         /// Also enables per-case screenshots under testsprite_tests/shots/.
         #[arg(long)]
         browser: Option<String>,
+        /// Run only tests tagged with this group/list.
+        #[arg(long)]
+        group: Option<String>,
     },
     /// Re-run stored tests; --heal regenerates fragility-failing LLM tests.
     Rerun {
@@ -477,8 +483,12 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             println!("added test {id}");
             Ok(())
         }
-        TestCmd::List { output } => {
+        TestCmd::List { output, group } => {
             let tests = local::store::list(&root).await?;
+            let tests: Vec<local::LocalTest> = match group.as_deref() {
+                Some(g) => tests.into_iter().filter(|t| t.group() == Some(g)).collect(),
+                None => tests,
+            };
             let kind_str = |t: &local::LocalTest| -> String {
                 t.kind
                     .as_ref()
@@ -530,9 +540,26 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             json,
             fix,
             browser,
+            group,
         } => {
+            let ids = match group.as_deref() {
+                Some(g) => {
+                    let matched: Vec<String> = local::store::list(&root)
+                        .await?
+                        .into_iter()
+                        .filter(|t| t.group() == Some(g))
+                        .map(|t| t.id)
+                        .collect();
+                    if matched.is_empty() {
+                        println!("no tests in group '{g}'");
+                        return Ok(());
+                    }
+                    matched
+                }
+                None => id,
+            };
             let code =
-                local::run::run(&root, &id, url.as_deref(), &model, json, fix, browser.as_deref())
+                local::run::run(&root, &ids, url.as_deref(), &model, json, fix, browser.as_deref())
                     .await?;
             std::process::exit(code);
         }
