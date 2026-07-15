@@ -1,0 +1,23 @@
+[
+  {
+    "id": "df-build",
+    "title": "crate builds (cargo build)",
+    "kind": "command",
+    "description": "testsprite-rs must compile.",
+    "code": "cargo build --quiet"
+  },
+  {
+    "id": "df-test",
+    "title": "unit tests pass (cargo test)",
+    "kind": "command",
+    "description": "The in-crate #[cfg(test)] suite must be green.",
+    "code": "cargo test --quiet"
+  },
+  {
+    "id": "df-clippy",
+    "title": "clippy clean, zero warnings",
+    "kind": "command",
+    "description": "Project standard: cargo clippy --all-targets at zero warnings.",
+    "code": "cargo clippy --all-targets -- -D warnings"
+  }
+]

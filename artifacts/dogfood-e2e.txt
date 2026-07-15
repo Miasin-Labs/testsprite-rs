@@ -1,0 +1,30 @@
+G001 dogfood — testsprite-rs green-gates its OWN repo through its own command executor
+========================================================================================
+date: 2026-07-15   branch: feat/cli-v3-parity   binary: ~/.cargo/bin/testsprite-rs
+
+$ testsprite-rs test import dogfood/tests.json
+imported 3 test(s)
+
+$ testsprite-rs test run --id df-build --id df-test --id df-clippy
+PASS  df-build  crate builds (cargo build)
+PASS  df-test  unit tests pass (cargo test)
+PASS  df-clippy  clippy clean, zero warnings
+
+3/3 passed
+HARNESS_EXIT=0                     # green gate
+
+FAIL path (deterministic, exit non-zero):
+$ testsprite-rs test run --id df-neg      # code: "echo boom >&2; exit 1"
+FAIL  df-neg  deliberately failing gate
+      command failed (exit 1): boom
+0/1 passed
+FAIL_DEMO_EXIT=1                   # gate correctly fails
+
+Structural coverage gaps:
+$ testsprite-rs coverage --gaps --path src --json
+total_functions: 345   uncovered: 342
+  gaps: main, run_agent, run_account, run_console_execute, run_project,
+        run_test, csv_field, encode_frame, ...
+
+Committed harness: dogfood/{tests.json, run.sh, README.md}
+Store (testsprite_tests/*.db) is gitignored + ephemeral; import is idempotent upsert.
