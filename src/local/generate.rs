@@ -22,17 +22,22 @@ pub async fn generate(
         )
     };
 
-    let summary = if let Some(from) = from {
-        let body = std::fs::read_to_string(from)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", from.display()))?;
+    let summary = if let Some(p) = from.filter(|p| p.is_file()) {
+        let body = std::fs::read_to_string(p)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
         let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", from.display()))?;
+            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
         if !value.is_object() {
-            anyhow::bail!("{} does not contain a JSON object", from.display());
+            anyhow::bail!("{} does not contain a JSON object", p.display());
         }
         value
     } else if let Some(instruction) = instruction {
         serde_json::json!({ "project_name": "local", "description": instruction })
+    } else if let Some(p) = from {
+        anyhow::bail!(
+            "--from expects a code-summary JSON file, not a directory ({}); pass --instruction instead",
+            p.display()
+        )
     } else {
         anyhow::bail!("pass --from <code_summary.json> or --instruction <text>")
     };

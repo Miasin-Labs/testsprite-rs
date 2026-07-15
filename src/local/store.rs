@@ -177,6 +177,24 @@ pub fn write_fix(
     Ok(path)
 }
 
+/// Materialize a stored test's `code` into a repo file (e.g.
+/// `crates/foo/tests/bar.rs`) so cargo/CI own it, instead of only running it
+/// ephemerally out of SQLite.
+pub async fn emit(root: &Path, id: &str, out: &Path) -> anyhow::Result<()> {
+    let test = load_one(root, id).await?;
+    let code = test.extra.get("code").and_then(Value::as_str).unwrap_or("");
+    if code.is_empty() {
+        bail!("test {id} has no `code` to emit");
+    }
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(out, code).with_context(|| format!("writing {}", out.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,4 +333,32 @@ mod tests {
         assert!(result.is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
+    #[tokio::test]
+    async fn emit_writes_stored_code_to_file() {
+        let root = crate::local::tmp_root();
+        add_value(&root, serde_json::json!({"id":"e1","title":"T","code":"fn t() {}"}))
+            .await
+            .unwrap();
+
+        let out = root.join("out").join("e1.rs");
+        emit(&root, "e1", &out).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "fn t() {}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn emit_without_code_errors() {
+        let root = crate::local::tmp_root();
+        add_value(&root, serde_json::json!({"id":"e2","title":"T"}))
+            .await
+            .unwrap();
+
+        let out = root.join("e2.rs");
+        let err = emit(&root, "e2", &out).await.unwrap_err();
+        assert!(err.to_string().contains("no `code` to emit"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
 }

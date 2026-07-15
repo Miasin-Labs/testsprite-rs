@@ -71,6 +71,10 @@ enum Command {
         /// Print a single JSON object instead of a human-readable report.
         #[arg(long)]
         json: bool,
+        /// Report structural units NOT referenced by any stored test yet,
+        /// instead of the full report.
+        #[arg(long)]
+        gaps: bool,
     },
     /// Run the suite as a CI gate: JUnit + JSON + best-effort gh PR comment; exit 1 on any failure.
     Gate {
@@ -263,6 +267,13 @@ enum TestCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Write a stored test's code to a file (cargo/CI can own it).
+    Emit {
+        #[arg()]
+        id: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -285,9 +296,14 @@ async fn main() -> Result<()> {
             server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
         }
         Command::Project { cmd } => run_project(cmd).await,
-        Command::Coverage { path, json } => {
-            let root = path.unwrap_or(std::env::current_dir()?);
-            let code = local::coverage::coverage(&root, json).await?;
+        Command::Coverage { path, json, gaps } => {
+            let scan = path.unwrap_or(std::env::current_dir()?);
+            let code = if gaps {
+                let root = std::env::current_dir()?;
+                local::coverage::gaps_report(&root, &scan, json).await?
+            } else {
+                local::coverage::coverage(&scan, json).await?
+            };
             std::process::exit(code);
         }
         Command::Gate { url, model } => {
@@ -472,6 +488,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Scaffold { kind, json } => {
             let code = local::scaffold::scaffold(&kind, json)?;
             std::process::exit(code);
+        }
+        TestCmd::Emit { id, out } => {
+            local::store::emit(&root, &id, &out).await?;
+            println!("wrote {}", out.display());
+            Ok(())
         }
     }
 }

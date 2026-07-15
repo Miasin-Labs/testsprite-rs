@@ -11,8 +11,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The 11 TestSprite tools, with names + descriptions matching the original
-/// (plus the 3 local conversational-agent tools).
+/// The 15 TestSprite tools (including the deterministic `testsprite_store_test`),
+/// plus the 3 local conversational-agent tools.
 fn tool_list() -> Value {
     json!({
         "tools": [
@@ -43,6 +43,15 @@ fn tool_list() -> Value {
             { "name": "testsprite_local_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch.",
               "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean")]) },
+            { "name": "testsprite_store_test",
+              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_local_generate when you can write the test yourself.",
+              "inputSchema": obj_schema(&[("title","string"),("kind","string"),("description","string"),("code","string")]) },
+            { "name": "testsprite_coverage_gaps",
+              "description": "List functions in the code surface that NO stored test references yet — the uncovered set to generate next. Loop this until empty for full coverage.",
+              "inputSchema": obj_schema(&[("path","string")]) },
+            { "name": "testsprite_emit_test",
+              "description": "Materialize a stored test's code into a repo file (e.g. crates/foo/tests/bar.rs) so cargo/CI own it — the repo-native alternative to ephemeral SQLite runs.",
+              "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
             { "name": "testsprite_agent_message",
               "description": "Talk to the local test agent: it proposes ONE action (generate/run) to approve.",
               "inputSchema": obj_schema(&[("conversation_id","string"),("message","string"),("model","string")]) },
@@ -123,6 +132,42 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let root = std::env::current_dir()?;
             let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None).await?;
             Ok(json!({ "results": results }))
+        }
+        "testsprite_store_test" => {
+            let root = std::env::current_dir()?;
+            let mut case = serde_json::Map::new();
+            for key in ["title", "kind", "description", "code", "spec"] {
+                if let Some(v) = args.get(key) {
+                    case.insert(key.to_string(), v.clone());
+                }
+            }
+            if case.is_empty() {
+                anyhow::bail!("testsprite_store_test needs at least a title + (spec or code)");
+            }
+            let id = crate::local::store::add_value(&root, serde_json::Value::Object(case)).await?;
+            Ok(json!({ "id": id, "stored": true }))
+        }
+        "testsprite_coverage_gaps" => {
+            let root = std::env::current_dir()?;
+            let scan = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => std::path::PathBuf::from(p),
+                None => root.clone(),
+            };
+            let report = crate::local::coverage::gaps(&root, &scan).await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "testsprite_emit_test" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: out"))?;
+            crate::local::store::emit(&root, id, std::path::Path::new(out)).await?;
+            Ok(json!({ "wrote": out }))
         }
         "testsprite_agent_message" => {
             let model = args

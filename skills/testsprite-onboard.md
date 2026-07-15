@@ -31,7 +31,10 @@ testsprite-rs project init --type backend --name "<repo>" --url <base-url>
 testsprite-rs test generate --instruction "cover <the key behaviors you found>"
 testsprite-rs test generate --cover        # one test per currently-uncovered function
 ```
-Or from your coding agent over MCP: **`testsprite_local_generate`**. Aim for
+Or from your coding agent over MCP: **`testsprite_local_generate`**. If you (the
+coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
+(hand over your `spec` or `code`) + `testsprite_local_run` — it runs deterministically
+with no OpenAI key. Aim for
 ~8–15 tests on the core behaviors; don't pad. Every assertion must name a
 **concrete, observable** outcome (status code, body field, element, count) — never
 "verify it works".

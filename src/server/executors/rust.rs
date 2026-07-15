@@ -21,6 +21,14 @@ impl Executor for RustExecutor {
 
     async fn run(&self, case: &Value, ctx: &ExecCtx) -> Outcome {
         let crate_dir = ctx.target.clone();
+        // Agent-provided code: compile + run it directly, no LLM needed.
+        if let Some(code) = case
+            .get("code")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.trim().is_empty())
+        {
+            return run_cargo_test(&crate_dir, code).await;
+        }
 
         // No LLM → smoke test: does the crate compile?
         let Some(llm) = ctx.llm.as_ref() else {

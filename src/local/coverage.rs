@@ -394,6 +394,104 @@ fn uncovered_names(units: &[Unit], rust_summary: Option<&serde_json::Value>) -> 
         .collect()
 }
 
+/// Cross-reference the structural surface against every STORED test: a unit
+/// is "covered" iff its name appears as a whole word (case-insensitive) in
+/// any stored test's title, description, spec, or code. Lets a caller loop
+/// "generate the uncovered ones" until this reports zero uncovered.
+#[derive(Debug, Clone, Serialize)]
+pub struct GapReport {
+    pub total: usize,
+    pub covered: usize,
+    pub uncovered: Vec<Unit>,
+}
+
+/// True iff `name` (case-insensitive) occurs in `haystack` as a whole word:
+/// the characters immediately before and after the match (if any) are not
+/// `[a-z0-9_]`. Empty names never match.
+fn mentions(haystack: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let needle = name.to_lowercase();
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(&needle) {
+        let idx = start + rel;
+        let end = idx + needle.len();
+        let before_ok = haystack[..idx].chars().next_back().map(|c| !is_word_char(c)).unwrap_or(true);
+        let after_ok = haystack[end..].chars().next().map(|c| !is_word_char(c)).unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+/// Compute [`GapReport`] for `scan`'s structural surface against `root`'s
+/// stored tests.
+pub async fn gaps(root: &Path, scan: &Path) -> anyhow::Result<GapReport> {
+    let units = structural_surface(scan)?;
+    let tests = crate::local::store::list(root).await?;
+
+    let mut haystack = String::new();
+    for t in &tests {
+        haystack.push_str(&t.title);
+        haystack.push('\n');
+        haystack.push_str(&t.description);
+        haystack.push('\n');
+        if let Some(spec) = &t.spec
+            && let Ok(s) = serde_json::to_string(spec)
+        {
+            haystack.push_str(&s);
+            haystack.push('\n');
+        }
+        if let Some(code) = t.extra.get("code").and_then(|v| v.as_str()) {
+            haystack.push_str(code);
+            haystack.push('\n');
+        }
+    }
+    let haystack = haystack.to_lowercase();
+
+    let mut covered = 0usize;
+    let mut uncovered = Vec::new();
+    for u in units.into_iter() {
+        if mentions(&haystack, &u.name) {
+            covered += 1;
+        } else {
+            uncovered.push(u);
+        }
+    }
+
+    Ok(GapReport {
+        total: covered + uncovered.len(),
+        covered,
+        uncovered,
+    })
+}
+
+/// Print [`gaps`]'s report (JSON or human) and return exit code 0.
+pub async fn gaps_report(root: &Path, scan: &Path, json: bool) -> anyhow::Result<i32> {
+    let report = gaps(root, scan).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+
+    println!(
+        "coverage gaps: {}/{} functions referenced by tests",
+        report.covered, report.total
+    );
+    for u in report.uncovered.iter().take(60) {
+        println!("  [uncovered] {}  {}:{}", u.name, u.file, u.line);
+    }
+    if report.uncovered.len() > 60 {
+        println!("  … and {} more", report.uncovered.len() - 60);
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,4 +574,41 @@ def classify(x):
         assert!(result.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
+    #[tokio::test]
+    async fn gaps_reports_covered_and_uncovered_units() {
+        let root = crate::local::tmp_root();
+        let scan = root.join("scan");
+        std::fs::create_dir_all(&scan).unwrap();
+        std::fs::write(
+            scan.join("lib.rs"),
+            r#"
+fn foo() -> i32 { 1 }
+fn bar() -> i32 { 2 }
+"#,
+        )
+        .unwrap();
+
+        crate::local::store::add_value(
+            &root,
+            serde_json::json!({"title": "t", "code": "assert_eq!(foo(), 1);"}),
+        )
+        .await
+        .unwrap();
+
+        let report = gaps(&root, &scan).await.unwrap();
+        assert_eq!(report.total, 2);
+        assert_eq!(report.covered, 1);
+        assert_eq!(report.uncovered.len(), 1);
+        assert_eq!(report.uncovered[0].name, "bar");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mentions_matches_whole_words_only() {
+        assert!(mentions("call foo() here", "foo"));
+        assert!(!mentions("foobar", "foo"));
+        assert!(!mentions("", "foo"));
+    }
+
 }

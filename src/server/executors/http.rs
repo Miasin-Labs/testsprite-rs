@@ -28,6 +28,19 @@ impl Executor for HttpExecutor {
                 code,
             };
         }
+        // Agent-provided code: run it directly, no LLM needed.
+        if let Some(code) = case
+            .get("code")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.trim().is_empty())
+        {
+            let (ok, err, c) = store::execute_python(code).await;
+            return Outcome {
+                passed: ok,
+                error: err,
+                code: c,
+            };
+        }
 
         // LLM: generate Python for the case, then run it via python3.
         let Some(llm) = ctx.llm.as_ref() else {

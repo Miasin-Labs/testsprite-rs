@@ -31,7 +31,9 @@ testsprite-rs test run --id <id> --json              # run one that covers the c
 testsprite-rs test generate --instruction "<the behavior you changed>"
 testsprite-rs test run --json
 ```
-Over MCP: `testsprite_local_run` (and `testsprite_local_generate`). Prefer a
+Over MCP: `testsprite_local_run` (and `testsprite_local_generate`). If you can
+write the covering test yourself, prefer `testsprite_store_test` (`spec` or
+`code`) + `testsprite_local_run` — deterministic, no OpenAI key needed. Prefer a
 single self-contained test; assert concrete, observable outcomes.
 
 ### 3. Read the verdict, act on failure
