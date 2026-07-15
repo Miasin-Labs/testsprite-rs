@@ -258,6 +258,13 @@ values via `variables.json`.
 tested with zero manual export: boot it (`--serve`), then `test generate --doc
 http://localhost:<port>/api-docs/openapi.json`.
 
+**Spec-case auth** — `execute_spec` sends no headers by default, so a protected
+API 401s every case. `project set-var authToken <token>` (or `bearer`) makes
+`execute_spec` attach `Authorization: Bearer <token>` to every spec run (the token
+stays in gitignored `variables.json`, never in the stored case). A spec case may
+also carry a `headers: {..}` object (sent verbatim). This is what lets deterministic
+Postman/OpenAPI cases actually pass against an OAuth/JWT API.
+
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
 TestSprite ships in **two client generations**; `testsprite-rs` currently mirrors

@@ -101,7 +101,7 @@ pub async fn execute_spec(spec: &EndpointSpec, base_url: &str, vars: &HashMap<St
     );
     let client = reqwest::Client::new();
 
-    let req = match spec.method.as_str() {
+    let mut req = match spec.method.as_str() {
         "GET" => client.get(&url),
         "DELETE" => client.delete(&url),
         m => {
@@ -112,6 +112,20 @@ pub async fn execute_spec(spec: &EndpointSpec, base_url: &str, vars: &HashMap<St
             }
         }
     };
+
+    // Auth: a project-level bearer token (`project set-var authToken <t>` or
+    // `bearer`) goes on every spec run, so protected endpoints aren't just 401.
+    // Per-spec `headers` add/override.
+    if let Some(tok) = vars.get("authToken").or_else(|| vars.get("bearer")) {
+        req = req.bearer_auth(tok);
+    }
+    if let Some(headers) = spec.headers.as_ref().and_then(Value::as_object) {
+        for (k, v) in headers {
+            if let Some(vs) = v.as_str() {
+                req = req.header(k.as_str(), vs);
+            }
+        }
+    }
 
     match req.timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(resp) => {

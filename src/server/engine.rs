@@ -18,6 +18,8 @@ pub struct EndpointSpec {
     pub body: Option<Value>,
     #[serde(default)]
     pub expect_status: Option<u16>,
+    #[serde(default)]
+    pub headers: Option<Value>,
 }
 
 /// A planned case + its executable spec.
@@ -48,6 +50,7 @@ fn parse_endpoint(v: &Value) -> Option<EndpointSpec> {
             .get("expect_status")
             .and_then(|s| s.as_u64())
             .map(|s| s as u16),
+        headers: v.get("headers").cloned().filter(Value::is_object),
     })
 }
 
@@ -142,13 +145,29 @@ pub fn python_for(spec: &EndpointSpec, base_url: &str, vars: &HashMap<String, St
         spec.method.to_lowercase(),
         crate::report::sanitize_filename(&spec.path).to_lowercase()
     );
+    let mut hdrs: Vec<String> = Vec::new();
+    if vars.contains_key("authToken") || vars.contains_key("bearer") {
+        hdrs.push("\"Authorization\": \"Bearer <authToken>\"".to_string());
+    }
+    if let Some(map) = spec.headers.as_ref().and_then(Value::as_object) {
+        for (k, v) in map {
+            if let Some(vs) = v.as_str() {
+                hdrs.push(format!("{k:?}: {vs:?}"));
+            }
+        }
+    }
+    let hdr = if hdrs.is_empty() {
+        String::new()
+    } else {
+        format!(", headers={{{}}}", hdrs.join(", "))
+    };
     let call = match (spec.method.as_str(), &spec.body) {
-        ("GET", _) => format!("requests.get(\"{url}\", timeout=30)"),
+        ("GET", _) => format!("requests.get(\"{url}\"{hdr}, timeout=30)"),
         (m, Some(b)) => format!(
-            "requests.request(\"{m}\", \"{url}\", json={}, timeout=30)",
+            "requests.request(\"{m}\", \"{url}\", json={}{hdr}, timeout=30)",
             py_literal(b)
         ),
-        (m, None) => format!("requests.request(\"{m}\", \"{url}\", timeout=30)"),
+        (m, None) => format!("requests.request(\"{m}\", \"{url}\"{hdr}, timeout=30)"),
     };
     let assertion = match spec.expect_status {
         Some(s) => format!("assert r.status_code == {s}, f\"expected {s}, got {{r.status_code}}\""),

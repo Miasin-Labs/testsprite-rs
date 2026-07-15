@@ -1,0 +1,18 @@
+Spec-case auth + per-spec headers (2026-07-15)
+==============================================
+execute_spec sent no headers/auth, so every protected endpoint on a real API
+(OAuth/JWT like ers-rs) 401'd -> deterministic spec cases were useless. Now:
+- project-level bearer: `project set-var authToken <t>` (or `bearer`) -> execute_spec
+  adds `Authorization: Bearer <t>` to every spec run (token lives in gitignored
+  variables.json; NOT stored in the case body).
+- per-spec headers: EndpointSpec gains `headers: {..}` -> sent verbatim.
+- python_for artifact reflects headers + a Bearer <authToken> PLACEHOLDER (no
+  secret embedded).
+
+Live e2e (app: GET /me needs `Authorization: Bearer secret-token-xyz`):
+  test run --id t1                         -> 401 -> FAIL 0/1
+  project set-var authToken secret-token-xyz
+  test run --id t1                         -> Bearer sent -> 200 -> PASS 1/1
+
+Now a real authenticated API works: set the token once, every generated
+Postman/OpenAPI spec case authenticates. clippy 0, cargo test 81/81.

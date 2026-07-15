@@ -50,6 +50,9 @@ black-box HTTP tests.
 inject the auth header itself) — otherwise authenticated flows come back `blocked`,
 not `failed`, and you'll chase a phantom bug. Use a dedicated test user (e.g.
 `you+test@example.com`, a known OTP/password) and configure it once so runs stay green.
+For `spec`/backend cases, set a bearer once with `testsprite-rs project set-var
+authToken <token>` — `execute_spec` then sends `Authorization: Bearer <token>` on
+every run (or give a case its own `spec.headers`).
 
 ### 4. Smoke-run a few
 ```bash
