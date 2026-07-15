@@ -126,6 +126,24 @@ enum TestCmd {
         #[arg(long)]
         fix: bool,
     },
+    /// Re-run stored tests; --heal regenerates fragility-failing LLM tests.
+    Rerun {
+        /// Re-run only this test id (repeatable); omit to re-run every test.
+        #[arg(long)]
+        id: Vec<String>,
+        /// Override the project's target URL for this run.
+        #[arg(long)]
+        url: Option<String>,
+        /// OpenAI model for failure analysis and healing.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        /// Regenerate and re-run cases whose failure is diagnosed as fragility.
+        #[arg(long)]
+        heal: bool,
+        /// Print a single JSON array of results instead of PASS/FAIL lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate test cases with the LLM (needs an OpenAI key).
     Generate {
         /// Path to a code-summary JSON file.
@@ -235,6 +253,16 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             fix,
         } => {
             let code = local::run::run(&root, &id, url.as_deref(), &model, json, fix).await?;
+            std::process::exit(code);
+        }
+        TestCmd::Rerun {
+            id,
+            url,
+            model,
+            heal,
+            json,
+        } => {
+            let code = local::rerun::rerun(&root, &id, url.as_deref(), &model, heal, json).await?;
             std::process::exit(code);
         }
         TestCmd::Generate {

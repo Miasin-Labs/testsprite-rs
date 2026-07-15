@@ -239,6 +239,23 @@ impl LlmClient {
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("fix proposal was not valid JSON")
     }
+    /// Regenerate an IMPROVED test case for a FRAGILITY failure (selector/wait/data
+    /// drift) so it passes without masking a real bug. Returns an improved case JSON
+    /// object (same shape as the input case: {title,description,kind?,spec?}).
+    pub async fn heal_test(&self, case: &Value, code: &str, error: &str) -> Result<Value> {
+        let system = "You are TestSprite's auto-heal engine. The given test failed due to TEST \
+            FRAGILITY (a selector/wait/data/spec drift), NOT a real product bug. Return an IMPROVED \
+            version of the SAME test case as JSON only (same keys as the input: title, description, \
+            kind, and spec if present) that adapts to what the app actually does WITHOUT weakening \
+            the assertion into something that would pass even for a broken app. Respond with the \
+            case JSON object only.";
+        let user = format!(
+            "Failing case:\n{}\n\nGenerated code:\n{}\n\nFailure:\n{}",
+            serde_json::to_string_pretty(case)?, code, error
+        );
+        let out = self.chat(system, &user, true).await?;
+        serde_json::from_str(&out).context("healed case was not valid JSON")
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.

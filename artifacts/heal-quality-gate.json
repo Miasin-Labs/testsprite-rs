@@ -1,0 +1,40 @@
+{
+  "architectReview": {
+    "architectureStatus": "CLEAR",
+    "productStatus": "CLEAR",
+    "codeStatus": "CLEAR",
+    "recommendation": "APPROVE",
+    "evidence": "Leader review of src/local/rerun.rs (read in full) + src/server/llm.rs heal_test + main.rs wiring. The critical safety semantic is correct and load-bearing: heal is gated on `heal && verdict == \"fragility\" && llm.is_some()`; a `bug` or `env` verdict (or heal disabled / no key) falls straight through to a plain FAIL and counts toward the exit code — a real bug can never be turned green. On a successful heal_test the original id is force-preserved before store::add_value (overwrites tests/<id>.json in place), the seam re-runs the healed case ONCE, and `healed` is set only if that re-run actually passes (a still-broken case reports STILL-FAILING, never a false HEALED). All error paths (analyze/heal/store) are best-effort tracing::warn! + treat as un-healed failure, matching run.rs. No slop, no duplication beyond the shared setup, idiomatic Rust (let-chains). Reuses ExecCtx/for_kind/LlmClient — no forked logic.",
+    "commands": ["read src/local/rerun.rs", "cargo build", "cargo clippy --all-targets", "cargo test", "live heal e2e"],
+    "blockers": []
+  },
+  "executorQa": {
+    "status": "passed",
+    "e2eStatus": "passed",
+    "redTeamStatus": "passed",
+    "evidence": "Two complementary LIVE runs with a real OpenAI key prove the two guarantees. (1) Anti-masking guard (artifacts/heal-e2e.txt): a spec expecting 201 while the app correctly returns 200 was classified `[bug]` by analyze_failure, so `test rerun --heal` REFUSED to heal it — it stayed FAIL, exit 1, and the case on disk was unchanged (a real behavioral discrepancy is never healed into green). (2) Heal-path trigger (executor 6-AutoHeal live smoke): an unreachable target classified `fragility` DID trigger heal_test (it corrected the case), store::add_value overwrote in place (id preserved), the seam re-ran once, and because the target was still unreachable it correctly reported STILL-FAILING (exit 1) — no false HEALED. build clean, clippy 0, cargo test 13/13.",
+    "e2eCommands": ["testsprite-rs test rerun --id h1", "testsprite-rs test rerun --id h1 --heal"],
+    "redTeamCommands": ["heal a failure the LLM deems a real bug (must NOT heal, stays FAIL [bug])", "heal a fragility that stays broken after healing (must report STILL-FAILING, never HEALED)"],
+    "artifactRefs": [
+      { "id": "heal", "kind": "package-test-report", "path": "artifacts/heal-e2e.txt", "description": "live: a 200-vs-201 discrepancy deemed [bug] is NOT healed (anti-masking guard), stays FAIL/exit 1" }
+    ],
+    "contractCoverage": [
+      { "id": "cc1", "contractRef": "G003: test rerun --heal heals fragility only, never masks a bug", "obligation": "fragility -> heal + re-run; bug/env -> plain FAIL; healed only if re-run passes", "status": "covered", "surfaceEvidenceRefs": ["s1"], "adversarialCaseRefs": ["a1", "a2"] }
+    ],
+    "surfaceEvidence": [
+      { "id": "s1", "contractRef": "testsprite-rs test rerun (compiled package) with a live key", "surface": "package", "invocation": "target/debug/testsprite-rs test rerun --id <id> [--heal]", "verdict": "passed", "artifactRefs": ["heal"] }
+    ],
+    "adversarialCases": [
+      { "id": "a1", "contractRef": "G003: never mask a real bug", "scenario": "a failure the LLM classifies as a real bug", "expectedBehavior": "heal is skipped; test stays FAIL with [bug]; exit 1; case on disk unchanged", "verdict": "passed", "artifactRefs": ["heal"] },
+      { "id": "a2", "contractRef": "G003: no false heal", "scenario": "a fragility that is still broken after the heal attempt", "expectedBehavior": "reports STILL-FAILING (not HEALED), exit 1", "verdict": "passed", "artifactRefs": ["heal"] }
+    ],
+    "blockers": []
+  },
+  "iteration": {
+    "status": "passed",
+    "evidence": "Single pass; both guarantees verified live; no findings requiring a fix loop.",
+    "fullRerun": true,
+    "rerunCommands": ["cargo build", "cargo clippy --all-targets", "cargo test"],
+    "blockers": []
+  }
+}

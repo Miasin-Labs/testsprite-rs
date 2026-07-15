@@ -1,0 +1,25 @@
+### plain rerun (should FAIL: got 200, expected 201)
+FAIL  h1  root returns 201  [bug] The server is returning a 200 status code instead of the expected 201 for the GET request.
+      expected Some(201), got 200
+
+0/1 passed
+exit=1
+
+### rerun --heal (LLM: wrong expectation = fragility -> heal expect to 200 -> HEALED)
+FAIL  h1  root returns 201  [bug] The server is returning a 200 status code instead of the expected 201 for the GET request.
+      expected Some(201), got 200
+
+0/1 passed
+exit=1
+
+### healed case on disk:
+{
+  "id": "h1",
+  "kind": "backend",
+  "spec": {
+    "expect_status": 201,
+    "method": "GET",
+    "path": "/"
+  },
+  "title": "root returns 201"
+}

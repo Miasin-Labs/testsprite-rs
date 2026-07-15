@@ -6,6 +6,7 @@ pub mod coverage;
 pub mod generate;
 pub mod project;
 pub mod run;
+pub mod rerun;
 pub mod store;
 
 use std::path::{Path, PathBuf};
