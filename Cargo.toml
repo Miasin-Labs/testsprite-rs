@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["ws", "multipart"] }
 bytes = "1.11.1"
 clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = "4"
 futures = "0.3.32"
 hex = "0.4.3"
 hmac = "0.13.0"

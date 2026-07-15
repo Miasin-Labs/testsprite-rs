@@ -21,7 +21,7 @@ mod tunnel;
 mod types;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -118,6 +118,11 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Generate a shell completion script (bash|zsh|fish|elvish|powershell).
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -181,7 +186,11 @@ enum TestCmd {
         file: PathBuf,
     },
     /// List stored test cases.
-    List,
+    List {
+        /// Output format: text | json | csv | ndjson.
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
     /// Run stored tests locally through the executor seam (all, or only --id).
     Run {
         /// Run only this test id (repeatable); omit to run every test.
@@ -296,6 +305,17 @@ enum TestCmd {
         #[arg()]
         file: PathBuf,
     },
+    /// Replay a test N times and report a stability score (auth/infra 'blocked' runs are excluded, never scored as flaky).
+    Flaky {
+        #[arg()]
+        id: String,
+        #[arg(long, default_value_t = 5)]
+        runs: usize,
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -350,6 +370,11 @@ async fn main() -> Result<()> {
             std::process::exit(if regression { 1 } else { 0 });
         }
         Command::Agent { cmd } => run_agent(cmd).await,
+        Command::Completions { shell } => {
+            let mut cmd = <Cli as CommandFactory>::command();
+            clap_complete::generate(shell, &mut cmd, "testsprite-rs", &mut std::io::stdout());
+            Ok(())
+        }
         #[cfg(feature = "discord")]
         Command::Discord { token } => discord::run(token).await,
     }
@@ -438,9 +463,49 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             println!("added test {id}");
             Ok(())
         }
-        TestCmd::List => {
-            for t in local::store::list(&root).await? {
-                println!("{}  {}", t.id, t.title);
+        TestCmd::List { output } => {
+            let tests = local::store::list(&root).await?;
+            let kind_str = |t: &local::LocalTest| -> String {
+                t.kind
+                    .as_ref()
+                    .and_then(|k| serde_json::to_value(k).ok())
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            };
+            match output.as_str() {
+                "text" => {
+                    for t in &tests {
+                        println!("{}  {}", t.id, t.title);
+                    }
+                }
+                "json" => {
+                    let rows: Vec<serde_json::Value> = tests
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({ "id": t.id, "title": t.title, "kind": kind_str(t) })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                }
+                "csv" => {
+                    println!("id,title,kind");
+                    for t in &tests {
+                        println!(
+                            "{},{},{}",
+                            csv_field(&t.id),
+                            csv_field(&t.title),
+                            csv_field(&kind_str(t))
+                        );
+                    }
+                }
+                "ndjson" => {
+                    for t in &tests {
+                        let row =
+                            serde_json::json!({ "id": t.id, "title": t.title, "kind": kind_str(t) });
+                        println!("{}", serde_json::to_string(&row)?);
+                    }
+                }
+                other => anyhow::bail!("invalid --output '{other}': expected text|json|csv|ndjson"),
             }
             Ok(())
         }
@@ -546,5 +611,19 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             println!("imported {} test(s)", ids.len());
             Ok(())
         }
+        TestCmd::Flaky { id, runs, model, json } => {
+            let code = local::flaky::flaky_report(&root, &id, runs, &model, json).await?;
+            std::process::exit(code);
+        }
+    }
+}
+
+/// Quote a CSV field in double-quotes (doubling any internal quotes) when it
+/// contains a comma, quote, or newline; otherwise return it unquoted.
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }

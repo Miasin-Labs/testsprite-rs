@@ -7,6 +7,7 @@ pub mod coverage;
 pub mod db;
 pub mod diff;
 pub mod doctor;
+pub mod flaky;
 pub mod gate;
 pub mod lint;
 pub mod generate;
