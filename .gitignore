@@ -4,3 +4,7 @@
 /itest
 *.tgz
 /.gjc/
+/research/
+/what_is_testsprite.md
+/token.key
+/testsprite_tests/

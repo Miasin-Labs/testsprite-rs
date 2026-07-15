@@ -167,9 +167,15 @@ Minor, optional items (in priority order):
 4. **Not slop:** `log_sink` / `test_summary` in `api.rs` are intentional no-op
    acks for endpoints the client calls but a local backend needn't process.
    Leave them.
-5. **Unverified end-to-end:** the `frontend` (Playwright) and `rust` (`cargo
-   test`) executors build with deterministic fallbacks but were never run e2e.
-   Exercise them before claiming those modalities work.
+5. **`frontend` executor — verified e2e via Docker.** The browser executor runs
+   chromium/firefox on the host, and **webkit** (which needs system libs the host
+   often lacks) inside a small derived Playwright image (`server/executors/
+   browser.rs::ensure_playwright_image`, auto-built once from the official base +
+   the `playwright` npm package). `test run --browser webkit` auto-routes to
+   Docker; `TESTSPRITE_BROWSER_DOCKER=1` forces any browser into the container
+   (host-independent rescue). All three verified against a live page (webkit/
+   chromium/firefox PASS; dead URL → real Playwright error). The `rust` executor
+   still has only the deterministic `cargo build` fallback exercised.
 
 Recently landed (branch `feat/cli-v3-parity`): `server/llm.rs` now omits
 `temperature` for models that reject an explicit value (gpt-5/6, o1/o3/o4).
@@ -243,7 +249,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing (in `testsprite-rs` today).
 | `test plan put <id> --steps` | replace FE steps | `PUT /tests/{id}/plan-steps` | ❌ |
 | `test code get\|put <id> --code-file --expected-version` | BE code (etag concurrency) | `…/code` | ❌ |
 | `test steps <id>` | recorded steps | `GET /tests/{id}/steps` | ❌ |
-| `test result <id> [--history]` | latest/historical result | `…/result` | ❌ |
+| `test result <id> [--history]` | latest/historical result | `…/result` | 🟡 (`test history <id> [--json]` — local append-only runs; + MCP `testsprite_run_history`) |
 | `test run <id> [--target-url --wait]` | run one | trigger + poll | 🟡 (batch-only) |
 | `test run --all --project` | wave-ordered BE batch | batch | ❌ |
 | `test rerun <id> [--skip-dependencies]` | replay + dep closure | rerun | ❌ |

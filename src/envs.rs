@@ -17,6 +17,15 @@ pub fn testsprite_url() -> String {
     env::var("TESTSPRITE_URL").unwrap_or_else(|_| "https://www.testsprite.com".to_string())
 }
 
+/// Playwright Docker image for browser tests the host can't run natively
+/// (notably webkit — it needs system libs the host may lack). This is a small
+/// derived image (official base + the `playwright` npm package the base omits),
+/// auto-built on first use. Override to point at a self-managed image.
+pub fn playwright_image() -> String {
+    env::var("TESTSPRITE_PLAYWRIGHT_IMAGE")
+        .unwrap_or_else(|_| "testsprite-rs-playwright:1.60.0".to_string())
+}
+
 /// The user's API key (encrypted AEAD token, `sk-user-...`).
 pub fn api_key() -> Option<String> {
     env::var("TSMCP_API_KEY")
