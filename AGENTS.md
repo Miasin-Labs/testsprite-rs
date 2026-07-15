@@ -45,10 +45,10 @@ diagram + data model in [`docs/FLOW.md`](docs/FLOW.md).
 
 ```bash
 testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:8080
-testsprite-rs test add --file plan.json      # → testsprite_tests/tests/<id>.json
+testsprite-rs test add --file plan.json      # → SQLite (testsprite_tests/testsprite.db)
 testsprite-rs test list
 testsprite-rs test run                        # all tests; --id <id> for a subset
-#   exit 0 if every test passed else 1; writes testsprite_tests/results/<id>.json
+#   exit 0 if every test passed else 1; appends a row to the runs table (append-only history)
 testsprite-rs test generate --instruction "…" --type backend  # LLM plans cases (needs OPENAI_API_KEY)
 testsprite-rs test run --json --fix                            # LLM code-gen + failure analysis + fix patch
 #   with a key: spec-less {title,description} cases get LLM-generated code; failures

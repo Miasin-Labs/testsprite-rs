@@ -82,6 +82,31 @@ CREATE TABLE IF NOT EXISTS runs (
     analysis     TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS messages (
+    msg_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS messages_conv_idx ON messages (conversation_id, msg_id);
+CREATE TABLE IF NOT EXISTS pending_actions (
+    action_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    args            TEXT NOT NULL DEFAULT '{}',
+    summary         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    result          TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS pending_actions_conv_idx ON pending_actions (conversation_id, action_id);
 CREATE INDEX IF NOT EXISTS runs_test_id_idx ON runs (test_id, run_id DESC);
 ";
 
@@ -95,12 +120,13 @@ mod tests {
         // Two opens on the same root must both succeed (schema is IF NOT EXISTS).
         let p1 = open(&root).await.expect("first open");
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('project','tests','runs')",
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN \
+             ('project','tests','runs','conversations','messages','pending_actions')",
         )
         .fetch_one(&p1)
         .await
         .expect("query tables");
-        assert_eq!(count, 3, "all three tables should exist");
+        assert_eq!(count, 6, "all six tables should exist");
         drop(p1);
         open(&root).await.expect("second open must be idempotent");
         assert!(db_path(&root).exists(), "db file should exist on disk");

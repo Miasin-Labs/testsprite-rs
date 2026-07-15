@@ -87,9 +87,9 @@ Full diagram in [`docs/FLOW.md`](docs/FLOW.md).
 
 ```bash
 testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:8080
-testsprite-rs test add --file plan.json          # → testsprite_tests/tests/<id>.json
+testsprite-rs test add --file plan.json          # → SQLite (testsprite_tests/testsprite.db)
 testsprite-rs test list
-testsprite-rs test run                            # exit 0 all-pass else 1; writes results/<id>.json
+testsprite-rs test run                            # exit 0 all-pass else 1; appends a runs row
 ```
 
 A test case is just JSON; the **backend deterministic path needs no key**:

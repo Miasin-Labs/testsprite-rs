@@ -99,6 +99,46 @@ enum Command {
         #[arg(long)]
         current: PathBuf,
     },
+    /// Conversational test agent — proposes ONE action (generate/run) that
+    /// must be approved before it executes. No cloud; DB-backed threads.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Send a message; the agent replies and may propose one pending action.
+    Message {
+        /// Existing conversation id to continue (omit to start a new one).
+        #[arg(long)]
+        conversation: Option<String>,
+        /// OpenAI model for the conversational planner.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        /// The message text (joined from remaining words).
+        #[arg(trailing_var_arg = true, required = true)]
+        message: Vec<String>,
+    },
+    /// Approve (default) or reject a pending action by id.
+    Approve {
+        /// Conversation id the action belongs to.
+        conversation: String,
+        /// Pending action id (from `agent message` or `agent history`).
+        action_id: i64,
+        /// Reject instead of approving.
+        #[arg(long)]
+        reject: bool,
+        /// OpenAI model used when the action executes.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+    },
+    /// Show a conversation's messages and pending actions.
+    History {
+        /// Conversation id.
+        conversation: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -261,6 +301,40 @@ async fn main() -> Result<()> {
                 println!("OK (within threshold {:.4})", local::visual::REGRESSION_THRESHOLD);
             }
             std::process::exit(if regression { 1 } else { 0 });
+        }
+        Command::Agent { cmd } => run_agent(cmd).await,
+    }
+}
+
+async fn run_agent(cmd: AgentCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    match cmd {
+        AgentCmd::Message {
+            conversation,
+            model,
+            message,
+        } => {
+            let text = message.join(" ");
+            let out =
+                local::agent::message(&root, conversation.as_deref(), &text, &model).await?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        AgentCmd::Approve {
+            conversation,
+            action_id,
+            reject,
+            model,
+        } => {
+            let out =
+                local::agent::resolve(&root, &conversation, action_id, !reject, &model).await?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        AgentCmd::History { conversation } => {
+            let out = local::agent::history(&root, &conversation).await?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
         }
     }
 }

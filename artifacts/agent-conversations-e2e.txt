@@ -1,0 +1,20 @@
+### live LLM agentic loop (generate -> approve -> run -> approve -> history)
+1) propose: I will create a new backend test that sends a GET request to the root endpoint and expects an HTTP 404 response. || pending generate # 1
+2) approve generate: Generated 2 test(s).
+3) approve run: Ran 2 test(s): 2 passed, 0 failed.
+4) history pendingActions shape:
+[
+  {
+    "id": 1,
+    "kind": "generate",
+    "status": "applied",
+    "summary": "This will synthesize a new test case for the specified endpoint."
+  },
+  {
+    "id": 2,
+    "kind": "run",
+    "status": "applied",
+    "summary": "run all stored tests to verify their behavior"
+  }
+]
+5) DB: 2 tests, 2 runs, 6 messages

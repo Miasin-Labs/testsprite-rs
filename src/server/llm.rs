@@ -271,6 +271,21 @@ impl LlmClient {
         let plan = v.get("plan").cloned().unwrap_or(v);
         plan.as_array().cloned().ok_or_else(|| anyhow!("cover plan was not an array"))
     }
+    /// Propose the next single conversational action: `generate`, `run`, or `none`.
+    /// Returns the raw JSON `{assistant, action{kind,instruction?,cover?,ids?,summary}}`.
+    pub async fn plan_action(&self, history: &str, user_msg: &str, tests: &Value) -> Result<Value> {
+        let system = "You are TestSprite's conversational test agent, embedded in a coding tool via MCP. \
+            Based on the conversation and the user's latest message, choose exactly ONE next action to \
+            PROPOSE (the user approves before it runs). Actions: `generate` (synthesize new test cases \
+            from an instruction; set cover=true to instead target currently-uncovered functions), `run` \
+            (execute stored tests; empty ids = all), or `none` (greeting/question needing no test action). \
+            Respond JSON only: {\"assistant\":\"one or two sentences to the user\",\"action\":{\"kind\":\
+            \"generate|run|none\",\"instruction\":\"...\",\"cover\":false,\"ids\":[],\"summary\":\
+            \"imperative one-line description of what approving does\"}}.";
+        let user = format!("Conversation so far:\n{history}\n\nStored tests:\n{tests}\n\nUser: {user_msg}");
+        let out = self.chat(system, &user, true).await?;
+        serde_json::from_str(&out).context("plan_action was not valid JSON")
+    }
 }
 
 /// Remove ```python ... ``` fences if the model added them.

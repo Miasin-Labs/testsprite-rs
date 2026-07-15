@@ -11,7 +11,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The 8 TestSprite tools, with names + descriptions matching the original.
+/// The 11 TestSprite tools, with names + descriptions matching the original
+/// (plus the 3 local conversational-agent tools).
 fn tool_list() -> Value {
     json!({
         "tools": [
@@ -42,6 +43,15 @@ fn tool_list() -> Value {
             { "name": "testsprite_local_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch.",
               "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean")]) },
+            { "name": "testsprite_agent_message",
+              "description": "Talk to the local test agent: it proposes ONE action (generate/run) to approve.",
+              "inputSchema": obj_schema(&[("conversation_id","string"),("message","string"),("model","string")]) },
+            { "name": "testsprite_agent_approve",
+              "description": "Approve (or reject) a pending agent action by id; executes the pipeline.",
+              "inputSchema": obj_schema(&[("conversation_id","string"),("action_id","number"),("approve","boolean"),("model","string")]) },
+            { "name": "testsprite_agent_history",
+              "description": "Show a conversation's messages and pending actions.",
+              "inputSchema": obj_schema(&[("conversation_id","string")]) },
         ]
     })
 }
@@ -113,6 +123,44 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let root = std::env::current_dir()?;
             let results = crate::local::run::run_collect(&root, &ids, None, model, fix, None).await?;
             Ok(json!({ "results": results }))
+        }
+        "testsprite_agent_message" => {
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let root = std::env::current_dir()?;
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: message"))?;
+            let conversation_id = args.get("conversation_id").and_then(|v| v.as_str());
+            crate::local::agent::message(&root, conversation_id, message, model).await
+        }
+        "testsprite_agent_approve" => {
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let root = std::env::current_dir()?;
+            let conversation_id = args
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: conversation_id"))?;
+            let action_id = args
+                .get("action_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: action_id"))?;
+            let approve = args.get("approve").and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::local::agent::resolve(&root, conversation_id, action_id, approve, model).await
+        }
+        "testsprite_agent_history" => {
+            let root = std::env::current_dir()?;
+            let conversation_id = args
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: conversation_id"))?;
+            crate::local::agent::history(&root, conversation_id).await
         }
         other => anyhow::bail!("Unknown tool: {other}"),
     }

@@ -15,7 +15,7 @@ flowchart LR
   D -->|frontend| P["Playwright"]
   D -->|mcp| M["stdio JSON-RPC"]
   D -->|rust| R["cargo test"]
-  H --> V["PASS / FAIL<br/>+ results/&lt;id&gt;.json"]
+  H --> V["PASS / FAIL<br/>+ runs row (sqlite)"]
   P --> V
   M --> V
   R --> V
@@ -24,27 +24,31 @@ flowchart LR
 ## The three steps
 
 1. **setup** — `testsprite-rs project init --type backend --name myapp --url http://127.0.0.1:8080`
-   writes `testsprite_tests/project.json`.
+   writes the project row into `testsprite_tests/testsprite.db`.
 2. **add** — `testsprite-rs test add --file plan.json` validates the JSON and
-   stores it at `testsprite_tests/tests/<id>.json` (an `id` is minted if absent).
+   stores it in SQLite (`testsprite_tests/testsprite.db`, an `id` is minted if absent).
    `testsprite-rs test list` shows what you have.
 3. **run / validate** — `testsprite-rs test run` (all, or `--id <id>`) executes
    each stored test **locally** through the executor seam, prints one PASS/FAIL
-   line per test, writes `testsprite_tests/results/<id>.json`, and exits `0` if
+   line per test, appends a row to the `runs` table (append-only history), exits `0` if
    every test passed else `1`.
 
-## On-disk layout (all JSON, all local)
+## On-disk layout (one SQLite DB, all local)
+
+Storage is a single SQLite database — `testsprite_tests/testsprite.db` (sqlx,
+WAL) — not loose JSON files. Test JSON round-trips verbatim in `tests.body`.
 
 ```mermaid
 flowchart TB
-  subgraph fs["testsprite_tests/"]
-    PJ["project.json<br/>name · kind · targetUrl"]
-    T["tests/&lt;id&gt;.json<br/>id · title · description · kind? · spec?"]
-    RS["results/&lt;id&gt;.json<br/>id · passed · error · code"]
+  subgraph fs["testsprite_tests/testsprite.db (sqlite)"]
+    PJ["project<br/>name · kind · targetUrl"]
+    T["tests<br/>id · title · kind · body(json)"]
+    RS["runs (append-only)<br/>test_id · passed · verdict · failureKind · error"]
+    CV["conversations · messages · pending_actions"]
   end
   PJ -->|kind + target| RUN["test run"]
   T -->|one case each| RUN
-  RUN --> RS
+  RUN -->|append a row| RS
 ```
 
 ## What `test run` actually does (the seam, reused)
@@ -58,7 +62,7 @@ sequenceDiagram
   participant Store
   participant Seam
   participant App
-  CLI->>Store: load project.json + tests
+  CLI->>Store: load project + tests (sqlite)
   loop each test
     CLI->>Seam: for_kind(kind).run(case, ctx llm=None)
     Seam->>App: HTTP request built from spec
