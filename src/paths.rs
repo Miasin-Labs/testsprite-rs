@@ -91,5 +91,26 @@ mod tests {
             p.test_report(),
             std::path::PathBuf::from("/repo/testsprite_tests/testsprite-mcp-test-report.md")
         );
+        assert_eq!(
+            p.tmp_dir(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp")
+        );
+        assert_eq!(
+            p.raw_prd_dir(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp/prd_files")
+        );
+        assert_eq!(
+            p.test_results(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp/test_results.json")
+        );
+        assert_eq!(
+            p.raw_report(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp/raw_report.md")
+        );
+        assert_eq!(
+            p.execution_lock(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp/execution.lock")
+        );
+        assert_eq!(p.test_code_dir(), p.dir());
     }
 }

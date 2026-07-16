@@ -608,7 +608,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{plan_steps_body, wrap_script};
+    use super::{plan_steps_body, resolve_node_path, use_docker, wrap_script};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn wrap_script_always_screenshots_when_a_path_is_given() {
@@ -694,5 +696,60 @@ mod tests {
         );
         assert!(body.contains("button[type=submit]"), "{body}");
         assert!(body.contains("Dashboard"), "{body}");
+    }
+
+    #[test]
+    fn plan_steps_compile_navigation_and_unsupported_steps() {
+        let case = json!({
+            "planSteps": [
+                {"action":"goto","url":"/settings"},
+                {"action":"mystery"},
+                42,
+                "Navigate to Dashboard"
+            ]
+        });
+        let body = plan_steps_body(&case, &HashMap::new(), None).unwrap();
+        assert!(body.contains("page.goto(\"/settings\""), "{body}");
+        assert!(body.contains("unsupported plan step"), "{body}");
+        assert!(body.contains("skip unsupported step 3"), "{body}");
+        assert!(body.contains("waitForLoadState"), "{body}");
+    }
+
+    #[test]
+    fn docker_routing_defaults_to_webkit_and_honors_force_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TESTSPRITE_BROWSER_DOCKER");
+        }
+        assert!(use_docker("webkit"));
+        assert!(!use_docker("chromium"));
+        unsafe {
+            std::env::set_var("TESTSPRITE_BROWSER_DOCKER", "yes");
+        }
+        assert!(use_docker("chromium"));
+        unsafe {
+            std::env::set_var("TESTSPRITE_BROWSER_DOCKER", "no");
+        }
+        assert!(!use_docker("webkit"));
+        unsafe {
+            std::env::remove_var("TESTSPRITE_BROWSER_DOCKER");
+        }
+    }
+
+    #[test]
+    fn node_path_prefers_explicit_envs() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("PLAYWRIGHT_NODE_PATH", "/tmp/pw");
+            std::env::set_var("NODE_PATH", "/tmp/node");
+        }
+        assert_eq!(resolve_node_path().as_deref(), Some("/tmp/pw"));
+        unsafe {
+            std::env::remove_var("PLAYWRIGHT_NODE_PATH");
+        }
+        assert_eq!(resolve_node_path().as_deref(), Some("/tmp/node"));
+        unsafe {
+            std::env::remove_var("NODE_PATH");
+        }
     }
 }

@@ -542,4 +542,14 @@ mod tests {
             "hello world"
         );
     }
+
+    #[test]
+    fn strips_common_markdown_code_fences() {
+        assert_eq!(
+            strip_code_fences("```python\nprint('ok')\n```"),
+            "print('ok')"
+        );
+        assert_eq!(strip_code_fences("```\nraw\n```"), "raw");
+        assert_eq!(strip_code_fences(" plain "), "plain");
+    }
 }

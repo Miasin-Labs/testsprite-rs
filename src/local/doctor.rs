@@ -220,4 +220,17 @@ mod tests {
             "[warn] x: d\n"
         );
     }
+
+    #[test]
+    fn status_parts_preserve_wire_tags() {
+        assert_eq!(Status::Ok("yes".into()).parts(), ("ok", "yes".to_string()));
+        assert_eq!(
+            Status::Warn("careful".into()).parts(),
+            ("warn", "careful".to_string())
+        );
+        assert_eq!(
+            Status::Fail("no".into()).parts(),
+            ("fail", "no".to_string())
+        );
+    }
 }

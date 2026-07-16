@@ -150,4 +150,70 @@ mod tests {
             std::env::remove_var("TSEMCP_TUNNEL_DATA_PORT");
         }
     }
+
+    #[test]
+    fn string_env_defaults_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for k in [
+            "TESTSPRITE_MODEL",
+            "TESTSPRITE_DEFAULT_MODEL",
+            "API_URL",
+            "TESTSPRITE_URL",
+            "TESTSPRITE_PLAYWRIGHT_IMAGE",
+            "TSMCP_API_KEY",
+            "API_KEY",
+            "TSEMCP_TUNNEL_CONTROL_URL",
+            "TSEMCP_TUNNEL_PROXY_URL",
+        ] {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+        assert_eq!(super::default_model(), "gpt-5.3-codex");
+        assert_eq!(super::api_url(), "https://api.testsprite.com");
+        assert_eq!(super::testsprite_url(), "https://www.testsprite.com");
+        assert_eq!(super::playwright_image(), "testsprite-rs-playwright:1.60.0");
+        assert_eq!(super::api_key(), None);
+        assert_eq!(
+            super::tunnel::control_url(),
+            "wss://control.tun.testsprite.com/ws"
+        );
+        assert_eq!(
+            super::tunnel::proxy_url(),
+            "http://proxy.tun.testsprite.com:9090"
+        );
+        unsafe {
+            std::env::set_var("TESTSPRITE_DEFAULT_MODEL", "m1");
+            std::env::set_var("TESTSPRITE_MODEL", "m2");
+            std::env::set_var("API_URL", "http://api");
+            std::env::set_var("TESTSPRITE_URL", "http://ui");
+            std::env::set_var("TESTSPRITE_PLAYWRIGHT_IMAGE", "pw:local");
+            std::env::set_var("API_KEY", "key1");
+            std::env::set_var("TSMCP_API_KEY", "key2");
+            std::env::set_var("TSEMCP_TUNNEL_CONTROL_URL", "ws://control");
+            std::env::set_var("TSEMCP_TUNNEL_PROXY_URL", "http://proxy");
+        }
+        assert_eq!(super::default_model(), "m2");
+        assert_eq!(super::api_url(), "http://api");
+        assert_eq!(super::testsprite_url(), "http://ui");
+        assert_eq!(super::playwright_image(), "pw:local");
+        assert_eq!(super::api_key().as_deref(), Some("key2"));
+        assert_eq!(super::tunnel::control_url(), "ws://control");
+        assert_eq!(super::tunnel::proxy_url(), "http://proxy");
+        for k in [
+            "TESTSPRITE_MODEL",
+            "TESTSPRITE_DEFAULT_MODEL",
+            "API_URL",
+            "TESTSPRITE_URL",
+            "TESTSPRITE_PLAYWRIGHT_IMAGE",
+            "TSMCP_API_KEY",
+            "API_KEY",
+            "TSEMCP_TUNNEL_CONTROL_URL",
+            "TSEMCP_TUNNEL_PROXY_URL",
+        ] {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+    }
 }

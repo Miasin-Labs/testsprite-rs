@@ -892,6 +892,71 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_recurses_through_json_and_env() {
+        unsafe {
+            std::env::set_var("FROM_ENV", "env-value");
+        }
+        let mut session = HashMap::new();
+        session.insert("token".to_string(), "abc123".to_string());
+        let value = interpolate_value(
+            &json!({
+                "auth": "Bearer ${token}",
+                "nested": ["${FROM_ENV}", {"missing": "x${NOPE}y"}],
+                "n": 3
+            }),
+            &session,
+        );
+        assert_eq!(value["auth"], "Bearer abc123");
+        assert_eq!(value["nested"][0], "env-value");
+        assert_eq!(value["nested"][1]["missing"], "xy");
+        assert_eq!(value["n"], 3);
+        unsafe {
+            std::env::remove_var("FROM_ENV");
+        }
+    }
+
+    #[test]
+    fn form_pairs_urlencode_and_query_param_decode() {
+        let form = json!({"grant_type":"authorization code", "n": 7, "weird":"a&b"});
+        let pairs = form_pairs(&form);
+        let encoded = urlencoded(&pairs);
+        assert!(
+            encoded.contains("grant_type=authorization+code"),
+            "{encoded}"
+        );
+        assert!(encoded.contains("n=7"), "{encoded}");
+        assert!(encoded.contains("weird=a%26b"), "{encoded}");
+
+        assert_eq!(
+            query_param("https://app/cb?code=a%2Bb+c&state=ok#frag", "code"),
+            Some("a+b c".to_string())
+        );
+        assert_eq!(
+            query_param("https://app/cb?empty", "empty"),
+            Some(String::new())
+        );
+        assert_eq!(query_param("https://app/cb", "code"), None);
+    }
+
+    #[test]
+    fn header_lookup_is_case_insensitive_and_redacts_sensitive_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("Location", "/cb?code=abc".parse().unwrap());
+        headers.insert("Authorization", "Bearer secret".parse().unwrap());
+        assert_eq!(
+            header_value(&headers, "location"),
+            Some("/cb?code=abc".to_string())
+        );
+        assert_eq!(
+            query_param(&header_value(&headers, "LOCATION").unwrap(), "code"),
+            Some("abc".to_string())
+        );
+        let sanitized = sanitize_headers(&headers);
+        assert_eq!(sanitized["authorization"], "[REDACTED]");
+        assert_eq!(sanitized["location"], "/cb?code=abc");
+    }
+
+    #[test]
     fn graphql_shorthand_fails_when_errors_are_present() {
         let s = spec(serde_json::json!({
             "graphql": {

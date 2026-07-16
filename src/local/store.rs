@@ -889,6 +889,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rename_updates_column_and_body() {
+        let root = crate::local::tmp_root();
+        let id = add_value(&root, serde_json::json!({"id":"r1","title":"old"}))
+            .await
+            .unwrap();
+        rename(&root, &id, "new title").await.unwrap();
+        let loaded = load_one(&root, &id).await.unwrap();
+        assert_eq!(loaded.title, "new title");
+        assert!(rename(&root, "missing", "x").await.is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn import_export_and_prune_history_round_trip() {
+        let root = crate::local::tmp_root();
+        let ids = import_values(
+            &root,
+            &[
+                serde_json::json!({"id":"a","title":"A"}),
+                serde_json::json!({"id":"b","title":"B"}),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(export_all(&root).await.unwrap().len(), 2);
+
+        for _ in 0..3 {
+            write_result(
+                &root,
+                "a",
+                &Outcome::fail("boom", "code".to_string()),
+                None,
+                TestKind::Backend,
+            )
+            .await
+            .unwrap();
+        }
+        write_result(
+            &root,
+            "b",
+            &Outcome::pass("ok".to_string()),
+            None,
+            TestKind::Backend,
+        )
+        .await
+        .unwrap();
+        assert_eq!(run_history(&root, "a").await.unwrap().len(), 3);
+        assert_eq!(last_failed_ids(&root).await.unwrap(), vec!["a"]);
+        assert_eq!(prune_runs(&root, "a", 1).await.unwrap(), 2);
+        assert_eq!(run_history(&root, "a").await.unwrap().len(), 1);
+        assert_eq!(prune_all(&root, 1).await.unwrap(), 0);
+        assert_eq!(prune_runs(&root, "a", 0).await.unwrap(), 0);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn add_with_explicit_id_stores_under_that_id() {
         let root = crate::local::tmp_root();
         let src = root.join("case.json");

@@ -68,3 +68,51 @@ pub async fn ensure_gitignore_entry(project_path: &str) {
         tracing::warn!("could not update .gitignore: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn save_read_and_commit_status_round_trip() {
+        let root = crate::local::tmp_root();
+        let cfg = crate::types::Config {
+            status: "commited".to_string(),
+            project_name: Some("demo".to_string()),
+            ..Default::default()
+        };
+        super::save_config(root.to_str().unwrap(), &cfg)
+            .await
+            .unwrap();
+        let loaded = super::read_config(root.to_str().unwrap()).await;
+        assert_eq!(loaded.status, "commited");
+        assert_eq!(loaded.project_name.as_deref(), Some("demo"));
+        assert!(super::check_config_committed(root.to_str().unwrap()).await);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn bad_or_missing_config_falls_back_to_init() {
+        let root = crate::local::tmp_root();
+        assert_eq!(
+            super::read_config(root.to_str().unwrap()).await.status,
+            "init"
+        );
+        let path = crate::paths::Paths::new(&root).config();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{not-json").unwrap();
+        assert_eq!(
+            super::read_config(root.to_str().unwrap()).await.status,
+            "init"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn gitignore_entry_is_idempotent() {
+        let root = crate::local::tmp_root();
+        super::ensure_gitignore_entry(root.to_str().unwrap()).await;
+        super::ensure_gitignore_entry(root.to_str().unwrap()).await;
+        let body = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert_eq!(body.matches(crate::paths::GITIGNORE_ENTRY).count(), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+}
