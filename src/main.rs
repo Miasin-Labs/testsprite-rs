@@ -1425,3 +1425,110 @@ fn csv_field(s: &str) -> String {
         s.to_string()
     }
 }
+
+#[cfg(test)]
+mod cli_unit_tests {
+    use super::*;
+
+    // ---- csv_field ---------------------------------------------------------
+
+    #[test]
+    fn csv_field_plain_value_is_returned_unquoted() {
+        assert_eq!(csv_field("TC001"), "TC001");
+        assert_eq!(csv_field(""), "");
+        assert_eq!(csv_field("simple title"), "simple title");
+    }
+
+    #[test]
+    fn csv_field_with_comma_is_wrapped_in_quotes() {
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("one, two, three"), "\"one, two, three\"");
+    }
+
+    #[test]
+    fn csv_field_doubles_embedded_double_quotes() {
+        // A field containing a quote must be wrapped AND every inner quote
+        // doubled, per RFC 4180.
+        assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_field("\""), "\"\"\"\"");
+    }
+
+    #[test]
+    fn csv_field_with_newline_is_wrapped_in_quotes() {
+        assert_eq!(csv_field("a\nb"), "\"a\nb\"");
+    }
+
+    // ---- Cli::try_parse_from -----------------------------------------------
+
+    #[test]
+    fn no_args_parses_to_no_subcommand() {
+        let cli = Cli::try_parse_from(["testsprite-rs"]).expect("bare invocation parses");
+        assert!(
+            cli.command.is_none(),
+            "no subcommand => None (defaults to Serve)"
+        );
+    }
+
+    #[test]
+    fn test_list_output_json_parses_into_list_variant() {
+        let cli = Cli::try_parse_from(["testsprite-rs", "test", "list", "--output", "json"])
+            .expect("`test list --output json` parses");
+        match cli.command {
+            Some(Command::Test {
+                cmd: TestCmd::List { output, group },
+            }) => {
+                assert_eq!(output, "json");
+                assert!(group.is_none());
+            }
+            _ => panic!("expected Command::Test(TestCmd::List)"),
+        }
+    }
+
+    #[test]
+    fn coverage_gaps_flag_parses() {
+        let cli = Cli::try_parse_from(["testsprite-rs", "coverage", "--gaps"])
+            .expect("`coverage --gaps` parses");
+        match cli.command {
+            Some(Command::Coverage { path, json, gaps }) => {
+                assert!(gaps, "--gaps sets gaps=true");
+                assert!(!json, "json defaults false");
+                assert!(path.is_none(), "path defaults None");
+            }
+            _ => panic!("expected Command::Coverage"),
+        }
+    }
+
+    #[test]
+    fn schedule_add_parses_name_group_and_default_cadence() {
+        let cli = Cli::try_parse_from([
+            "testsprite-rs",
+            "schedule",
+            "add",
+            "nightly",
+            "--group",
+            "g",
+        ])
+        .expect("`schedule add nightly --group g` parses");
+        match cli.command {
+            Some(Command::Schedule {
+                cmd:
+                    ScheduleCmd::Add {
+                        name,
+                        group,
+                        cadence,
+                    },
+            }) => {
+                assert_eq!(name, "nightly");
+                assert_eq!(group, "g");
+                assert_eq!(cadence, "daily", "cadence defaults to daily");
+            }
+            _ => panic!("expected Command::Schedule(ScheduleCmd::Add)"),
+        }
+    }
+
+    #[test]
+    fn unknown_flag_is_a_parse_error() {
+        let err = Cli::try_parse_from(["testsprite-rs", "--definitely-not-a-flag"]);
+        assert!(err.is_err(), "an unknown top-level flag must error");
+    }
+}

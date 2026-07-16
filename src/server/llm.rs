@@ -495,7 +495,16 @@ fn strip_code_fences(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use tokio::sync::Mutex;
+
     use super::*;
+    use crate::testutil::{env_guard, serve_router};
 
     #[test]
     fn adversarial_prompt_demands_deterministic_runnable_cases() {
@@ -561,5 +570,584 @@ mod tests {
         );
         assert_eq!(strip_code_fences("```\nraw\n```"), "raw");
         assert_eq!(strip_code_fences(" plain "), "plain");
+    }
+
+    // ---- Fake OpenAI server harness ----------------------------------------
+    //
+    // One helper (`fake_openai`) serves POST /v1/chat/completions and
+    // POST /v1/responses on an ephemeral port, records every request body into
+    // per-endpoint `Arc<Mutex<Vec<Value>>>`, and replays a per-test canned
+    // reply. `OPENAI_BASE_URL` (read per-request by `api_base()`) is pointed at
+    // it under the global env guard, held across the client `.await`.
+
+    /// A canned HTTP reply (status + raw body text). `api_base()`-fronted code
+    /// reads `resp.text()` then `serde_json::from_str`, so a plain-text body of
+    /// JSON is enough — the content-type does not matter.
+    struct Reply {
+        status: u16,
+        body: String,
+    }
+
+    #[derive(Clone)]
+    struct Fake {
+        chat_reqs: Arc<Mutex<Vec<Value>>>,
+        resp_reqs: Arc<Mutex<Vec<Value>>>,
+        chat: Arc<Reply>,
+        responses: Arc<Reply>,
+    }
+
+    /// `{"choices":[{"message":{"content": <content>}}]}` at 200.
+    fn ok_chat(content: &str) -> Reply {
+        Reply {
+            status: 200,
+            body: json!({ "choices": [{ "message": { "content": content } }] }).to_string(),
+        }
+    }
+
+    /// `{"output_text": <text>}` at 200 (the Responses API shape).
+    fn ok_resp(text: &str) -> Reply {
+        Reply {
+            status: 200,
+            body: json!({ "output_text": text }).to_string(),
+        }
+    }
+
+    /// A non-2xx reply with an arbitrary body.
+    fn fail(status: u16, body: &str) -> Reply {
+        Reply {
+            status,
+            body: body.to_string(),
+        }
+    }
+
+    /// A reply for an endpoint a given test never expects to hit.
+    fn unused() -> Reply {
+        Reply {
+            status: 599,
+            body: "unused endpoint".to_string(),
+        }
+    }
+
+    async fn chat_endpoint(State(s): State<Fake>, Json(body): Json<Value>) -> (StatusCode, String) {
+        s.chat_reqs.lock().await.push(body);
+        let code = StatusCode::from_u16(s.chat.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (code, s.chat.body.clone())
+    }
+
+    async fn responses_endpoint(
+        State(s): State<Fake>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, String) {
+        s.resp_reqs.lock().await.push(body);
+        let code =
+            StatusCode::from_u16(s.responses.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (code, s.responses.body.clone())
+    }
+
+    /// Serve a fake OpenAI on an ephemeral port. Returns its base URL, the
+    /// shared `Fake` state (holds the captured request bodies), and the server
+    /// join handle (abort it at test end).
+    async fn fake_openai(
+        chat: Reply,
+        responses: Reply,
+    ) -> (String, Fake, tokio::task::JoinHandle<()>) {
+        let state = Fake {
+            chat_reqs: Arc::new(Mutex::new(Vec::new())),
+            resp_reqs: Arc::new(Mutex::new(Vec::new())),
+            chat: Arc::new(chat),
+            responses: Arc::new(responses),
+        };
+        let router = Router::new()
+            .route("/v1/chat/completions", post(chat_endpoint))
+            .route("/v1/responses", post(responses_endpoint))
+            .with_state(state.clone());
+        let (base, handle) = serve_router(router).await;
+        (base, state, handle)
+    }
+
+    fn client(model: &str) -> LlmClient {
+        LlmClient::new("test-key".to_string(), model.to_string())
+    }
+
+    #[tokio::test]
+    async fn chat_completions_sends_temperature_and_json_format_for_older_models() {
+        let (base, fake, handle) =
+            fake_openai(ok_chat(r#"{"product_overview":"ok"}"#), unused()).await;
+        let client = client("gpt-4o-mini");
+        let prd = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_prd(&json!({ "project_name": "demo" }))
+                .await
+        }
+        .unwrap();
+        assert_eq!(prd["product_overview"], "ok");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0]["model"], "gpt-4o-mini");
+        // Value equality avoids a float `==` (clippy::float_cmp); both sides are
+        // the same f64 0.2, so the numbers compare equal.
+        assert_eq!(reqs[0]["temperature"], json!(0.2));
+        assert_eq!(reqs[0]["response_format"]["type"], "json_object");
+        assert_eq!(reqs[0]["messages"][0]["role"], "system");
+        assert!(fake.resp_reqs.lock().await.is_empty());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn gpt5_model_omits_temperature_and_response_format() {
+        // gpt-5 (not gpt-5.3/5.5/codex) still uses chat/completions, but must
+        // NOT send an explicit temperature; json_mode false omits the format.
+        let (base, fake, handle) = fake_openai(ok_chat("SRC"), unused()).await;
+        let client = client("gpt-5");
+        let out = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_test_code(&json!({ "id": "TC1" }), &json!({}), "http://svc")
+                .await
+        }
+        .unwrap();
+        assert_eq!(out, "SRC");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].get("temperature").is_none());
+        assert!(reqs[0].get("response_format").is_none());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_completions_non_2xx_surfaces_openai_error() {
+        let (base, _fake, handle) = fake_openai(fail(500, "boom"), unused()).await;
+        let client = client("gpt-4o-mini");
+        let err = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_prd(&json!({})).await
+        }
+        .unwrap_err();
+        assert!(err.to_string().contains("openai error"), "got: {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_falls_back_to_responses_when_param_rejected() {
+        let (base, fake, handle) = fake_openai(
+            fail(
+                400,
+                "temperature is not supported in the v1/chat/completions endpoint",
+            ),
+            ok_resp("print('hi')"),
+        )
+        .await;
+        let client = client("gpt-4o-mini");
+        let out = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_test_code(&json!({ "id": "TC1" }), &json!({}), "http://svc")
+                .await
+        }
+        .unwrap();
+        assert_eq!(out, "print('hi')");
+        // Both endpoints were exercised: chat/completions rejected the param,
+        // and the fallback reached /v1/responses.
+        assert_eq!(fake.chat_reqs.lock().await.len(), 1);
+        assert_eq!(fake.resp_reqs.lock().await.len(), 1);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_api_model_routes_directly_and_sets_json_format() {
+        let (base, fake, handle) =
+            fake_openai(unused(), ok_resp(r#"{"product_overview":"r"}"#)).await;
+        let client = client("gpt-5.3-codex");
+        let prd = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_prd(&json!({ "project_name": "x" })).await
+        }
+        .unwrap();
+        assert_eq!(prd["product_overview"], "r");
+
+        assert!(fake.chat_reqs.lock().await.is_empty());
+        let reqs = fake.resp_reqs.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0]["model"], "gpt-5.3-codex");
+        assert_eq!(reqs[0]["store"], json!(false));
+        assert_eq!(reqs[0]["text"]["format"]["type"], "json_object");
+        assert_eq!(reqs[0]["input"][0]["role"], "system");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_prd_rejects_invalid_json() {
+        let (base, _f, handle) = fake_openai(ok_chat("not json at all"), unused()).await;
+        let client = client("gpt-4o-mini");
+        let err = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_prd(&json!({})).await
+        }
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("PRD was not valid JSON"),
+            "got: {err}"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_prd_from_doc_normalizes_and_sends_document() {
+        let (base, fake, handle) =
+            fake_openai(ok_chat(r#"{"product_overview":"norm"}"#), unused()).await;
+        let client = client("gpt-4o-mini");
+        let prd = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_prd_from_doc("# My README\nDoes things.")
+                .await
+        }
+        .unwrap();
+        assert_eq!(prd["product_overview"], "norm");
+
+        let reqs = fake.chat_reqs.lock().await;
+        let sys = reqs[0]["messages"][0]["content"].as_str().unwrap();
+        let user = reqs[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(sys.contains("PRD normalizer"));
+        assert!(user.contains("Document:"));
+        assert!(user.contains("My README"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_plan_accepts_array_and_wrapper_and_rejects_non_array() {
+        let client = client("gpt-4o-mini");
+
+        // Bare array response.
+        let (base, _f, h1) = fake_openai(ok_chat(r#"[{"id":"TC001"}]"#), unused()).await;
+        let bare = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_plan(&json!({})).await
+        }
+        .unwrap();
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0]["id"], "TC001");
+        h1.abort();
+
+        // {"plan":[...]} wrapper.
+        let (base, _f, h2) = fake_openai(
+            ok_chat(r#"{"plan":[{"id":"TC002"},{"id":"TC003"}]}"#),
+            unused(),
+        )
+        .await;
+        let wrapped = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_plan(&json!({})).await
+        }
+        .unwrap();
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[1]["id"], "TC003");
+        h2.abort();
+
+        // A JSON object that is neither an array nor a {"plan":[...]} wrapper.
+        let (base, _f, h3) = fake_openai(ok_chat(r#"{"nope":1}"#), unused()).await;
+        let err = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client.generate_plan(&json!({})).await
+        }
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("plan was not an array"),
+            "got: {err}"
+        );
+        h3.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_adversarial_tests_returns_plan_from_adversarial_prompt() {
+        let (base, fake, handle) = fake_openai(
+            ok_chat(r#"{"plan":[{"id":"ADV001","kind":"backend"}]}"#),
+            unused(),
+        )
+        .await;
+        let client = client("gpt-4o-mini");
+        let plan = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_adversarial_tests(&json!({ "code_summary": { "project_name": "x" } }))
+                .await
+        }
+        .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0]["id"], "ADV001");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert!(
+            reqs[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("adversarial QA planner")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_test_code_strips_python_fences_and_omits_json_format() {
+        let (base, fake, handle) =
+            fake_openai(ok_chat("```python\nprint('ok')\n```"), unused()).await;
+        let client = client("gpt-4o-mini");
+        let code = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_test_code(&json!({ "id": "TC1" }), &json!({ "x": 1 }), "http://svc:9")
+                .await
+        }
+        .unwrap();
+        assert_eq!(code, "print('ok')");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert!(reqs[0].get("response_format").is_none());
+        assert!(
+            reqs[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("http://svc:9")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_playwright_returns_body_and_prompts_for_page() {
+        let (base, fake, handle) = fake_openai(ok_chat("await page.click('#go');"), unused()).await;
+        let client = client("gpt-4o-mini");
+        let code = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_playwright(&json!({ "id": "F1" }), &json!({}), "http://ui.local")
+                .await
+        }
+        .unwrap();
+        assert_eq!(code, "await page.click('#go');");
+
+        let reqs = fake.chat_reqs.lock().await;
+        let sys = reqs[0]["messages"][0]["content"].as_str().unwrap();
+        assert!(sys.contains("Playwright"));
+        assert!(sys.contains("http://ui.local"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_rust_test_returns_source_for_crate_dir() {
+        let (base, fake, handle) =
+            fake_openai(ok_chat("fn it_works() { assert_eq!(1, 1); }"), unused()).await;
+        let client = client("gpt-4o-mini");
+        let code = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_rust_test(&json!({ "id": "R1" }), &json!({}), "/crate/dir")
+                .await
+        }
+        .unwrap();
+        assert_eq!(code, "fn it_works() { assert_eq!(1, 1); }");
+        assert!(
+            fake.chat_reqs.lock().await[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("/crate/dir")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn analyze_failure_returns_classification_json() {
+        let (base, fake, handle) = fake_openai(
+            ok_chat(r#"{"fixKind":"code","verdict":"bug","cause":"c","fix":"f"}"#),
+            unused(),
+        )
+        .await;
+        let client = client("gpt-4o-mini");
+        let v = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .analyze_failure(&json!({ "id": "T" }), "code body", "boom error")
+                .await
+        }
+        .unwrap();
+        assert_eq!(v["verdict"], "bug");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert!(
+            reqs[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("failure analyst")
+        );
+        assert!(
+            reqs[0]["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("boom error")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn propose_fix_system_prompt_differs_by_source_presence() {
+        let client = client("gpt-4o-mini");
+
+        // With source: the model is asked for a REAL, git-appliable unified diff.
+        let (base, with, h1) =
+            fake_openai(ok_chat(r#"{"explanation":"e","patch":"p"}"#), unused()).await;
+        {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .propose_fix(&json!({ "id": "T" }), "code", "err", Some("12: let x = 1;"))
+                .await
+                .unwrap();
+        }
+        let with_sys = with.chat_reqs.lock().await[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        h1.abort();
+        assert!(with_sys.contains("REAL unified diff"), "got: {with_sys}");
+
+        // Without source: an ILLUSTRATIVE sketch, explicitly not git-appliable.
+        let (base, without, h2) =
+            fake_openai(ok_chat(r#"{"explanation":"e","patch":"p"}"#), unused()).await;
+        {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .propose_fix(&json!({ "id": "T" }), "code", "err", None)
+                .await
+                .unwrap();
+        }
+        let without_sys = without.chat_reqs.lock().await[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        h2.abort();
+        assert!(without_sys.contains("ILLUSTRATIVE"), "got: {without_sys}");
+        assert!(!without_sys.contains("REAL unified diff"));
+    }
+
+    #[tokio::test]
+    async fn heal_test_returns_improved_case_json() {
+        let (base, fake, handle) =
+            fake_openai(ok_chat(r#"{"title":"better","description":"d"}"#), unused()).await;
+        let client = client("gpt-4o-mini");
+        let v = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .heal_test(&json!({ "title": "old" }), "code", "err")
+                .await
+        }
+        .unwrap();
+        assert_eq!(v["title"], "better");
+        assert!(
+            fake.chat_reqs.lock().await[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("auto-heal")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_from_functions_returns_plan() {
+        let (base, fake, handle) = fake_openai(
+            ok_chat(r#"{"plan":[{"id":"TC001","title":"t"}]}"#),
+            unused(),
+        )
+        .await;
+        let client = client("gpt-4o-mini");
+        let plan = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .generate_from_functions(&json!([{ "name": "foo", "file": "a.rs", "branches": 2 }]))
+                .await
+        }
+        .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0]["id"], "TC001");
+        assert!(
+            fake.chat_reqs.lock().await[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("coverage-driven planner")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn plan_action_returns_action_json() {
+        let (base, fake, handle) = fake_openai(
+            ok_chat(r#"{"assistant":"hi","action":{"kind":"none"}}"#),
+            unused(),
+        )
+        .await;
+        let client = client("gpt-4o-mini");
+        let v = {
+            let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+            client
+                .plan_action("prev turns", "hello there", &json!([]))
+                .await
+        }
+        .unwrap();
+        assert_eq!(v["action"]["kind"], "none");
+
+        let reqs = fake.chat_reqs.lock().await;
+        assert!(
+            reqs[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("conversational test agent")
+        );
+        assert!(
+            reqs[0]["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("hello there")
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn resolve_key_prefers_env_var() {
+        let _g = env_guard(&[("OPENAI_API_KEY", Some("sk-env"))]);
+        assert_eq!(resolve_key(), Some("sk-env".to_string()));
+    }
+
+    #[test]
+    fn resolve_key_reads_credentials_file_when_env_empty() {
+        let home = crate::local::tmp_root();
+        let cfg = home.join(".config/jfc");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("credentials.toml"),
+            "[openai]\napi_key = \"from-file\"\n",
+        )
+        .unwrap();
+        let got = {
+            let _g = env_guard(&[
+                ("OPENAI_API_KEY", Some("")),
+                ("HOME", Some(home.to_str().unwrap())),
+            ]);
+            resolve_key()
+        };
+        std::fs::remove_dir_all(&home).ok();
+        assert_eq!(got, Some("from-file".to_string()));
+    }
+
+    #[test]
+    fn resolve_key_returns_none_when_absent() {
+        let home = crate::local::tmp_root();
+        let got = {
+            let _g = env_guard(&[
+                ("OPENAI_API_KEY", None),
+                ("HOME", Some(home.to_str().unwrap())),
+            ]);
+            resolve_key()
+        };
+        std::fs::remove_dir_all(&home).ok();
+        assert_eq!(got, None);
     }
 }

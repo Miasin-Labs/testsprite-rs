@@ -456,6 +456,35 @@ fn format_generate(tests: &[(String, String)]) -> String {
     truncate(&out, 1900)
 }
 
+/// Connect to Discord and run the agent bot until the process is stopped.
+pub async fn run(token_override: Option<String>) -> Result<()> {
+    let (token, cfg) = load(token_override)?;
+    let intents = GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler {
+            cfg,
+            bot_id: OnceLock::new(),
+        })
+        .await
+        .context("building the Discord client")?;
+
+    // Graceful shutdown: on Ctrl+C, close the gateway cleanly via Serenity's own
+    // shard manager instead of a hard kill that can leave the socket/typing
+    // state dangling. Its own task; `run.rs`'s interrupt_watcher is a separate
+    // execution path that does not cover the bot.
+    let shard_manager = client.shard_manager.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("SIGINT — shutting down Discord gateway cleanly");
+            shard_manager.shutdown_all().await;
+        }
+    });
+    client.start().await.context("Discord client error")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -490,33 +519,212 @@ mod tests {
         assert!(out.contains("`TC001` — First"));
         assert!(out.contains("`TC002` — Second"));
     }
-}
 
-/// Connect to Discord and run the agent bot until the process is stopped.
-pub async fn run(token_override: Option<String>) -> Result<()> {
-    let (token, cfg) = load(token_override)?;
-    let intents = GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
-    let mut client = Client::builder(&token, intents)
-        .event_handler(Handler {
-            cfg,
-            bot_id: OnceLock::new(),
-        })
-        .await
-        .context("building the Discord client")?;
+    // --- config_dir -----------------------------------------------------
 
-    // Graceful shutdown: on Ctrl+C, close the gateway cleanly via Serenity's own
-    // shard manager instead of a hard kill that can leave the socket/typing
-    // state dangling. Its own task; `run.rs`'s interrupt_watcher is a separate
-    // execution path that does not cover the bot.
-    let shard_manager = client.shard_manager.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("SIGINT — shutting down Discord gateway cleanly");
-            shard_manager.shutdown_all().await;
-        }
-    });
-    client.start().await.context("Discord client error")?;
-    Ok(())
+    #[test]
+    fn config_dir_is_home_dot_config_testsprite() {
+        let home = crate::local::tmp_root();
+        let _guard = crate::testutil::env_guard(&[("HOME", home.to_str())]);
+        let dir = config_dir();
+        assert!(
+            dir.ends_with(".config/testsprite"),
+            "expected a .config/testsprite suffix, got {}",
+            dir.display()
+        );
+        assert!(
+            dir.starts_with(&home),
+            "expected {} under HOME {}",
+            dir.display(),
+            home.display()
+        );
+        assert_eq!(dir, home.join(".config/testsprite"));
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn config_dir_without_home_is_relative() {
+        let _guard = crate::testutil::env_guard(&[("HOME", None)]);
+        // Empty HOME → empty base → a bare relative `.config/testsprite`.
+        assert_eq!(config_dir(), std::path::PathBuf::from(".config/testsprite"));
+    }
+
+    // --- read_token precedence -----------------------------------------
+
+    #[test]
+    fn read_token_explicit_override_wins_and_is_trimmed() {
+        // The override short-circuits before any env/file read, so no ambient
+        // state can change the answer; it is returned trimmed.
+        let got = read_token(Some("  s3cr3t-token  ".to_string()), None).unwrap();
+        assert_eq!(got, "s3cr3t-token");
+    }
+
+    #[test]
+    fn read_token_whitespace_override_falls_through() {
+        // A blank override is discarded. Prove the fall-through with an
+        // absolute token_file (checked BEFORE the cwd-relative `./token.key`
+        // fallback, which we must never reach: the repo root carries a real
+        // gitignored token.key, and a failed assertion would print it).
+        let dir = crate::local::tmp_root();
+        let token_path = dir.join("fallback.key");
+        std::fs::write(&token_path, "fallback-token\n").unwrap();
+        let empty_home = crate::local::tmp_root();
+        let _guard = crate::testutil::env_guard(&[
+            ("TESTSPRITE_DISCORD_TOKEN", None),
+            ("HOME", empty_home.to_str()),
+        ]);
+        let got = read_token(
+            Some("   \t \n".to_string()),
+            Some(token_path.to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(got, "fallback-token");
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(empty_home).ok();
+    }
+
+    #[test]
+    fn read_token_reads_env_var_trimmed() {
+        let empty_home = crate::local::tmp_root();
+        let _guard = crate::testutil::env_guard(&[
+            ("TESTSPRITE_DISCORD_TOKEN", Some("  env-token  ")),
+            ("HOME", empty_home.to_str()),
+        ]);
+        let got = read_token(None, None).unwrap();
+        assert_eq!(got, "env-token");
+        std::fs::remove_dir_all(empty_home).ok();
+    }
+
+    #[test]
+    fn read_token_reads_absolute_token_file_trimmed() {
+        let dir = crate::local::tmp_root();
+        let token_path = dir.join("bot.key");
+        std::fs::write(&token_path, "  file-token  \n").unwrap();
+        let empty_home = crate::local::tmp_root();
+        let _guard = crate::testutil::env_guard(&[
+            ("TESTSPRITE_DISCORD_TOKEN", None),
+            ("HOME", empty_home.to_str()),
+        ]);
+        let got = read_token(None, Some(token_path.to_str().unwrap())).unwrap();
+        assert_eq!(got, "file-token");
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(empty_home).ok();
+    }
+
+    // NOTE: the "no token anywhere → Err" case is deliberately NOT tested
+    // in-process. read_token's last fallback is the cwd-relative
+    // `./token.key`, and `cargo test` runs from the repo root where a real
+    // (gitignored) token.key lives for the actual bot — the test would read
+    // it and a failing assertion would print the live secret into test logs.
+
+    // --- strip_mentions -------------------------------------------------
+
+    #[test]
+    fn strip_mentions_removes_mention_tokens_anywhere() {
+        let got = strip_mentions("<@123> hello <@!456> world <@789>");
+        assert_eq!(got, "hello world");
+        // A word that merely contains `<@` mid-token is preserved.
+        assert_eq!(strip_mentions("keep<@1> stays"), "keep<@1> stays");
+        // Only-mentions collapses to empty.
+        assert_eq!(strip_mentions("<@1> <@!2>"), "");
+    }
+
+    // --- truncate -------------------------------------------------------
+
+    #[test]
+    fn truncate_shorter_or_equal_to_max_is_unchanged() {
+        assert_eq!(truncate("hi", 10), "hi");
+        // Exactly max chars is still returned verbatim (no ellipsis).
+        let five = truncate("hello", 5);
+        assert_eq!(five, "hello");
+        assert!(!five.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_long_string_has_exactly_max_chars_and_ellipsis() {
+        let out = truncate("hello world", 5);
+        assert_eq!(out, "hell…");
+        assert_eq!(out.chars().count(), 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_is_multibyte_safe() {
+        // Six 2-byte chars; truncating to 3 must split on a char boundary.
+        let out = truncate("áéíóúñ", 3);
+        assert_eq!(out, "áé…");
+        assert_eq!(out.chars().count(), 3);
+        assert!(out.ends_with('…'));
+        assert!(out.starts_with("áé"));
+    }
+
+    // --- action_rows ----------------------------------------------------
+
+    #[test]
+    fn action_rows_one_per_pending_action() {
+        let v = json!({"pendingActions":[
+            {"id":1,"kind":"generate","summary":"generate a test"},
+            {"id":2,"kind":"run","summary":"run the suite"},
+        ]});
+        assert_eq!(action_rows("42", &v).len(), 2);
+    }
+
+    #[test]
+    fn action_rows_missing_pending_actions_is_empty() {
+        assert!(action_rows("42", &json!({})).is_empty());
+        // A non-array value is also treated as no actions.
+        assert!(action_rows("42", &json!({"pendingActions": null})).is_empty());
+    }
+
+    // --- reply_text -----------------------------------------------------
+
+    #[test]
+    fn reply_text_uses_assistant_or_default() {
+        assert_eq!(reply_text(&json!({"assistant":"all done"})), "all done");
+        assert_eq!(reply_text(&json!({})), "(no reply)");
+        // A non-string assistant field falls back to the default too.
+        assert_eq!(reply_text(&json!({"assistant": 7})), "(no reply)");
+    }
+
+    // --- format_run budget exhaustion ----------------------------------
+
+    #[test]
+    fn format_run_budget_exhaustion_emits_more_marker() {
+        // Each failing result contributes ~4 long lines; the 1600-byte budget
+        // is exhausted well before all six are rendered, so a "… (more)"
+        // sentinel replaces the tail.
+        let blob = "x".repeat(150);
+        let results: Vec<Value> = (0..6)
+            .map(|i| {
+                json!({
+                    "id": format!("TC{i:03}"),
+                    "title": blob,
+                    "passed": false,
+                    "failureKind": "assertion_failed",
+                    "error": blob,
+                    "analysis": {"cause": blob, "fix": blob},
+                })
+            })
+            .collect();
+        let out = format_run(&results);
+        assert!(out.contains("… (more)"), "{out}");
+        assert!(out.contains("Ran 6 · 0 passed · 6 failed"), "{out}");
+        // At least one row rendered before the budget ran out.
+        assert!(out.contains("FAIL  TC000"), "{out}");
+        // The last row must not have made it in.
+        assert!(!out.contains("TC005"), "{out}");
+    }
+
+    // --- format_generate final truncation ------------------------------
+
+    #[test]
+    fn format_generate_truncates_past_1900_chars() {
+        let long_title = "t".repeat(80);
+        let tests: Vec<(String, String)> = (0..60)
+            .map(|i| (format!("TC{i:03}"), long_title.clone()))
+            .collect();
+        let out = format_generate(&tests);
+        assert_eq!(out.chars().count(), 1900);
+        assert!(out.ends_with('…'));
+    }
 }

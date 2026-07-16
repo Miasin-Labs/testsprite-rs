@@ -297,6 +297,13 @@ pub async fn code_summary_to_json(yaml_path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path as AxumPath, State};
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+
     use super::*;
 
     #[tokio::test]
@@ -341,5 +348,361 @@ mod tests {
         assert_eq!(v["api_endpoints"][0]["path"], "/health");
         assert!(!out.contains('\n'));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Point a freshly built client at a served router. The client reads
+    /// `envs::api_url()` only in `new`, so the guard just has to span the
+    /// construction, matching the existing round-trip test above.
+    fn client_for(base: &str) -> BackendClient {
+        let _guard = crate::testutil::env_guard(&[("API_URL", Some(base))]);
+        BackendClient::new("test-key")
+    }
+
+    /// A local api-router backend (deterministic engine, no LLM, no cloud).
+    fn local_backend() -> Router {
+        crate::server::api::router(crate::server::api::AppState::new(
+            None,
+            crate::server::executors::TestKind::Backend,
+        ))
+    }
+
+    #[tokio::test]
+    async fn post_json_injects_api_key_into_json_body() {
+        // `postJSON` parity: the api key is added to the JSON body of every POST
+        // (in addition to the bearer header). Capture the received body to prove
+        // the injection actually reaches the wire without clobbering caller keys.
+        async fn capture(
+            State(sink): State<Arc<Mutex<Value>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *sink.lock().unwrap() = body;
+            Json(json!({ "ok": true }))
+        }
+
+        let captured: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+        let router = Router::new()
+            .route("/capture", post(capture))
+            .with_state(captured.clone());
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        let resp = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.post_json("/capture", json!({ "foo": "bar" })),
+        )
+        .await
+        .expect("post_json timed out")
+        .expect("post_json ok");
+        let out: Value = resp.json().await.unwrap();
+        assert_eq!(out["ok"], true);
+
+        let body = captured.lock().unwrap().clone();
+        assert_eq!(body["apiKey"], "test-key");
+        // The caller's own field survives the injection.
+        assert_eq!(body["foo"], "bar");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn check_maps_401_to_auth_failed_and_500_to_backend_error() {
+        async fn unauthorized() -> (StatusCode, Json<Value>) {
+            (StatusCode::UNAUTHORIZED, Json(json!({ "message": "nope" })))
+        }
+        async fn server_error() -> (StatusCode, String) {
+            (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string())
+        }
+
+        let router = Router::new()
+            .route("/unauthorized", post(unauthorized))
+            .route("/server-error", post(server_error));
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        let err401 = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.post_json("/unauthorized", json!({})),
+        )
+        .await
+        .expect("401 request timed out")
+        .expect_err("401 must map to an error");
+        assert!(err401.to_string().contains("AUTH_FAILED (401)"), "{err401}");
+
+        let err500 = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.post_json("/server-error", json!({})),
+        )
+        .await
+        .expect("500 request timed out")
+        .expect_err("500 must map to an error");
+        let msg = err500.to_string();
+        // Non-401 errors surface the status and the raw body for triage.
+        assert!(msg.contains("Backend error: 500"), "{msg}");
+        assert!(msg.contains("boom"), "{msg}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_standard_prd_uploads_files_and_returns_prd_object() {
+        let (base, server) = crate::testutil::serve_router(local_backend()).await;
+        let client = client_for(&base);
+
+        // A real file so the multipart `files` loop actually reads + attaches it.
+        let root = crate::local::tmp_root();
+        let prd_file = root.join("prd.md");
+        std::fs::write(&prd_file, "# Product\nLogin flow.\n").unwrap();
+
+        // A code summary with an endpoint yields a nonempty deterministic PRD.
+        let code_summary = json!({
+            "project_name": "demo",
+            "base_url": "http://127.0.0.1:1",
+            "api_endpoints": [ { "method": "GET", "path": "/health" } ],
+        })
+        .to_string();
+
+        let prd = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.generate_standard_prd(
+                std::slice::from_ref(&prd_file),
+                &code_summary,
+                TestType::Backend,
+            ),
+        )
+        .await
+        .expect("generate_standard_prd timed out")
+        .expect("generate_standard_prd ok");
+
+        assert!(prd.is_object(), "expected a PRD object, got {prd}");
+        assert_eq!(prd["meta"]["project"], "demo");
+        assert!(
+            prd["features"].as_array().is_some_and(|f| !f.is_empty()),
+            "features should be nonempty: {prd}"
+        );
+        std::fs::remove_dir_all(root).ok();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_backend_test_plan_parses_cases_with_ids() {
+        let (base, server) = crate::testutil::serve_router(local_backend()).await;
+        let client = client_for(&base);
+
+        // prdContent is a stringified PRD; the engine plans one case per endpoint.
+        let prd_content = json!({
+            "project_name": "demo",
+            "api_endpoints": [
+                { "method": "GET", "path": "/health" },
+                { "method": "POST", "path": "/users" },
+            ],
+        })
+        .to_string();
+
+        let cases = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.generate_backend_test_plan(&prd_content, TargetScope::Codebase),
+        )
+        .await
+        .expect("generate_backend_test_plan timed out")
+        .expect("generate_backend_test_plan ok");
+
+        assert_eq!(cases.len(), 2);
+        assert!(
+            cases.iter().all(|c| !c.id.is_empty()),
+            "every case has an id"
+        );
+        assert_eq!(cases[0].id, "TC001");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_frontend_test_plan_returns_an_array() {
+        let (base, server) = crate::testutil::serve_router(local_backend()).await;
+        let client = client_for(&base);
+
+        let standard_prd = json!({
+            "api_endpoints": [
+                { "method": "GET", "path": "/a" },
+                { "method": "GET", "path": "/b" },
+            ],
+        });
+
+        let plan = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.generate_frontend_test_plan(&standard_prd, Some(TargetScope::Codebase)),
+        )
+        .await
+        .expect("generate_frontend_test_plan timed out")
+        .expect("generate_frontend_test_plan ok");
+
+        let arr = plan.as_array().expect("frontend plan is an array");
+        assert_eq!(arr.len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_backend_and_frontend_return_ids_matching_plan_length() {
+        let (base, server) = crate::testutil::serve_router(local_backend()).await;
+        let client = client_for(&base);
+
+        // An explicit testPlan is echoed as one running test id per case. The
+        // cases carry no spec, so the spawned executor fails fast (no LLM, no
+        // network) — we only assert on the id vector the call returns.
+        let body = json!({
+            "testPlan": [
+                { "id": "TC001", "title": "a", "description": "" },
+                { "id": "TC002", "title": "b", "description": "" },
+                { "id": "TC003", "title": "c", "description": "" },
+            ],
+        });
+
+        let backend_ids = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.run_backend_test(body.clone()),
+        )
+        .await
+        .expect("run_backend_test timed out")
+        .expect("run_backend_test ok");
+        assert_eq!(backend_ids.len(), 3);
+
+        let frontend_ids =
+            tokio::time::timeout(Duration::from_secs(5), client.run_frontend_test(body))
+                .await
+                .expect("run_frontend_test timed out")
+                .expect("run_frontend_test ok");
+        assert_eq!(frontend_ids.len(), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_test_errors_when_response_has_no_test_id_array() {
+        // The run endpoint replies with an object that has no `testIds` field.
+        async fn no_ids() -> Json<Value> {
+            Json(json!({ "unexpected": true }))
+        }
+        let router = Router::new().route("/mcp/backend-test/run", post(no_ids));
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        let err = tokio::time::timeout(Duration::from_secs(5), client.run_backend_test(json!({})))
+            .await
+            .expect("run timed out")
+            .expect_err("missing testIds must error");
+        assert!(
+            err.to_string().contains("expected array of test IDs"),
+            "{err}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn poll_completes_in_one_cycle_when_entities_are_already_finished() {
+        // Entities are served already-finished (PASSED), so `is_running()` is
+        // false on the first fetch and `poll_test_status` returns without ever
+        // hitting its 3s sleep.
+        async fn finished(AxumPath(id): AxumPath<String>) -> Json<Value> {
+            Json(json!({
+                "projectId": "p1",
+                "testId": id,
+                "userId": "u1",
+                "title": "T",
+                "description": "D",
+                "code": "print(1)",
+                "testStatus": "PASSED",
+                "testError": "",
+            }))
+        }
+        let router = Router::new().route("/mcp/project/test/{id}", get(finished));
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        // get_test_entity round-trips a single finished entity.
+        let one = tokio::time::timeout(Duration::from_secs(5), client.get_test_entity("solo"))
+            .await
+            .expect("get_test_entity timed out")
+            .expect("get_test_entity ok");
+        assert_eq!(one.test_id.as_deref(), Some("solo"));
+        assert!(one.passed());
+        assert!(!one.is_running());
+
+        let ids = ["a".to_string(), "b".to_string()];
+        let mut updates: Vec<usize> = Vec::new();
+        let started = std::time::Instant::now();
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.poll_test_status(&ids, |completed: usize, slots: &[Option<TestEntity>]| {
+                assert_eq!(slots.len(), 2);
+                updates.push(completed);
+            }),
+        )
+        .await
+        .expect("poll_test_status timed out")
+        .expect("poll_test_status ok");
+
+        // One cycle, no sleep: on_update fired exactly once with all completed.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "poll should not have slept"
+        );
+        assert_eq!(updates, vec![2]);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(TestEntity::passed));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn poll_one_returns_false_and_leaves_slot_empty_on_transient_error() {
+        async fn boom(AxumPath(_id): AxumPath<String>) -> StatusCode {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        let router = Router::new().route("/mcp/project/test/{id}", get(boom));
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        let mut slot: Option<TestEntity> = None;
+        let finished =
+            tokio::time::timeout(Duration::from_secs(5), client.poll_one("t1", &mut slot))
+                .await
+                .expect("poll_one timed out");
+        // A fetch error is transient: not finished, and the slot stays empty so a
+        // later cycle can retry.
+        assert!(!finished);
+        assert!(slot.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tunnel_create_and_version_round_trip_through_the_local_router() {
+        let (base, server) = crate::testutil::serve_router(local_backend()).await;
+        let client = client_for(&base);
+
+        let (id, secret) = tokio::time::timeout(Duration::from_secs(5), client.tunnel_create())
+            .await
+            .expect("tunnel_create timed out")
+            .expect("tunnel_create ok");
+        assert!(!id.is_empty(), "tunnel id should be minted");
+        assert!(!secret.is_empty(), "tunnel secret should be minted");
+
+        let version = tokio::time::timeout(Duration::from_secs(5), client.tunnel_version())
+            .await
+            .expect("tunnel_version timed out")
+            .expect("tunnel_version ok");
+        assert_eq!(version, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tunnel_create_errors_when_id_missing() {
+        async fn no_id() -> Json<Value> {
+            Json(json!({ "secret": "s" }))
+        }
+        let router = Router::new().route("/api/tunnel/v2", post(no_id));
+        let (base, server) = crate::testutil::serve_router(router).await;
+        let client = client_for(&base);
+
+        let err = tokio::time::timeout(Duration::from_secs(5), client.tunnel_create())
+            .await
+            .expect("tunnel_create timed out")
+            .expect_err("missing id must error");
+        assert!(err.to_string().contains("no tunnel id"), "{err}");
+        server.abort();
     }
 }
