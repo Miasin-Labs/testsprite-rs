@@ -118,7 +118,25 @@ pub async fn run_collect(
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
 
     let tests = if ids.is_empty() {
-        store::list(root).await?
+        // Quarantined cases (acceptance gate flagged their oracle as suspect)
+        // are excluded from whole-suite runs; running one explicitly by id
+        // still works — that is the release valve.
+        let all = store::list(root).await?;
+        let (quarantined, runnable): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(crate::local::accept::is_quarantined_test);
+        if !quarantined.is_empty() {
+            eprintln!(
+                "skipping {} quarantined test(s) (suspect oracle — run by id or `test release <id>` to reinstate): {}",
+                quarantined.len(),
+                quarantined
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        runnable
     } else {
         let mut loaded = Vec::with_capacity(ids.len());
         for id in ids {
@@ -205,7 +223,7 @@ pub async fn run_collect(
         }
 
         let outcomes = run_wave(to_run, &ctx, default_kind, jobs).await;
-        for (t, outcome) in outcomes {
+        for (t, outcome, elapsed_ms, exec_tokens) in outcomes {
             if !outcome.passed {
                 for p in t.produces() {
                     failed_caps.insert(p);
@@ -213,8 +231,13 @@ pub async fn run_collect(
             }
             let kind = t.kind.unwrap_or(default_kind);
             let code_path = write_executed_artifact(root, &t, &outcome, kind);
+            // post_process runs sequentially here, so its token spend is
+            // attributable even when the wave itself ran concurrently.
+            let before_post = llm.as_ref().map(|l| l.usage());
             let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
-            store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
+            let meta = run_meta(&llm, model, elapsed_ms, exec_tokens, before_post);
+            store::write_result_with_meta(root, &t.id, &outcome, analysis.as_ref(), kind, &meta)
+                .await?;
             report.push(build_entry(
                 &t,
                 &outcome,
@@ -228,11 +251,18 @@ pub async fn run_collect(
 
     // Teardown always runs (cleanup), sequentially, regardless of failures.
     for t in teardown {
-        let outcome = run_one(&t, &ctx, default_kind).await;
+        let before = llm.as_ref().map(|l| l.usage());
+        let (outcome, elapsed_ms) = execute_case(&t, &ctx, default_kind).await;
         let kind = t.kind.unwrap_or(default_kind);
         let code_path = write_executed_artifact(root, &t, &outcome, kind);
         let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
-        store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
+        let tokens = llm.as_ref().zip(before).map(|(l, b)| {
+            let d = l.usage().since(&b);
+            (d.prompt_tokens, d.completion_tokens)
+        });
+        let meta = run_meta(&llm, model, elapsed_ms, tokens, None);
+        store::write_result_with_meta(root, &t.id, &outcome, analysis.as_ref(), kind, &meta)
+            .await?;
         report.push(build_entry(
             &t,
             &outcome,
@@ -316,29 +346,40 @@ fn interrupt_watcher(flag: Arc<AtomicBool>) -> Option<tokio::task::JoinHandle<()
     }
 }
 
-/// Resolve the executor for `t` and run one case.
-async fn run_one(
+/// Resolve the executor for `t` and run one case. Returns the outcome plus
+/// the wall-clock the execution took (telemetry for the run row). Shared with
+/// the acceptance gate ([`crate::local::accept`]), which runs candidates the
+/// same way a real suite run would.
+pub(crate) async fn execute_case(
     t: &LocalTest,
     ctx: &ExecCtx,
     default_kind: crate::server::executors::TestKind,
-) -> Outcome {
+) -> (Outcome, u64) {
+    let started = std::time::Instant::now();
     let kind = t.kind.unwrap_or(default_kind);
     let ex = crate::server::executors::for_kind(kind);
     let case = t.to_case_value();
     // Hard wall-clock: a hang/deadlock (e.g. blocking_read in an async test)
     // becomes a FAILED/timeout verdict instead of stalling the whole run.
     let secs = crate::envs::test_timeout_secs();
-    if secs == 0 {
-        return ex.run(&case, ctx).await;
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(secs), ex.run(&case, ctx)).await {
-        Ok(outcome) => outcome,
-        Err(_) => Outcome::fail(
-            format!("test exceeded the {secs}s time limit (possible hang/deadlock)"),
-            String::new(),
-        ),
-    }
+    let outcome = if secs == 0 {
+        ex.run(&case, ctx).await
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(secs), ex.run(&case, ctx)).await {
+            Ok(outcome) => outcome,
+            Err(_) => Outcome::fail(
+                format!("test exceeded the {secs}s time limit (possible hang/deadlock)"),
+                String::new(),
+            ),
+        }
+    };
+    (outcome, started.elapsed().as_millis() as u64)
 }
+
+/// One wave entry: the outcome, its wall-clock, and the LLM tokens spent
+/// executing it — `None` when concurrent execution makes per-test token
+/// attribution impossible (the ledger is shared across in-flight tests).
+type WaveOutcome = (LocalTest, Outcome, u64, Option<(u64, u64)>);
 
 /// Run one dependency level: sequentially when `jobs <= 1`, else up to `jobs`
 /// concurrently. Executors share the Arc-backed `ctx` read-only, so concurrency
@@ -348,23 +389,56 @@ async fn run_wave(
     ctx: &ExecCtx,
     default_kind: crate::server::executors::TestKind,
     jobs: usize,
-) -> Vec<(LocalTest, Outcome)> {
+) -> Vec<WaveOutcome> {
     if jobs <= 1 || tests.len() <= 1 {
         let mut out = Vec::with_capacity(tests.len());
         for t in tests {
-            let o = run_one(&t, ctx, default_kind).await;
-            out.push((t, o));
+            let before = ctx.llm.as_ref().map(|l| l.usage());
+            let (o, elapsed) = execute_case(&t, ctx, default_kind).await;
+            let tokens = ctx.llm.as_ref().zip(before).map(|(l, b)| {
+                let d = l.usage().since(&b);
+                (d.prompt_tokens, d.completion_tokens)
+            });
+            out.push((t, o, elapsed, tokens));
         }
         return out;
     }
     futures::stream::iter(tests)
         .map(|t| async move {
-            let o = run_one(&t, ctx, default_kind).await;
-            (t, o)
+            let (o, elapsed) = execute_case(&t, ctx, default_kind).await;
+            (t, o, elapsed, None)
         })
         .buffer_unordered(jobs)
         .collect()
         .await
+}
+
+/// Assemble the telemetry row for one executed test: wall-clock, the model in
+/// play (only when an LLM client actually exists), execution-time token spend
+/// (when attributable), plus any post-process (analysis/fix) spend measured
+/// from `before_post`.
+fn run_meta(
+    llm: &Option<crate::server::llm::LlmClient>,
+    model: &str,
+    elapsed_ms: u64,
+    exec_tokens: Option<(u64, u64)>,
+    before_post: Option<crate::server::llm::UsageSnapshot>,
+) -> store::RunMeta {
+    let post = llm.as_ref().zip(before_post).map(|(l, b)| {
+        let d = l.usage().since(&b);
+        (d.prompt_tokens, d.completion_tokens)
+    });
+    let tokens = match (exec_tokens, post) {
+        (Some((ep, ec)), Some((pp, pc))) => Some((ep + pp, ec + pc)),
+        (Some(t), None) | (None, Some(t)) => Some(t),
+        (None, None) => None,
+    };
+    store::RunMeta {
+        elapsed_ms: Some(elapsed_ms),
+        model: llm.as_ref().map(|_| model.to_string()),
+        prompt_tokens: tokens.map(|(p, _)| p),
+        completion_tokens: tokens.map(|(_, c)| c),
+    }
 }
 
 /// LLM failure analysis + optional fix-file for a completed outcome. No-op when

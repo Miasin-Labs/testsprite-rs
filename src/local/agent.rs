@@ -235,10 +235,18 @@ pub async fn resolve(
     let (result, summary) = match kind.as_str() {
         "generate" => {
             let out = if args["cover"].as_bool() == Some(true) {
-                generate::generate_cover(root, root, model).await?
+                generate::generate_cover(root, root, model, &generate::GenOpts::default()).await?
             } else {
-                generate::generate(root, None, args["instruction"].as_str(), None, model, None)
-                    .await?
+                generate::generate(
+                    root,
+                    None,
+                    args["instruction"].as_str(),
+                    None,
+                    model,
+                    None,
+                    &generate::GenOpts::default(),
+                )
+                .await?
             };
             let summary = format!("Generated {} test(s).", out.test_ids.len());
             (

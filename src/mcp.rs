@@ -168,9 +168,15 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         "testsprite_generate" => {
             let model = arg_model(args);
             let root = std::env::current_dir()?;
+            let opts = crate::local::generate::GenOpts {
+                budget: args.get("budget").and_then(|v| v.as_u64()),
+                gate: args.get("gate").and_then(|v| v.as_bool()).unwrap_or(true),
+                ..Default::default()
+            };
             let out = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
-                crate::local::generate::generate_changed(&root, since, model.as_ref()).await?
+                crate::local::generate::generate_changed(&root, since, model.as_ref(), &opts)
+                    .await?
             } else {
                 let kind = args
                     .get("type")
@@ -187,10 +193,16 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                         .map(std::path::Path::new),
                     model.as_ref(),
                     kind,
+                    &opts,
                 )
                 .await?
             };
-            Ok(json!({ "generated": out.test_ids.len(), "ids": out.test_ids, "prdId": out.prd_id }))
+            Ok(json!({
+                "generated": out.test_ids.len(),
+                "ids": out.test_ids,
+                "quarantined": out.quarantined,
+                "prdId": out.prd_id,
+            }))
         }
         "testsprite_explore" => {
             let root = std::env::current_dir()?;
@@ -224,11 +236,17 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from)
                 .unwrap_or(root.clone());
+            let opts = crate::local::generate::GenOpts {
+                budget: args.get("budget").and_then(|v| v.as_u64()),
+                gate: args.get("gate").and_then(|v| v.as_bool()).unwrap_or(true),
+                ..Default::default()
+            };
             let out = crate::local::generate::adversarial(
                 &root,
                 &scan,
                 model.as_ref(),
                 args.get("store").and_then(|v| v.as_bool()).unwrap_or(false),
+                &opts,
             )
             .await?;
             Ok(json!({ "proposed": out.cases.len(), "cases": out.cases, "stored": out.test_ids }))
@@ -317,6 +335,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 model: model.as_ref(),
                 fix: args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false),
                 serve: args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false),
+                budget: args.get("budget").and_then(|v| v.as_u64()),
                 require_approved_prd: args
                     .get("require_approved_prd")
                     .and_then(|v| v.as_bool())

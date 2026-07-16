@@ -51,6 +51,8 @@ pub struct CycleOpts<'a> {
     pub fix: bool,
     pub serve: bool,
     pub require_approved_prd: bool,
+    /// Total LLM token cap for the generation stage.
+    pub budget: Option<u64>,
 }
 
 /// Run one full loop pass and return its [`CycleReport`].
@@ -61,7 +63,11 @@ pub async fn cycle(root: &Path, opts: CycleOpts<'_>) -> anyhow::Result<CycleRepo
     let mut generated = Vec::new();
     if opts.generate && opts.changed {
         let since = opts.since.unwrap_or("HEAD");
-        match generate::generate_changed(root, since, opts.model).await {
+        let gen_opts = generate::GenOpts {
+            budget: opts.budget,
+            ..Default::default()
+        };
+        match generate::generate_changed(root, since, opts.model, &gen_opts).await {
             Ok(g) => generated = g.test_ids,
             Err(e) => tracing::warn!("cycle: generate step skipped ({e})"),
         }

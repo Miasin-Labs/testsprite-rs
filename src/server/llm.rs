@@ -4,15 +4,54 @@
 //! (`[openai].api_key`). Used to generate the PRD, the test plan, and the
 //! executable Python test code — exactly the artifacts the cloud produces.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// Cumulative token/call spend across every request made through one client
+/// lineage — clones (including the ones threaded through `ExecCtx`) share the
+/// same ledger, so a command can meter and budget-cap its whole LLM spend.
+#[derive(Debug, Default)]
+pub struct UsageLedger {
+    calls: AtomicU64,
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+}
+
+/// Point-in-time copy of a [`UsageLedger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UsageSnapshot {
+    pub calls: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl UsageSnapshot {
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    /// Tokens spent since an earlier snapshot of the same ledger.
+    pub fn since(&self, earlier: &UsageSnapshot) -> UsageSnapshot {
+        UsageSnapshot {
+            calls: self.calls.saturating_sub(earlier.calls),
+            prompt_tokens: self.prompt_tokens.saturating_sub(earlier.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_sub(earlier.completion_tokens),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct LlmClient {
     http: reqwest::Client,
     api_key: String,
     pub model: String,
+    usage: Arc<UsageLedger>,
 }
 
 /// Resolve the OpenAI key: env first, then the jfc credentials file.
@@ -50,6 +89,8 @@ fn api_base() -> String {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
 }
 #[derive(Deserialize)]
 struct Choice {
@@ -58,6 +99,30 @@ struct Choice {
 #[derive(Deserialize)]
 struct ChatMessage {
     content: String,
+}
+
+/// Token accounting as the wire reports it: chat/completions uses
+/// `prompt_tokens`/`completion_tokens`, the responses API uses
+/// `input_tokens`/`output_tokens`. Absent fields count as zero.
+#[derive(Debug, Default, Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+impl WireUsage {
+    fn prompt(&self) -> u64 {
+        self.prompt_tokens.max(self.input_tokens)
+    }
+    fn completion(&self) -> u64 {
+        self.completion_tokens.max(self.output_tokens)
+    }
 }
 
 impl LlmClient {
@@ -69,12 +134,39 @@ impl LlmClient {
                 .expect("reqwest client"),
             api_key,
             model,
+            usage: Arc::new(UsageLedger::default()),
         }
     }
 
     /// Build from ambient config; `None` if no key is available.
     pub fn from_env(model: &str) -> Option<Self> {
         resolve_key().map(|k| Self::new(k, model.to_string()))
+    }
+
+    /// Cumulative spend across this client and all its clones.
+    pub fn usage(&self) -> UsageSnapshot {
+        UsageSnapshot {
+            calls: self.usage.calls.load(Ordering::Relaxed),
+            prompt_tokens: self.usage.prompt_tokens.load(Ordering::Relaxed),
+            completion_tokens: self.usage.completion_tokens.load(Ordering::Relaxed),
+        }
+    }
+
+    /// True once total spend has reached `budget` tokens (`None` = unlimited).
+    pub fn over_budget(&self, budget: Option<u64>) -> bool {
+        budget.is_some_and(|b| self.usage().total_tokens() >= b)
+    }
+
+    fn record_usage(&self, usage: Option<&WireUsage>) {
+        self.usage.calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(u) = usage {
+            self.usage
+                .prompt_tokens
+                .fetch_add(u.prompt(), Ordering::Relaxed);
+            self.usage
+                .completion_tokens
+                .fetch_add(u.completion(), Ordering::Relaxed);
+        }
     }
 
     /// One chat turn. `json_mode` forces a JSON object response.
@@ -131,6 +223,7 @@ impl LlmClient {
             bail!("openai error {}: {}", status.as_u16(), text);
         }
         let parsed: ChatResponse = serde_json::from_str(&text).context("parse openai response")?;
+        self.record_usage(parsed.usage.as_ref());
         parsed
             .choices
             .into_iter()
@@ -166,6 +259,10 @@ impl LlmClient {
         }
         let parsed: Value =
             serde_json::from_str(&text).context("parse openai responses response")?;
+        let usage = parsed
+            .get("usage")
+            .and_then(|u| serde_json::from_value::<WireUsage>(u.clone()).ok());
+        self.record_usage(usage.as_ref());
         extract_responses_text(&parsed).ok_or_else(|| anyhow!("openai responses returned no text"))
     }
 
@@ -389,18 +486,29 @@ impl LlmClient {
     }
 
     /// Generate a test plan (one case per function) from a list of function units
-    /// `[{name,file,branches}]`, targeting each function's inputs/outputs and its
-    /// control-flow branches. Returns [{id,title,description}].
-    pub async fn generate_from_functions(&self, functions: &Value) -> Result<Vec<Value>> {
-        let system = "You are TestSprite's coverage-driven planner. Given a JSON array of functions \
-            {name,file,branches}, produce one test case per function that exercises its inputs/outputs \
-            and every control-flow branch. Respond with JSON only: {\"plan\":[{\"id\":\"TC001\",\
-            \"title\":...,\"description\":\"what to feed the function and assert, covering its branches\"}]}.";
+    /// `[{name,file,branches,source?}]`, targeting each function's inputs/outputs
+    /// and its control-flow branches through one [`Perspective`]. Returns
+    /// [{id,title,description}].
+    pub async fn generate_from_functions(
+        &self,
+        functions: &Value,
+        perspective: Perspective,
+    ) -> Result<Vec<Value>> {
+        let system = format!(
+            "You are TestSprite's coverage-driven planner. Given a JSON array of functions \
+            {{name,file,branches,source?}}, produce one test case per function that exercises its \
+            inputs/outputs and its control-flow branches. {} Respond with JSON only: \
+            {{\"plan\":[{{\"id\":\"{}001\",\"title\":...,\"description\":\"what to feed the \
+            function and assert, covering its branches\"}}]}} — ids MUST use the {} prefix.",
+            perspective.prompt_clause(),
+            perspective.id_prefix(),
+            perspective.id_prefix(),
+        );
         let user = format!(
             "Functions to cover:\n{}",
             serde_json::to_string_pretty(functions)?
         );
-        let out = self.chat(system, &user, true).await?;
+        let out = self.chat(&system, &user, true).await?;
         let v: Value = serde_json::from_str(&out).context("cover plan was not valid JSON")?;
         let plan = v.get("plan").cloned().unwrap_or(v);
         plan.as_array()
@@ -423,6 +531,72 @@ impl LlmClient {
         );
         let out = self.chat(system, &user, true).await?;
         serde_json::from_str(&out).context("plan_action was not valid JSON")
+    }
+}
+
+/// The angle a coverage-driven generation pass takes on each function. LLMs
+/// left to one framing produce almost exclusively happy-path cases (the
+/// literature measures ~0% exception-path coverage vs 93% for search-based
+/// tools), so callers fan the same units through several perspectives and
+/// merge the results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Perspective {
+    Normal,
+    Boundary,
+    Exception,
+}
+
+impl Perspective {
+    pub const ALL: &[Perspective] = &[
+        Perspective::Normal,
+        Perspective::Boundary,
+        Perspective::Exception,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Perspective::Normal => "normal",
+            Perspective::Boundary => "boundary",
+            Perspective::Exception => "exception",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "normal" => Some(Perspective::Normal),
+            "boundary" => Some(Perspective::Boundary),
+            "exception" => Some(Perspective::Exception),
+            _ => None,
+        }
+    }
+
+    /// Distinct case-id prefix per view, so merged views can't collide on id
+    /// (the store upserts by id — a collision silently overwrites).
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Perspective::Normal => "TC",
+            Perspective::Boundary => "BND",
+            Perspective::Exception => "EXC",
+        }
+    }
+
+    fn prompt_clause(self) -> &'static str {
+        match self {
+            Perspective::Normal => {
+                "Focus on NORMAL operation: representative valid inputs and the documented \
+                 happy-path behavior."
+            }
+            Perspective::Boundary => {
+                "Focus on BOUNDARY inputs: empty/zero/negative values, numeric extremes, \
+                 off-by-one limits, empty and oversized collections/strings, and unicode — \
+                 the inputs at the edges of each branch condition."
+            }
+            Perspective::Exception => {
+                "Focus on ERROR and EXCEPTION paths: invalid inputs, unmet preconditions, \
+                 failure returns (Err/None/exception), and how the function must reject or \
+                 report them. Every case should target a failure-handling branch."
+            }
+        }
     }
 }
 
@@ -601,6 +775,18 @@ mod tests {
         Reply {
             status: 200,
             body: json!({ "choices": [{ "message": { "content": content } }] }).to_string(),
+        }
+    }
+
+    /// [`ok_chat`] plus wire usage accounting.
+    fn ok_chat_with_usage(content: &str, prompt: u64, completion: u64) -> Reply {
+        Reply {
+            status: 200,
+            body: json!({
+                "choices": [{ "message": { "content": content } }],
+                "usage": { "prompt_tokens": prompt, "completion_tokens": completion },
+            })
+            .to_string(),
         }
     }
 
@@ -1062,7 +1248,10 @@ mod tests {
         let plan = {
             let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
             client
-                .generate_from_functions(&json!([{ "name": "foo", "file": "a.rs", "branches": 2 }]))
+                .generate_from_functions(
+                    &json!([{ "name": "foo", "file": "a.rs", "branches": 2 }]),
+                    Perspective::Normal,
+                )
                 .await
         }
         .unwrap();
@@ -1149,5 +1338,72 @@ mod tests {
         };
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn usage_ledger_accumulates_across_clones_and_gates_budget() {
+        let (base, _fake, server) =
+            fake_openai(ok_chat_with_usage("hi", 120, 30), ok_resp("unused")).await;
+        let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+        let client = LlmClient::new("k".into(), "gpt-4o-mini".into());
+        let clone = client.clone();
+
+        clone.chat("s", "u", false).await.unwrap();
+        client.chat("s", "u", false).await.unwrap();
+
+        // Both calls landed on ONE shared ledger, visible from either handle.
+        let usage = client.usage();
+        assert_eq!(usage.calls, 2);
+        assert_eq!(usage.prompt_tokens, 240);
+        assert_eq!(usage.completion_tokens, 60);
+        assert_eq!(usage.total_tokens(), 300);
+
+        // `since` isolates a span; `over_budget` trips at the cap, not below.
+        let before = clone.usage();
+        clone.chat("s", "u", false).await.unwrap();
+        let delta = clone.usage().since(&before);
+        assert_eq!(delta.calls, 1);
+        assert_eq!(delta.total_tokens(), 150);
+        assert!(!client.over_budget(None));
+        assert!(!client.over_budget(Some(451)));
+        assert!(client.over_budget(Some(450)));
+        assert!(client.over_budget(Some(10)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perspectives_shape_the_cover_prompt_and_id_prefix() {
+        let (base, fake, server) = fake_openai(
+            ok_chat(r#"{"plan":[{"id":"BND001","title":"boundary case"}]}"#),
+            ok_resp("unused"),
+        )
+        .await;
+        let _g = env_guard(&[("OPENAI_BASE_URL", Some(base.as_str()))]);
+        let client = LlmClient::new("k".into(), "gpt-4o-mini".into());
+
+        let functions = json!([{ "name": "f", "file": "a.rs", "branches": 3 }]);
+        let plan = client
+            .generate_from_functions(&functions, Perspective::Boundary)
+            .await
+            .unwrap();
+        assert_eq!(plan[0]["id"], "BND001");
+
+        let sent = fake.chat_reqs.lock().await;
+        let system = sent[0]["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("BOUNDARY"), "{system}");
+        assert!(system.contains("BND"), "{system}");
+        assert!(
+            !system.contains("ERROR and EXCEPTION"),
+            "boundary view must not carry the exception clause: {system}"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn perspective_parse_and_labels_round_trip() {
+        for p in Perspective::ALL {
+            assert_eq!(Perspective::parse(p.label()), Some(*p));
+        }
+        assert_eq!(Perspective::parse("nope"), None);
     }
 }

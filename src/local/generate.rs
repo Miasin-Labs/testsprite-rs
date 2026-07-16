@@ -15,13 +15,38 @@ use serde_json::{Value, json};
 
 use super::store;
 use crate::server::executors::TestKind;
-use crate::server::llm::LlmClient;
+use crate::server::llm::{LlmClient, Perspective};
 
-/// Result of a generate run: the persisted PRD id (when a PRD was produced) and
-/// the stored test-case ids.
+/// Knobs shared by every generation entry point.
+#[derive(Debug, Clone)]
+pub struct GenOpts {
+    /// Total LLM token cap for this command; generation stops (keeping what it
+    /// already produced) once the ledger reaches it. `None` = unlimited.
+    pub budget: Option<u64>,
+    /// Acceptance-screen LLM-generated cases against the current baseline
+    /// before they count as tests (deterministic doc/summary cases skip it —
+    /// they carry no hallucinated oracle).
+    pub gate: bool,
+    /// Perspectives for unit-based generation (`--cover` / `--changed`).
+    pub views: Vec<Perspective>,
+}
+
+impl Default for GenOpts {
+    fn default() -> Self {
+        Self {
+            budget: None,
+            gate: true,
+            views: Perspective::ALL.to_vec(),
+        }
+    }
+}
+
+/// Result of a generate run: the persisted PRD id (when a PRD was produced),
+/// the stored test-case ids, and the subset the acceptance gate quarantined.
 pub struct GenSummary {
     pub prd_id: Option<String>,
     pub test_ids: Vec<String>,
+    pub quarantined: Vec<String>,
 }
 
 /// Result of adversarial QA planning: the cases the LLM proposed and the ids
@@ -42,6 +67,7 @@ pub async fn generate(
     doc: Option<&Path>,
     model: &str,
     kind: Option<TestKind>,
+    opts: &GenOpts,
 ) -> anyhow::Result<GenSummary> {
     // Structured API doc (Postman / OpenAPI / HAR) -> deterministic spec cases,
     // no LLM key needed. The fast, robust path: cases run via execute_spec
@@ -63,6 +89,7 @@ pub async fn generate(
             return Ok(GenSummary {
                 prd_id: Some(prd_id),
                 test_ids,
+                quarantined: Vec::new(),
             });
         }
         // Unstructured doc -> LLM normalization (needs a key).
@@ -77,9 +104,11 @@ pub async fn generate(
         let prd_id =
             persist_prd(root, &format!("doc:{}", dp.display()), &prd, &cases, kind).await?;
         let test_ids = store_cases(root, cases, kind, Some(&prd_id)).await?;
+        let quarantined = screen_if(opts, root, &test_ids, model).await?;
         return Ok(GenSummary {
             prd_id: Some(prd_id),
             test_ids,
+            quarantined,
         });
     }
 
@@ -110,6 +139,7 @@ pub async fn generate(
             return Ok(GenSummary {
                 prd_id: Some(prd_id),
                 test_ids,
+                quarantined: Vec::new(),
             });
         }
     }
@@ -142,10 +172,28 @@ pub async fn generate(
     let cases = llm.generate_plan(&prd).await?;
     let prd_id = persist_prd(root, &source, &prd, &cases, kind).await?;
     let test_ids = store_cases(root, cases, kind, Some(&prd_id)).await?;
+    let quarantined = screen_if(opts, root, &test_ids, model).await?;
     Ok(GenSummary {
         prd_id: Some(prd_id),
         test_ids,
+        quarantined,
     })
+}
+
+/// Run the acceptance gate over freshly stored LLM-generated cases when the
+/// opts ask for it; returns the quarantined ids.
+async fn screen_if(
+    opts: &GenOpts,
+    root: &Path,
+    ids: &[String],
+    model: &str,
+) -> anyhow::Result<Vec<String>> {
+    if !opts.gate || ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(crate::local::accept::screen(root, ids, model)
+        .await?
+        .quarantined)
 }
 
 fn read_summary_value(p: &Path) -> anyhow::Result<Value> {
@@ -191,26 +239,37 @@ async fn persist_prd(
 
 /// Generate a test case per function found by the structural coverage surface
 /// under `path`. No PRD is produced (functions → cases directly).
-pub async fn generate_cover(root: &Path, path: &Path, model: &str) -> anyhow::Result<GenSummary> {
+pub async fn generate_cover(
+    root: &Path,
+    path: &Path,
+    model: &str,
+    opts: &GenOpts,
+) -> anyhow::Result<GenSummary> {
     let units = crate::local::coverage::structural_surface(path)?;
     if units.is_empty() {
         anyhow::bail!("no functions found under {}", path.display());
     }
-    generate_for_units(root, &units, model, "test generate --cover").await
+    generate_for_units(root, &units, model, "test generate --cover", opts).await
 }
 
 /// Code Diff Mode: generate a test for each function CHANGED since `since` that
 /// no stored test already covers. No PRD (functions → cases directly).
-pub async fn generate_changed(root: &Path, since: &str, model: &str) -> anyhow::Result<GenSummary> {
+pub async fn generate_changed(
+    root: &Path,
+    since: &str,
+    model: &str,
+    opts: &GenOpts,
+) -> anyhow::Result<GenSummary> {
     let changed = crate::local::changed::changed_surface(root, since)?;
     let targets = crate::local::changed::uncovered_changed_units(root, &changed).await?;
     if targets.is_empty() {
         return Ok(GenSummary {
             prd_id: None,
             test_ids: Vec::new(),
+            quarantined: Vec::new(),
         });
     }
-    generate_for_units(root, &targets, model, "test generate --changed").await
+    generate_for_units(root, &targets, model, "test generate --changed", opts).await
 }
 
 /// Ask the TestSprite LLM to adversarially generate high-signal QA cases from
@@ -220,6 +279,7 @@ pub async fn adversarial(
     scan: &Path,
     model: &str,
     store: bool,
+    opts: &GenOpts,
 ) -> anyhow::Result<AuditSummary> {
     if crate::server::llm::resolve_key().is_none() {
         anyhow::bail!(
@@ -242,7 +302,14 @@ pub async fn adversarial(
     });
     let mut cases = Vec::new();
     let mut errors = Vec::new();
+    // Every per-model client shares one command-wide budget: track spend
+    // across them by summing, since each client has its own ledger.
+    let mut spent: u64 = 0;
     for model in model_list(model) {
+        if opts.budget.is_some_and(|b| spent >= b) {
+            eprintln!("audit: token budget reached ({spent} spent) — skipping model {model}");
+            continue;
+        }
         let Some(llm) = LlmClient::from_env(&model) else {
             continue;
         };
@@ -257,13 +324,20 @@ pub async fn adversarial(
             }
             Err(e) => errors.push(format!("{model}: {e}")),
         }
+        spent += llm.usage().total_tokens();
     }
     cases = dedupe_cases(cases);
     if cases.is_empty() && !errors.is_empty() {
         anyhow::bail!("adversarial planning failed: {}", errors.join("; "));
     }
     let test_ids = if store {
-        store_cases(root, cases.clone(), None, None).await?
+        let ids = store_cases(root, cases.clone(), None, None).await?;
+        let first_model = model_list(model)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| model.to_string());
+        screen_if(opts, root, &ids, &first_model).await?;
+        ids
     } else {
         Vec::new()
     };
@@ -295,12 +369,15 @@ fn dedupe_cases(cases: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// Shared: ask the LLM for one case per unit (capped at 40) and store them.
+/// Shared: ask the LLM for one case per unit (capped at 40) per configured
+/// perspective (normal/boundary/exception), merge + dedupe the views, store
+/// them, and acceptance-screen the result.
 async fn generate_for_units(
     root: &Path,
     units: &[crate::local::coverage::Unit],
     model: &str,
     what: &str,
+    opts: &GenOpts,
 ) -> anyhow::Result<GenSummary> {
     let functions = Value::Array(
         units
@@ -314,12 +391,66 @@ async fn generate_for_units(
             "{what} needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
         )
     };
-    let cases = llm.generate_from_functions(&functions).await?;
+    let mut cases = Vec::new();
+    let mut errors = Vec::new();
+    for view in &opts.views {
+        if llm.over_budget(opts.budget) {
+            eprintln!(
+                "{what}: token budget reached ({} spent) — skipping the '{}' view",
+                llm.usage().total_tokens(),
+                view.label()
+            );
+            break;
+        }
+        match llm.generate_from_functions(&functions, *view).await {
+            Ok(mut proposed) => {
+                for c in &mut proposed {
+                    if c.is_object() {
+                        c["perspective"] = json!(view.label());
+                    }
+                }
+                cases.extend(proposed);
+            }
+            Err(e) => errors.push(format!("{} view: {e}", view.label())),
+        }
+    }
+    if cases.is_empty() {
+        anyhow::bail!(
+            "{what}: no view produced cases{}",
+            if errors.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", errors.join("; "))
+            }
+        );
+    }
+    let cases = clear_duplicate_ids(dedupe_cases(cases));
     let test_ids = store_cases(root, cases, None, None).await?;
+    let quarantined = screen_if(opts, root, &test_ids, model).await?;
     Ok(GenSummary {
         prd_id: None,
         test_ids,
+        quarantined,
     })
+}
+
+/// The store upserts by id, so an id repeated across merged views would
+/// silently overwrite an earlier case. Keep the first occurrence; later
+/// repeats get their id cleared so the store assigns a fresh uuid.
+fn clear_duplicate_ids(cases: Vec<Value>) -> Vec<Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    cases
+        .into_iter()
+        .map(|mut c| {
+            if let Some(id) = c.get("id").and_then(Value::as_str)
+                && !id.is_empty()
+                && !seen.insert(id.to_string())
+            {
+                c["id"] = json!("");
+            }
+            c
+        })
+        .collect()
 }
 
 /// Store generated cases, tagging `kind` and (when set) the originating
@@ -394,9 +525,17 @@ api_endpoints:
         )
         .unwrap();
 
-        let out = generate(&root, Some(&summary), None, None, "no-such-model", None)
-            .await
-            .unwrap();
+        let out = generate(
+            &root,
+            Some(&summary),
+            None,
+            None,
+            "no-such-model",
+            None,
+            &GenOpts::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(out.test_ids.len(), 1);
         let case = crate::local::store::get_value(&root, &out.test_ids[0])
             .await
@@ -418,6 +557,23 @@ api_endpoints:
             model_list("gpt-5.3-codex, gpt-5.5"),
             vec!["gpt-5.3-codex".to_string(), "gpt-5.5".to_string()]
         );
+    }
+
+    #[test]
+    fn duplicate_ids_across_views_get_cleared_not_overwritten() {
+        let out = clear_duplicate_ids(vec![
+            json!({"id":"TC001","title":"normal"}),
+            json!({"id":"TC001","title":"boundary variant"}),
+            json!({"id":"BND001","title":"boundary"}),
+            json!({"title":"no id at all"}),
+        ]);
+        assert_eq!(out[0]["id"], "TC001");
+        // The repeat keeps its case but loses the colliding id (store will
+        // assign a uuid instead of silently overwriting TC001).
+        assert_eq!(out[1]["id"], "");
+        assert_eq!(out[1]["title"], "boundary variant");
+        assert_eq!(out[2]["id"], "BND001");
+        assert!(out[3].get("id").is_none());
     }
 
     #[test]

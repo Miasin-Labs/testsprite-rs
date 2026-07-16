@@ -43,9 +43,18 @@ impl Verdict {
     }
 }
 
-/// Every `failureKind` [`classify`] can return. Re-borrowing a stored kind as
-/// `&'static str` means it has to be one of these — an unrecognized value is
-/// dropped rather than leaked onward as if it were meaningful.
+/// Every `failureKind` [`classify`] can return, plus the kinds written
+/// explicitly by pipeline stages rather than derived from error text:
+/// `suspect_oracle` (a freshly generated test failed against the current
+/// green baseline — the oracle, not the product, is the suspect),
+/// `build_error` (the generated test never compiled; a toolchain diagnostic,
+/// never a product bug), and `residual_alignment` (a changed-code test that
+/// passes on the OLD revision while failing on the new one it supposedly
+/// verifies — it encodes stale semantics, not a regression).
+///
+/// Re-borrowing a stored kind as `&'static str` means it has to be one of
+/// these — an unrecognized value is dropped rather than leaked onward as if
+/// it were meaningful.
 pub const FAILURE_KINDS: &[&str] = &[
     "dependency",
     "infra",
@@ -56,6 +65,9 @@ pub const FAILURE_KINDS: &[&str] = &[
     "routing_404",
     "assertion",
     "timeout",
+    "suspect_oracle",
+    "build_error",
+    "residual_alignment",
     "unknown",
 ];
 
@@ -114,6 +126,21 @@ pub fn classify(passed: bool, error: &str, kind: TestKind) -> (Verdict, Option<&
 
     if is_infra(&lower) {
         return (Verdict::Blocked, Some("infra"));
+    }
+
+    // Pipeline-authored prefixes (ours, not the target's, so they precede the
+    // modality gate): the acceptance gate, the compile-repair loop, and the
+    // cross-version fault-check each stamp their own kind.
+    if lower.starts_with("suspect oracle:") {
+        return (Verdict::Failed, Some("suspect_oracle"));
+    }
+    if lower.starts_with("build error:") {
+        // The generated test never compiled — a toolchain problem, never a
+        // product bug; Blocked keeps it out of the flaky denominator.
+        return (Verdict::Blocked, Some("build_error"));
+    }
+    if lower.starts_with("residual alignment:") {
+        return (Verdict::Failed, Some("residual_alignment"));
     }
 
     // The harness's own wall-clock killed the test — a hang/deadlock, not a
@@ -416,6 +443,37 @@ mod tests {
                 (Verdict::Failed, Some("timeout")),
                 "{kind:?}"
             );
+        }
+    }
+
+    #[test]
+    fn pipeline_authored_prefixes_survive_every_modality() {
+        // These are OUR words (the acceptance gate / repair loop / fault-check
+        // write them), so they classify identically for subprocess modalities.
+        for kind in [TestKind::Backend, TestKind::Rust, TestKind::Command] {
+            assert_eq!(
+                classify(
+                    false,
+                    "suspect oracle: failed against the current baseline at generation time: x",
+                    kind
+                ),
+                (Verdict::Failed, Some("suspect_oracle")),
+                "{kind:?}"
+            );
+            assert_eq!(
+                classify(false, "build error: expected `;`", kind),
+                (Verdict::Blocked, Some("build_error")),
+                "{kind:?}"
+            );
+            assert_eq!(
+                classify(false, "residual alignment: passes on the base commit", kind),
+                (Verdict::Failed, Some("residual_alignment")),
+                "{kind:?}"
+            );
+        }
+        // And the kinds are registered, so stored rows re-borrow cleanly.
+        for k in ["suspect_oracle", "build_error", "residual_alignment"] {
+            assert_eq!(known_failure_kind(k), Some(k));
         }
     }
 

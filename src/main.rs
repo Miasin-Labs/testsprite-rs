@@ -133,6 +133,9 @@ enum Command {
         /// Refuse to run tests stamped with prdId unless that PRD was approved.
         #[arg(long)]
         require_approved_prd: bool,
+        /// Total LLM token cap for the generation stage.
+        #[arg(long)]
+        budget: Option<u64>,
         /// Print a single JSON CycleReport instead of human lines.
         #[arg(long)]
         json: bool,
@@ -411,6 +414,17 @@ enum TestCmd {
         /// Git ref to diff against for --changed (default: HEAD).
         #[arg(long)]
         since: Option<String>,
+        /// Total LLM token cap; generation stops early once reached.
+        #[arg(long)]
+        budget: Option<u64>,
+        /// Skip the acceptance gate (LLM cases are otherwise run once against
+        /// the current baseline; a fail-on-green oracle is quarantined).
+        #[arg(long)]
+        no_gate: bool,
+        /// Perspectives for --cover/--changed generation (comma-separated:
+        /// normal,boundary,exception). Default: all three.
+        #[arg(long)]
+        views: Option<String>,
     },
     /// Explore a live frontend page and generate deterministic planSteps candidates.
     Explore {
@@ -447,6 +461,12 @@ enum TestCmd {
         /// Write proposed cases JSON to a file.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Total LLM token cap across the audited models.
+        #[arg(long)]
+        budget: Option<u64>,
+        /// Skip the acceptance gate for stored cases.
+        #[arg(long)]
+        no_gate: bool,
     },
     /// Code Diff Mode: show which functions changed (git) and which tests they affect.
     Changed {
@@ -540,6 +560,12 @@ enum TestCmd {
     /// Delete a stored test and its run history (storing is an upsert, so
     /// without this the suite only ever grows).
     Delete {
+        #[arg()]
+        id: String,
+    },
+    /// Reinstate a quarantined test (clear the acceptance-gate suspect-oracle
+    /// marker so it runs with the whole suite again).
+    Release {
         #[arg()]
         id: String,
     },
@@ -670,6 +696,7 @@ async fn main() -> Result<()> {
             fix,
             serve,
             require_approved_prd,
+            budget,
             json,
         } => {
             let root = std::env::current_dir()?;
@@ -681,6 +708,7 @@ async fn main() -> Result<()> {
                 fix,
                 serve,
                 require_approved_prd,
+                budget,
             };
             let code = local::cycle::cycle_report(&root, opts, json).await?;
             std::process::exit(code);
@@ -1002,7 +1030,12 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             match output.as_str() {
                 "text" => {
                     for t in &tests {
-                        println!("{}  {}", t.id, t.title);
+                        let mark = if local::accept::is_quarantined_test(t) {
+                            "  [quarantined]"
+                        } else {
+                            ""
+                        };
+                        println!("{}  {}{mark}", t.id, t.title);
                     }
                 }
                 "json" => {
@@ -1140,19 +1173,21 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             doc,
             changed,
             since,
+            budget,
+            no_gate,
+            views,
         } => {
+            let opts = gen_opts(budget, no_gate, views.as_deref())?;
             if cover {
                 let p = path.unwrap_or(std::env::current_dir()?);
-                let out = local::generate::generate_cover(&root, &p, &model).await?;
+                let out = local::generate::generate_cover(&root, &p, &model, &opts).await?;
                 println!("generated {} coverage test(s)", out.test_ids.len());
-                for id in &out.test_ids {
-                    println!("  {id}");
-                }
+                print_generated(&out);
                 return Ok(());
             }
             if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
-                let out = local::generate::generate_changed(&root, since, &model).await?;
+                let out = local::generate::generate_changed(&root, since, &model, &opts).await?;
                 if out.test_ids.is_empty() {
                     println!(
                         "no changed functions need new tests (nothing changed, or all covered)"
@@ -1162,9 +1197,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                         "generated {} test(s) for changed functions",
                         out.test_ids.len()
                     );
-                    for id in &out.test_ids {
-                        println!("  {id}");
-                    }
+                    print_generated(&out);
                 }
                 return Ok(());
             }
@@ -1176,15 +1209,14 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 doc.as_deref(),
                 &model,
                 kind,
+                &opts,
             )
             .await?;
             if let Some(prd_id) = &out.prd_id {
                 println!("PRD {prd_id}  (inspect: testsprite-rs prd show {prd_id})");
             }
             println!("generated {} test(s)", out.test_ids.len());
-            for id in &out.test_ids {
-                println!("  {id}");
-            }
+            print_generated(&out);
             Ok(())
         }
         TestCmd::Explore {
@@ -1231,9 +1263,12 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             model,
             store,
             out,
+            budget,
+            no_gate,
         } => {
             let scan = path.unwrap_or(std::env::current_dir()?);
-            let audit = local::generate::adversarial(&root, &scan, &model, store).await?;
+            let opts = gen_opts(budget, no_gate, None)?;
+            let audit = local::generate::adversarial(&root, &scan, &model, store, &opts).await?;
             if let Some(out) = out {
                 if let Some(parent) = out.parent()
                     && !parent.as_os_str().is_empty()
@@ -1327,6 +1362,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 anyhow::bail!("no test {id}")
             }
         }
+        TestCmd::Release { id } => {
+            local::store::set_quarantine(&root, &id, None).await?;
+            println!("released {id} — it runs with the whole suite again");
+            Ok(())
+        }
         TestCmd::Revisions { id, json } => {
             let revs = local::store::revisions(&root, &id).await?;
             if json {
@@ -1412,6 +1452,47 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             };
             println!("pruned {deleted} run row(s), keeping latest {keep} per test");
             Ok(())
+        }
+    }
+}
+
+/// Parse the shared generation knobs (`--budget`, `--no-gate`, `--views`).
+fn gen_opts(
+    budget: Option<u64>,
+    no_gate: bool,
+    views: Option<&str>,
+) -> Result<local::generate::GenOpts> {
+    let mut opts = local::generate::GenOpts {
+        budget,
+        gate: !no_gate,
+        ..Default::default()
+    };
+    if let Some(spec) = views {
+        let parsed: Vec<_> = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                server::llm::Perspective::parse(s).ok_or_else(|| {
+                    anyhow::anyhow!("invalid --views '{s}': expected normal|boundary|exception")
+                })
+            })
+            .collect::<Result<_>>()?;
+        if parsed.is_empty() {
+            anyhow::bail!("--views must name at least one of normal|boundary|exception");
+        }
+        opts.views = parsed;
+    }
+    Ok(opts)
+}
+
+/// Print generated ids, marking the ones the acceptance gate quarantined.
+fn print_generated(out: &local::generate::GenSummary) {
+    for id in &out.test_ids {
+        if out.quarantined.contains(id) {
+            println!("  {id}  [quarantined: suspect oracle]");
+        } else {
+            println!("  {id}");
         }
     }
 }

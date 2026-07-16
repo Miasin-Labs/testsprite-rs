@@ -39,20 +39,48 @@ pub async fn add_value(root: &Path, value: Value) -> anyhow::Result<String> {
         .to_string();
     let kind = obj.get("kind").and_then(Value::as_str).map(str::to_string);
     let body = serde_json::to_string(&Value::Object(obj))?;
+    let hash = content_hash(&body);
 
     let pool = crate::local::db::open(root).await?;
     sqlx::query(
-        "INSERT INTO tests (id,title,kind,body,updated_at) VALUES (?,?,?,?,datetime('now')) \
-         ON CONFLICT(id) DO UPDATE SET title=excluded.title, kind=excluded.kind, body=excluded.body, updated_at=datetime('now')",
+        "INSERT INTO tests (id,title,kind,body,content_hash,updated_at) VALUES (?,?,?,?,?,datetime('now')) \
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title, kind=excluded.kind, body=excluded.body, \
+         content_hash=excluded.content_hash, updated_at=datetime('now')",
     )
     .bind(&id)
     .bind(&title)
     .bind(kind.as_deref())
     .bind(&body)
+    .bind(&hash)
     .execute(&pool)
     .await?;
 
     Ok(id)
+}
+
+/// Provenance hash of a stored definition: SHA-256 over the serialized body
+/// (serde_json sorts object keys, so equal definitions hash equally). Lets a
+/// silently regenerated variant be told apart from an untouched case.
+pub fn content_hash(body: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(body.as_bytes()))
+}
+
+/// Set (`Some(reason)`) or clear (`None`) a test's quarantine marker. A
+/// quarantined case stays stored but is excluded from whole-suite runs; the
+/// acceptance gate sets it, `test release <id>` clears it.
+pub async fn set_quarantine(root: &Path, id: &str, reason: Option<&str>) -> anyhow::Result<()> {
+    let mut body = get_value(root, id).await?;
+    match reason {
+        Some(r) => body["quarantine"] = Value::String(r.to_string()),
+        None => {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("quarantine");
+            }
+        }
+    }
+    add_value(root, body).await?;
+    Ok(())
 }
 
 /// Snapshot the CURRENT stored definition of `id` into `test_revisions` before
@@ -300,6 +328,17 @@ pub async fn rename(root: &Path, id: &str, title: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Telemetry attributed to one run row. Every field is optional: `None`
+/// means "not measured / not attributable" (e.g. token spend during a
+/// concurrent wave), never zero.
+#[derive(Debug, Clone, Default)]
+pub struct RunMeta {
+    pub elapsed_ms: Option<u64>,
+    pub model: Option<String>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+
 /// Append the outcome of running a test case to the `runs` table.
 ///
 /// `kind` is the executor that produced `outcome`; the verdict cannot be
@@ -311,12 +350,25 @@ pub async fn write_result(
     analysis: Option<&Value>,
     kind: TestKind,
 ) -> anyhow::Result<()> {
+    write_result_with_meta(root, id, outcome, analysis, kind, &RunMeta::default()).await
+}
+
+/// [`write_result`] plus run telemetry (wall-clock, model, token spend).
+pub async fn write_result_with_meta(
+    root: &Path,
+    id: &str,
+    outcome: &Outcome,
+    analysis: Option<&Value>,
+    kind: TestKind,
+    meta: &RunMeta,
+) -> anyhow::Result<()> {
     let (v, fk) = crate::local::verdict::classify(outcome.passed, &outcome.error, kind);
     let analysis_str = analysis.map(serde_json::to_string).transpose()?;
 
     let pool = crate::local::db::open(root).await?;
     sqlx::query(
-        "INSERT INTO runs (test_id,passed,verdict,failure_kind,error,code,analysis) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO runs (test_id,passed,verdict,failure_kind,error,code,analysis,\
+         elapsed_ms,model,prompt_tokens,completion_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(id)
     .bind(outcome.passed as i64)
@@ -325,6 +377,10 @@ pub async fn write_result(
     .bind(&outcome.error)
     .bind(&outcome.code)
     .bind(analysis_str)
+    .bind(meta.elapsed_ms.map(|v| v as i64))
+    .bind(meta.model.as_deref())
+    .bind(meta.prompt_tokens.map(|v| v as i64))
+    .bind(meta.completion_tokens.map(|v| v as i64))
     .execute(&pool)
     .await?;
 
@@ -488,8 +544,21 @@ pub async fn load_result(root: &Path, id: &str) -> anyhow::Result<Option<Value>>
 /// collected; this just exposes it.
 pub async fn run_history(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let rows: Vec<(i64, i64, Option<String>, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT run_id,passed,verdict,failure_kind,error,created_at \
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT run_id,passed,verdict,failure_kind,error,created_at,\
+         elapsed_ms,model,prompt_tokens,completion_tokens \
          FROM runs WHERE test_id=? ORDER BY run_id DESC",
     )
     .bind(id)
@@ -499,7 +568,18 @@ pub async fn run_history(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
     Ok(rows
         .into_iter()
         .map(
-            |(run_id, passed, verdict, failure_kind, error, created_at)| {
+            |(
+                run_id,
+                passed,
+                verdict,
+                failure_kind,
+                error,
+                created_at,
+                elapsed_ms,
+                model,
+                prompt_tokens,
+                completion_tokens,
+            )| {
                 serde_json::json!({
                     "run_id": run_id,
                     "passed": passed != 0,
@@ -507,6 +587,10 @@ pub async fn run_history(root: &Path, id: &str) -> anyhow::Result<Vec<Value>> {
                     "failureKind": failure_kind,
                     "error": error,
                     "created_at": created_at,
+                    "elapsed_ms": elapsed_ms,
+                    "model": model,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 })
             },
         )

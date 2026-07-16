@@ -61,6 +61,24 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE prd ADD COLUMN approved_at TEXT")
         .execute(pool)
         .await;
+    // Run telemetry: wall-clock, the model that powered LLM stages, and the
+    // token spend attributed to this run (NULL when unattributable, e.g.
+    // concurrent waves). Lets `report`/`bench` answer cost/latency questions.
+    for col in [
+        "elapsed_ms INTEGER",
+        "model TEXT",
+        "prompt_tokens INTEGER",
+        "completion_tokens INTEGER",
+    ] {
+        let _ = sqlx::raw_sql(&format!("ALTER TABLE runs ADD COLUMN {col}"))
+            .execute(pool)
+            .await;
+    }
+    // Provenance: content hash of the stored definition, so a regenerated
+    // variant is distinguishable from an untouched case.
+    let _ = sqlx::query("ALTER TABLE tests ADD COLUMN content_hash TEXT")
+        .execute(pool)
+        .await;
     Ok(())
 }
 
