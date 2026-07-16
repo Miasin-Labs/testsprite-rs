@@ -163,6 +163,69 @@ pub fn structural_surface(root: &Path) -> anyhow::Result<Vec<Unit>> {
     Ok(units)
 }
 
+/// Verbatim source of the given units, keyed by `(file, line)` — the focal
+/// context generation prompts need (feeding the LLM only `{name,file,branches}`
+/// is the dominant hallucination source in the literature). Parses each
+/// distinct file once; each function body is truncated to `cap` characters on
+/// a char boundary. Units whose file/line no longer match are simply absent.
+pub fn function_sources(
+    scan: &Path,
+    units: &[Unit],
+    cap: usize,
+) -> std::collections::HashMap<(String, usize), String> {
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&Unit>> =
+        std::collections::BTreeMap::new();
+    for u in units {
+        by_file.entry(u.file.as_str()).or_default().push(u);
+    }
+    let mut out = std::collections::HashMap::new();
+    for (file, wanted) in by_file {
+        let path = scan.join(file);
+        let Some(lang) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension)
+        else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(&lang.ts_language()).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(&src, None) else {
+            continue;
+        };
+        let bytes = src.as_bytes();
+        let function_kinds = lang.function_kinds();
+        visit(tree.root_node(), &mut |node| {
+            if !function_kinds.contains(&node.kind()) {
+                return;
+            }
+            let line = node.start_position().row + 1;
+            let Some(unit) = wanted.iter().find(|u| u.line == line) else {
+                return;
+            };
+            if let Ok(text) = node.utf8_text(bytes) {
+                out.insert((unit.file.clone(), unit.line), truncate_chars(text, cap));
+            }
+        });
+    }
+    out
+}
+
+/// Truncate on a char boundary, marking the cut.
+fn truncate_chars(s: &str, cap: usize) -> String {
+    if s.chars().count() <= cap {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(cap).collect();
+    out.push_str("\n… (truncated)");
+    out
+}
+
 fn units_in_file(root: &Path, path: &Path, lang: Lang, src: &str) -> anyhow::Result<Vec<Unit>> {
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
@@ -965,5 +1028,33 @@ mod tests {
         assert!(mentions("call foo() here", "foo"));
         assert!(!mentions("foobar", "foo"));
         assert!(!mentions("", "foo"));
+    }
+
+    #[test]
+    fn function_sources_returns_verbatim_bodies_truncated_on_a_boundary() {
+        let dir = crate::local::tmp_root();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn small() -> i32 { 42 }\n\nfn big() -> String {\n    let s = \"xxxxxxxxxxxxxxxx\";\n    s.repeat(100)\n}\n",
+        )
+        .unwrap();
+        let units = structural_surface(&dir).unwrap();
+        let small = units.iter().find(|u| u.name == "small").unwrap();
+        let big = units.iter().find(|u| u.name == "big").unwrap();
+
+        let src = function_sources(&dir, &units, 40);
+        let small_src = &src[&(small.file.clone(), small.line)];
+        assert!(
+            small_src.contains("fn small() -> i32 { 42 }"),
+            "{small_src}"
+        );
+        assert!(!small_src.contains("truncated"));
+
+        // `big`'s body exceeds the 40-char cap → truncated on a char boundary.
+        let big_src = &src[&(big.file.clone(), big.line)];
+        assert!(big_src.contains("… (truncated)"), "{big_src}");
+        assert!(big_src.starts_with("fn big()"), "{big_src}");
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }

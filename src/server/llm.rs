@@ -396,6 +396,26 @@ impl LlmClient {
         let code = self.chat(&system, &user, false).await?;
         Ok(strip_code_fences(&code))
     }
+    /// Fix ONLY the compilation problems in a generated test, preserving its
+    /// assertions, given the exact compiler diagnostic. Used by the bounded
+    /// compile-repair loop after deterministic fixups fall short.
+    pub async fn repair_code(
+        &self,
+        language: &str,
+        code: &str,
+        diagnostic: &str,
+    ) -> Result<String> {
+        let system = format!(
+            "You are TestSprite's build-repair engine. The following {language} test fails to \
+             compile. Fix ONLY compilation problems (imports, types, syntax, API misuse) — do \
+             NOT weaken, remove, or change the meaning of any assertion. Output ONLY the \
+             corrected {language} source, no markdown fences.",
+        );
+        let user = format!("Test source:\n{code}\n\nCompiler diagnostic:\n{diagnostic}");
+        let out = self.chat(&system, &user, false).await?;
+        Ok(strip_code_fences(&out))
+    }
+
     /// Classify a failed test (real bug vs test/env fragility) with root cause + fix.
     pub async fn analyze_failure(&self, case: &Value, code: &str, error: &str) -> Result<Value> {
         let system = "You are TestSprite's failure analyst. Given a test case, the code that ran, \

@@ -118,8 +118,14 @@ pub async fn generate(
     // already contains a runnable API surface.
     if let Some(p) = from.filter(|p| p.is_file()) {
         let summary = read_summary_value(p)?;
-        let planned = crate::server::engine::plan_from_code_summary(&summary);
+        let mut planned = crate::server::engine::plan_from_code_summary(&summary);
         if !planned.is_empty() {
+            // Deterministic boundary probes ride along when the boundary view
+            // is enabled (it is by default): edge path params + malformed
+            // bodies, asserting "must not 5xx" — zero LLM spend.
+            if opts.views.contains(&Perspective::Boundary) {
+                planned.extend(crate::server::engine::boundary_cases(&summary));
+            }
             let cases: Vec<Value> = planned
                 .into_iter()
                 .map(|case| {
@@ -249,7 +255,7 @@ pub async fn generate_cover(
     if units.is_empty() {
         anyhow::bail!("no functions found under {}", path.display());
     }
-    generate_for_units(root, &units, model, "test generate --cover", opts).await
+    generate_for_units(root, path, &units, model, "test generate --cover", opts).await
 }
 
 /// Code Diff Mode: generate a test for each function CHANGED since `since` that
@@ -269,7 +275,7 @@ pub async fn generate_changed(
             quarantined: Vec::new(),
         });
     }
-    generate_for_units(root, &targets, model, "test generate --changed", opts).await
+    generate_for_units(root, root, &targets, model, "test generate --changed", opts).await
 }
 
 /// Ask the TestSprite LLM to adversarially generate high-signal QA cases from
@@ -374,16 +380,36 @@ fn dedupe_cases(cases: Vec<Value>) -> Vec<Value> {
 /// them, and acceptance-screen the result.
 async fn generate_for_units(
     root: &Path,
+    scan: &Path,
     units: &[crate::local::coverage::Unit],
     model: &str,
     what: &str,
     opts: &GenOpts,
 ) -> anyhow::Result<GenSummary> {
+    // Focal context: attach each function's real source (truncated) so the
+    // model grounds inputs/outputs/branches in what the code actually does
+    // instead of hallucinating from the bare name. Two caps bound the prompt:
+    // per-function and total across the batch.
+    const PER_FN_SOURCE_CAP: usize = 1_200;
+    const TOTAL_SOURCE_CAP: usize = 48_000;
+    let picked: Vec<_> = units.iter().take(40).collect();
+    let picked_owned: Vec<crate::local::coverage::Unit> =
+        picked.iter().map(|u| (*u).clone()).collect();
+    let sources = crate::local::coverage::function_sources(scan, &picked_owned, PER_FN_SOURCE_CAP);
+    let mut source_budget = TOTAL_SOURCE_CAP;
     let functions = Value::Array(
-        units
+        picked
             .iter()
-            .take(40)
-            .map(|u| json!({"name": u.name, "file": u.file, "branches": u.branches}))
+            .map(|u| {
+                let mut f = json!({"name": u.name, "file": u.file, "branches": u.branches});
+                if let Some(src) = sources.get(&(u.file.clone(), u.line))
+                    && src.len() <= source_budget
+                {
+                    source_budget -= src.len();
+                    f["source"] = json!(src);
+                }
+                f
+            })
             .collect(),
     );
     let Some(llm) = LlmClient::from_env(model) else {

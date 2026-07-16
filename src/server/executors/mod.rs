@@ -12,6 +12,7 @@ pub mod browser;
 pub mod command;
 pub mod http;
 pub mod mcp;
+pub(crate) mod repair;
 pub mod rust;
 
 use std::sync::Arc;

@@ -257,6 +257,105 @@ pub fn plan_from_code_summary(code_summary: &Value) -> Vec<PlannedCase> {
         .collect()
 }
 
+/// Boundary values a path parameter is probed with: zero/negative/huge
+/// numerics, an encoded space, and a classic injection string. The oracle is
+/// deliberately [`Band::Any`] — a boundary input may be REJECTED however the
+/// app likes, but it must never 5xx.
+const PATH_PROBES: &[(&str, &str)] = &[
+    ("zero id", "0"),
+    ("negative id", "-1"),
+    ("huge id", "999999999999999999"),
+    ("injection-shaped id", "'%20OR%20'1'='1"),
+];
+
+/// Boundary bodies a mutation endpoint is probed with.
+fn body_probes() -> Vec<(&'static str, Value)> {
+    vec![
+        ("empty object body", json!({})),
+        (
+            "oversized string field",
+            json!({ "boundary": "x".repeat(4096) }),
+        ),
+        (
+            "unicode and control characters",
+            json!({ "boundary": "✓ ünïcode \u{0000} \u{202e}txet" }),
+        ),
+    ]
+}
+
+/// Deterministic boundary/robustness probes derived from the declared
+/// endpoints — the value-selection strategy LLMs systematically skip, with
+/// zero model spend. Each parameterized path gets edge-value substitutions and
+/// each body-bearing mutation gets malformed-body probes; every probe asserts
+/// "must not 5xx" ([`Band::Any`]), the honest robustness oracle for inputs the
+/// server is entitled to reject.
+pub fn boundary_cases(code_summary: &Value) -> Vec<PlannedCase> {
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for spec in read_endpoints(code_summary) {
+        if spec.path.contains('{') {
+            for (label, value) in PATH_PROBES {
+                n += 1;
+                let path = substitute_all_params(&spec.path, value);
+                out.push(PlannedCase {
+                    id: format!("BND{n:03}"),
+                    title: format!("{} {} tolerates {label}", spec.method, spec.path),
+                    description: format!(
+                        "Send a {} request to {path} (boundary probe: {label}) and verify \
+                         the server rejects or handles it without a 5xx.",
+                        spec.method
+                    ),
+                    spec: EndpointSpec {
+                        path,
+                        expect_status: Expect::Band(Band::Any),
+                        body: spec.body.clone(),
+                        ..spec.clone()
+                    },
+                });
+            }
+        }
+        if matches!(spec.method.as_str(), "POST" | "PUT" | "PATCH") {
+            for (label, body) in body_probes() {
+                n += 1;
+                out.push(PlannedCase {
+                    id: format!("BND{n:03}"),
+                    title: format!("{} {} tolerates {label}", spec.method, spec.path),
+                    description: format!(
+                        "Send a {} request to {} with a boundary body ({label}) and verify \
+                         the server rejects or handles it without a 5xx.",
+                        spec.method, spec.path
+                    ),
+                    spec: EndpointSpec {
+                        body: Some(body),
+                        form: None,
+                        expect_status: Expect::Band(Band::Any),
+                        ..spec.clone()
+                    },
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Replace every `{param}` segment with one literal probe value.
+fn substitute_all_params(path: &str, value: &str) -> String {
+    let mut out = String::new();
+    let mut in_brace = false;
+    for ch in path.chars() {
+        match ch {
+            '{' => in_brace = true,
+            '}' => {
+                in_brace = false;
+                out.push_str(value);
+            }
+            _ if in_brace => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Build a structured PRD from a code summary (mirrors the cloud's PRD shape).
 pub fn prd_from_code_summary(code_summary: &Value) -> Value {
     let project = code_summary
@@ -441,6 +540,43 @@ mod tests {
         assert_eq!(any.expect_status, Expect::Band(Band::Any));
         assert!(any.expect_status.accepts(404));
         assert!(!any.expect_status.accepts(500));
+    }
+
+    #[test]
+    fn boundary_cases_probe_path_params_and_bodies_without_5xx_oracle() {
+        let summary = json!({
+            "project_name": "demo",
+            "api_endpoints": [
+                { "method": "GET", "path": "/users/{id}" },
+                { "method": "POST", "path": "/users" },
+                { "method": "GET", "path": "/health" },
+            ],
+        });
+        let cases = boundary_cases(&summary);
+        // 4 path probes for {id} + 3 body probes for POST; /health has neither.
+        assert_eq!(cases.len(), 7);
+        assert!(cases.iter().all(|c| c.id.starts_with("BND")));
+        // Every boundary case uses the robustness oracle: reject-or-handle,
+        // never a 5xx.
+        assert!(
+            cases
+                .iter()
+                .all(|c| c.spec.expect_status == Expect::Band(Band::Any))
+        );
+        // The injection probe substitutes into the concrete path.
+        assert!(cases.iter().any(|c| c.spec.path.contains("OR%20")));
+        // Body probes carry a boundary body on the mutation endpoint.
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.spec.path == "/users" && c.spec.body.is_some())
+        );
+    }
+
+    #[test]
+    fn substitute_all_params_replaces_every_brace_segment() {
+        assert_eq!(substitute_all_params("/a/{x}/b/{y}", "0"), "/a/0/b/0");
+        assert_eq!(substitute_all_params("/health", "0"), "/health");
     }
 
     #[test]

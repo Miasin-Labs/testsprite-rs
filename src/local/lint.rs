@@ -95,6 +95,7 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
     if kind == TestKind::Backend {
         if let Some(spec) = &test.spec {
             issues.extend(check_backend_spec(spec));
+            issues.extend(check_oracle_strength(spec, None));
         } else if let Some(steps) = test.extra.get("steps").and_then(Value::as_array) {
             if steps.is_empty() {
                 issues.push(Issue::Hard {
@@ -109,21 +110,32 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
                         Issue::Hard { field, msg } => Issue::Hard { field, msg },
                     });
                 }
+                issues.extend(check_oracle_strength(step, Some(i)));
             }
+            issues.extend(check_step_flow(steps));
         } else if test.description.trim().is_empty() {
             issues.push(Issue::Warn(
                 "nothing to run: no spec and no description for LLM".to_string(),
             ));
         }
+        issues.extend(check_hardcoded_secrets(&test.to_case_value()));
     }
 
     if kind == TestKind::Frontend
         && let Some(steps) = test.extra.get("planSteps").and_then(Value::as_array)
-        && steps.iter().any(|s| !s.is_object())
     {
-        issues.push(Issue::Warn(
-            "planSteps contains a non-object step".to_string(),
-        ));
+        if steps.iter().any(|s| !s.is_object() && !s.is_string()) {
+            issues.push(Issue::Warn(
+                "planSteps contains a non-object step".to_string(),
+            ));
+        }
+        if !steps.is_empty() && !plan_steps_have_oracle(steps) {
+            issues.push(Issue::Warn(
+                "unknown-test: planSteps only act and never assert/verify — the case \
+                 cannot fail on wrong behavior, only on crashes"
+                    .to_string(),
+            ));
+        }
     }
 
     if kind == TestKind::Command {
@@ -147,6 +159,130 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
     }
 
     issues
+}
+
+/// True when a single spec/step carries ANY oracle beyond "did not 5xx":
+/// a non-`any` status expectation, a body/parse/JSON check, a graphql
+/// assertion, or a chained follow-up (which asserts on its own).
+fn spec_has_oracle(spec: &Value) -> bool {
+    let status_is_vacuous = spec.get("expect_status").and_then(Value::as_str) == Some("any");
+    if !status_is_vacuous && spec.get("expect_status").is_some() {
+        return true;
+    }
+    if spec.get("expect_status").is_none() {
+        // Absent = the success band, a real oracle.
+        return true;
+    }
+    spec.get("expect_json").is_some()
+        || spec.get("expect_body").is_some()
+        || spec.get("expect_parses").is_some()
+        || spec.get("then").is_some()
+        || spec
+            .get("graphql")
+            .is_some_and(|g| g.get("expect_no_errors").is_some() || g.get("expect_data").is_some())
+}
+
+/// Vacuous-oracle smell ("Unknown Test" in the smell literature — up to 77% of
+/// LLM-generated tests): a case that runs requests but cannot fail on wrong
+/// behavior.
+fn check_oracle_strength(spec: &Value, step: Option<usize>) -> Vec<Issue> {
+    if spec_has_oracle(spec) {
+        return Vec::new();
+    }
+    let at = step.map(|i| format!("steps[{i}]: ")).unwrap_or_default();
+    vec![Issue::Warn(format!(
+        "{at}unknown-test: expect_status \"any\" with no body/parse assertion — \
+         this cannot fail on wrong behavior, only on a 5xx"
+    ))]
+}
+
+/// Flow-level smells over a multi-step case: masking (only the final step
+/// asserts, so a mid-flow bug whose effect is overwritten passes silently)
+/// and eager-test (one case sprawling across many unrelated endpoints).
+fn check_step_flow(steps: &[Value]) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    if steps.len() > 1 {
+        let mid_asserts = steps[..steps.len() - 1]
+            .iter()
+            .any(|s| spec_has_oracle(s) || s.get("save").is_some());
+        if !mid_asserts {
+            issues.push(Issue::Warn(
+                "masking-prone: only the final step asserts or saves — a mid-flow bug \
+                 whose effect is overwritten before the last step passes silently"
+                    .to_string(),
+            ));
+        }
+    }
+    let distinct_paths: std::collections::BTreeSet<&str> = steps
+        .iter()
+        .filter_map(|s| s.get("path").and_then(Value::as_str))
+        .collect();
+    if distinct_paths.len() > 8 {
+        issues.push(Issue::Warn(format!(
+            "eager-test: one case hits {} distinct endpoints — split it so a failure \
+             names one behavior",
+            distinct_paths.len()
+        )));
+    }
+    issues
+}
+
+/// A frontend plan needs at least one asserting step (object action
+/// `assert*`/`verify`/`expect*`, or a text step phrased as a check).
+fn plan_steps_have_oracle(steps: &[Value]) -> bool {
+    steps.iter().any(|s| match s {
+        Value::Object(o) => o
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|a| a.starts_with("assert") || a == "verify" || a.starts_with("expect")),
+        Value::String(t) => {
+            let t = t.to_lowercase();
+            t.starts_with("verify") || t.starts_with("assert") || t.starts_with("check")
+        }
+        _ => false,
+    })
+}
+
+/// Credential-looking literals embedded in a case body instead of `${VAR}`
+/// placeholders from `.testsprite.env` / `variables.json`.
+fn check_hardcoded_secrets(case: &Value) -> Vec<Issue> {
+    let mut hits = Vec::new();
+    find_secretish(case, &mut hits);
+    hits.into_iter()
+        .map(|key| {
+            Issue::Warn(format!(
+                "hardcoded-secret: field {key:?} carries a literal credential-looking \
+                 value — use a ${{VAR}} placeholder instead"
+            ))
+        })
+        .collect()
+}
+
+fn find_secretish(v: &Value, hits: &mut Vec<String>) {
+    const KEYS: &[&str] = &["password", "token", "secret", "api_key", "apikey"];
+    // `save` maps names to JSONPath extractors and `expect_body` asserts on
+    // RESPONSE content — neither sends a credential, so neither is scanned.
+    const SKIP_SUBTREES: &[&str] = &["save", "expect_body"];
+    if let Value::Object(obj) = v {
+        for (k, val) in obj {
+            if SKIP_SUBTREES.contains(&k.as_str()) {
+                continue;
+            }
+            let kl = k.to_lowercase();
+            if KEYS.iter().any(|s| kl.contains(s))
+                && let Some(s) = val.as_str()
+                && !s.is_empty()
+                && !s.contains("${")
+            {
+                hits.push(k.clone());
+            }
+            find_secretish(val, hits);
+        }
+    } else if let Value::Array(arr) = v {
+        for item in arr {
+            find_secretish(item, hits);
+        }
+    }
 }
 
 fn check_backend_spec(spec: &Value) -> Vec<Issue> {
@@ -209,6 +345,133 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a LocalTest from a raw case object (like the store round-trips).
+    fn test_from(case: serde_json::Value) -> super::super::LocalTest {
+        serde_json::from_value(case).unwrap()
+    }
+
+    fn warns(test: &super::super::LocalTest) -> Vec<String> {
+        check(&test.id, test)
+            .into_iter()
+            .map(|i| match i {
+                Issue::Warn(m) => m,
+                Issue::Hard { msg, .. } => msg,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vacuous_status_any_oracle_is_flagged_unknown_test() {
+        let ok = test_from(serde_json::json!({
+            "id":"a","title":"real oracle","kind":"backend",
+            "spec":{"method":"GET","path":"/health","expect_status":200}
+        }));
+        assert!(
+            !warns(&ok).iter().any(|w| w.contains("unknown-test")),
+            "a status oracle is not vacuous: {:?}",
+            warns(&ok)
+        );
+
+        let vacuous = test_from(serde_json::json!({
+            "id":"b","title":"asserts nothing","kind":"backend",
+            "spec":{"method":"GET","path":"/health","expect_status":"any"}
+        }));
+        assert!(
+            warns(&vacuous).iter().any(|w| w.contains("unknown-test")),
+            "expect_status any with no body check must warn: {:?}",
+            warns(&vacuous)
+        );
+
+        // ...unless it pairs the lenient band with a body assertion.
+        let saved = test_from(serde_json::json!({
+            "id":"c","title":"any + body","kind":"backend",
+            "spec":{"method":"GET","path":"/health","expect_status":"any","expect_body":{"ok":true}}
+        }));
+        assert!(!warns(&saved).iter().any(|w| w.contains("unknown-test")));
+    }
+
+    #[test]
+    fn masking_prone_flow_only_asserts_at_the_end() {
+        let masking = test_from(serde_json::json!({
+            "id":"m","title":"write then read","kind":"backend",
+            "steps":[
+                {"method":"POST","path":"/items","expect_status":"any"},
+                {"method":"GET","path":"/items/1","expect_status":200,"expect_body":{"ok":true}}
+            ]
+        }));
+        assert!(
+            warns(&masking).iter().any(|w| w.contains("masking-prone")),
+            "{:?}",
+            warns(&masking)
+        );
+
+        // A mid-flow save (captures an intermediate value) is enough.
+        let saved = test_from(serde_json::json!({
+            "id":"s","title":"login then call","kind":"backend",
+            "steps":[
+                {"method":"POST","path":"/login","expect_status":200,"save":{"tok":"$.token"}},
+                {"method":"GET","path":"/me","expect_status":200}
+            ]
+        }));
+        assert!(!warns(&saved).iter().any(|w| w.contains("masking-prone")));
+    }
+
+    #[test]
+    fn hardcoded_credentials_warn_but_placeholders_and_response_asserts_do_not() {
+        let literal = test_from(serde_json::json!({
+            "id":"h","title":"inline secret","kind":"backend",
+            "spec":{"method":"POST","path":"/login","body":{"password":"hunter2"}}
+        }));
+        assert!(
+            warns(&literal)
+                .iter()
+                .any(|w| w.contains("hardcoded-secret")),
+            "{:?}",
+            warns(&literal)
+        );
+
+        let placeholder = test_from(serde_json::json!({
+            "id":"p","title":"env-driven","kind":"backend",
+            "spec":{"method":"POST","path":"/login","body":{"password":"${PASSWORD}"}}
+        }));
+        assert!(
+            !warns(&placeholder)
+                .iter()
+                .any(|w| w.contains("hardcoded-secret"))
+        );
+
+        // A `token` key inside expect_body asserts on the RESPONSE, not a sent
+        // credential — must not warn.
+        let response_assert = test_from(serde_json::json!({
+            "id":"r","title":"asserts token present","kind":"backend",
+            "spec":{"method":"POST","path":"/login","expect_status":200,"expect_body":{"token":"abc"}}
+        }));
+        assert!(
+            !warns(&response_assert)
+                .iter()
+                .any(|w| w.contains("hardcoded-secret"))
+        );
+    }
+
+    #[test]
+    fn frontend_plan_with_no_assertion_is_unknown_test() {
+        let no_oracle = test_from(serde_json::json!({
+            "id":"f","title":"acts only","kind":"frontend",
+            "planSteps":["Click Sign In","Input Email: a@b.co"]
+        }));
+        assert!(warns(&no_oracle).iter().any(|w| w.contains("unknown-test")));
+
+        let with_oracle = test_from(serde_json::json!({
+            "id":"g","title":"acts then verifies","kind":"frontend",
+            "planSteps":["Click Sign In",{"action":"assert_text","text":"Welcome"}]
+        }));
+        assert!(
+            !warns(&with_oracle)
+                .iter()
+                .any(|w| w.contains("unknown-test"))
+        );
+    }
 
     #[test]
     fn backend_spec_allows_query_method() {
