@@ -732,7 +732,11 @@ fn materialized_body(test: &LocalTest) -> anyhow::Result<Option<(String, &'stati
     if matches!(kind, TestKind::Backend) && test.spec.is_some() {
         return Ok(Some((emit_source(test)?, "py")));
     }
-    if let Some(steps) = test.extra.get("planSteps").or_else(|| test.extra.get("steps")) {
+    if let Some(steps) = test
+        .extra
+        .get("planSteps")
+        .or_else(|| test.extra.get("steps"))
+    {
         return Ok(Some((serde_json::to_string_pretty(steps)?, "json")));
     }
     Ok(None)
@@ -868,9 +872,18 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert!(names.iter().any(|n| n == "TC001_GET__health_responds.py"), "{names:?}");
-        assert!(names.iter().any(|n| n == "TC002_command_gate.sh"), "{names:?}");
-        assert!(names.iter().any(|n| n == "TC003_login_flow.json"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "TC001_GET__health_responds.py"),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "TC002_command_gate.sh"),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "TC003_login_flow.json"),
+            "{names:?}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

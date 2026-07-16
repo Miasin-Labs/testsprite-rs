@@ -62,6 +62,9 @@ fn tool_list() -> Value {
             { "name": "testsprite_emit_test",
               "description": "Materialize a stored test into a repo file (e.g. crates/foo/tests/bar.rs, or tests/test_api.py for a spec case) so cargo/CI own it — the repo-native alternative to ephemeral SQLite runs. `command` tests cannot be emitted (their code is a shell line, not source).",
               "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
+            { "name": "testsprite_materialize_tests",
+              "description": "Bulk-write stored tests into TestSprite-style cwd files under testsprite_tests/ by default: TC001_Title.py/js/json/sh. Use this after generation when the user expects visible files, not only SQLite/run history.",
+              "inputSchema": obj_schema(&[("id","array"),("out","string")]) },
             { "name": "testsprite_rename_test",
               "description": "Rename a stored test's title. Use this to fix the munged/duplicate TC000 names auto-generation produces — give each test a meaningful, unique name.",
               "inputSchema": obj_schema(&[("id","string"),("title","string")]) },
@@ -390,6 +393,23 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             crate::local::store::emit(&root, id, std::path::Path::new(out)).await?;
             Ok(json!({ "wrote": out }))
         }
+        "testsprite_materialize_tests" => {
+            let root = std::env::current_dir()?;
+            let ids: Vec<String> = args
+                .get("id")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let out = args.get("out").and_then(|v| v.as_str());
+            let paths =
+                crate::local::store::materialize(&root, &ids, out.map(std::path::Path::new))
+                    .await?;
+            Ok(json!({ "materialized": paths.len(), "paths": paths }))
+        }
         "testsprite_rename_test" => {
             let root = std::env::current_dir()?;
             let id = args
@@ -659,4 +679,19 @@ pub async fn serve() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tool_list_exposes_bulk_materialize() {
+        let tools = super::tool_list();
+        let names: Vec<_> = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"testsprite_materialize_tests"));
+    }
 }
