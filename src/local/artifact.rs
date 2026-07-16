@@ -47,20 +47,93 @@ pub async fn get(root: &Path, run_id: i64, out_dir: &Path) -> anyhow::Result<Pat
 
 /// Latest runs report, markdown or JSON-ready value.
 pub async fn report(root: &Path) -> anyhow::Result<Value> {
-    let results = crate::local::store::latest_results(root).await?;
+    let mut results = crate::local::store::latest_results(root).await?;
     let total = results.len();
     let passed = results
         .iter()
         .filter(|r| r.get("passed").and_then(Value::as_bool).unwrap_or(false))
         .count();
     let failed = total.saturating_sub(passed);
+
+    // Additive per-result severity (for JSON consumers + the dashboard).
+    for r in &mut results {
+        if let Some(obj) = r.as_object_mut() {
+            let fk = obj.get("failureKind").and_then(Value::as_str);
+            let passed = obj.get("passed").and_then(Value::as_bool).unwrap_or(false);
+            obj.insert(
+                "severity".to_string(),
+                json!(if passed {
+                    "-"
+                } else {
+                    crate::report::severity_for(fk)
+                }),
+            );
+        }
+    }
+
+    let project = crate::local::project::load(root)
+        .await
+        .map(|p| p.name)
+        .unwrap_or_else(|_| "Local Project".to_string());
+    let requirements = requirement_matrix(&results);
+
     Ok(json!({
+        "projectName": project,
         "total": total,
         "passed": passed,
         "failed": failed,
         "results": results,
+        "requirements": requirements,
         "clusters": crate::local::triage::triage(root).await?,
     }))
+}
+
+/// Per-requirement coverage rows `{name, num, total, passed, failed}` for the
+/// JSON report, matching the report's `## 3️⃣ Coverage & Matching Metrics` table.
+fn requirement_matrix(results: &[Value]) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut sorted: Vec<&Value> = results.iter().collect();
+    sorted.sort_by_key(|r| {
+        r.get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    });
+    for r in sorted {
+        let name = r
+            .get("requirement")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                r.get("category")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or("Ungrouped")
+            .to_string();
+        if !counts.contains_key(&name) {
+            order.push(name.clone());
+        }
+        let e = counts.entry(name).or_insert((0, 0));
+        e.0 += 1;
+        if r.get("passed").and_then(Value::as_bool).unwrap_or(false) {
+            e.1 += 1;
+        }
+    }
+    if let Some(i) = order.iter().position(|n| n == "Ungrouped") {
+        let u = order.remove(i);
+        order.push(u);
+    }
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let (t, p) = counts[&name];
+            json!({"name": name, "num": i + 1, "total": t, "passed": p, "failed": t - p})
+        })
+        .collect()
 }
 
 pub async fn write_report(root: &Path, out: &Path, json_out: bool) -> anyhow::Result<PathBuf> {
@@ -422,51 +495,11 @@ fn render_prd_review(prd: &Value) -> String {
     html
 }
 
+/// Render the official-format local report (requirement-grouped sections, real
+/// analysis prose, per-failure severity, coverage matrix). Delegates to the
+/// shared pure builder so the format stays in one place.
 fn render_markdown(v: &Value) -> String {
-    let total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
-    let passed = v.get("passed").and_then(Value::as_u64).unwrap_or(0);
-    let failed = v.get("failed").and_then(Value::as_u64).unwrap_or(0);
-    let mut out = format!(
-        "# TestSprite Report\n\n**Summary:** {passed}/{total} passed ({failed} failed)\n\n"
-    );
-    out.push_str("## Results\n\n| Test | Verdict | Failure kind | Error |\n|---|---|---|---|\n");
-    if let Some(rows) = v.get("results").and_then(Value::as_array) {
-        for r in rows {
-            let title = r.get("title").and_then(Value::as_str).unwrap_or("");
-            let verdict = r
-                .get("verdict")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let fk = r.get("failureKind").and_then(Value::as_str).unwrap_or("-");
-            let err = r.get("error").and_then(Value::as_str).unwrap_or("");
-            out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                md_cell(title),
-                md_cell(verdict),
-                md_cell(fk),
-                md_cell(&err.chars().take(160).collect::<String>())
-            ));
-        }
-    }
-    if let Some(clusters) = v.get("clusters").and_then(Value::as_array)
-        && !clusters.is_empty()
-    {
-        out.push_str("\n## Failure clusters\n\n");
-        for c in clusters {
-            out.push_str(&format!(
-                "- `{}` ×{}\n",
-                c.get("failure_kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-                c.get("count").and_then(Value::as_u64).unwrap_or(0)
-            ));
-        }
-    }
-    out
-}
-
-fn md_cell(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ")
+    crate::report::build_local_report(v)
 }
 
 fn render_pdf(v: &Value) -> Vec<u8> {
@@ -632,9 +665,18 @@ mod tests {
         let out = root.join("report.md");
         write_report(&root, &out, false).await.unwrap();
         let body = std::fs::read_to_string(out).unwrap();
-        assert!(body.contains("# TestSprite Report"));
+        // Now emits the official TestSprite report format.
+        assert!(
+            body.contains("# TestSprite AI Testing Report (MCP)"),
+            "{body}"
+        );
+        assert!(body.contains("## 2️⃣ Requirement Validation Summary"));
+        assert!(body.contains("## 3️⃣ Coverage & Matching Metrics"));
+        assert!(body.contains("| **Total** |"));
         assert!(body.contains("T"));
         assert!(body.contains("boom"));
+        // The old placeholder is gone.
+        assert!(!body.contains("TODO"));
         std::fs::remove_dir_all(&root).ok();
     }
 

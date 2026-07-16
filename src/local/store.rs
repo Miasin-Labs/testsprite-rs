@@ -441,22 +441,45 @@ pub async fn prune_all(root: &Path, keep: usize) -> anyhow::Result<u64> {
     Ok(res.rows_affected())
 }
 
-/// The latest run result (if any) per stored test, joined to its title.
+/// The latest run result (if any) per stored test, joined to its title. Also
+/// surfaces the stored case's `requirement`/`category` (the report's grouping
+/// key) and the analysis `fix`, so the report renderer has everything it needs.
 pub async fn latest_results(root: &Path) -> anyhow::Result<Vec<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let rows: Vec<(String, String, i64, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT t.id, t.title, r.passed, r.failure_kind, r.error, r.analysis \
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        i64,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
+        "SELECT t.id, t.title, r.passed, r.failure_kind, r.error, r.analysis, t.body \
          FROM tests t JOIN runs r ON r.run_id = (SELECT MAX(run_id) FROM runs WHERE test_id = t.id)",
     )
     .fetch_all(&pool)
     .await?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, title, passed, failure_kind, error, analysis) in rows {
-        let cause = analysis
+    for (id, title, passed, failure_kind, error, analysis, body) in rows {
+        let parsed = analysis
             .as_deref()
-            .and_then(|a| serde_json::from_str::<Value>(a).ok())
-            .and_then(|v| v.get("cause").and_then(Value::as_str).map(str::to_string));
+            .and_then(|a| serde_json::from_str::<Value>(a).ok());
+        let field = |k: &str| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get(k).and_then(Value::as_str).map(str::to_string))
+        };
+        // Report grouping key: the case's `requirement`, else `category`.
+        let body_val = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+        let requirement = body_val
+            .get("requirement")
+            .and_then(Value::as_str)
+            .or_else(|| body_val.get("category").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
         out.push(serde_json::json!({
             "id": id,
             "title": title,
@@ -464,7 +487,9 @@ pub async fn latest_results(root: &Path) -> anyhow::Result<Vec<Value>> {
             "verdict": if passed != 0 { "passed" } else { "failed" },
             "failureKind": failure_kind,
             "error": error,
-            "cause": cause,
+            "cause": field("cause"),
+            "fix": field("fix"),
+            "requirement": requirement,
         }));
     }
     Ok(out)
