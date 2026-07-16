@@ -276,7 +276,19 @@ async fn run_one(
         Ok(c) => c,
         Err(e) => return Outcome::fail(format!("could not serialize case: {e}"), String::new()),
     };
-    ex.run(&case, ctx).await
+    // Hard wall-clock: a hang/deadlock (e.g. blocking_read in an async test)
+    // becomes a FAILED/timeout verdict instead of stalling the whole run.
+    let secs = crate::envs::test_timeout_secs();
+    if secs == 0 {
+        return ex.run(&case, ctx).await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), ex.run(&case, ctx)).await {
+        Ok(outcome) => outcome,
+        Err(_) => Outcome::fail(
+            format!("test exceeded the {secs}s time limit (possible hang/deadlock)"),
+            String::new(),
+        ),
+    }
 }
 
 /// Run one dependency level: sequentially when `jobs <= 1`, else up to `jobs`

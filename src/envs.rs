@@ -45,6 +45,16 @@ pub fn serve_ready_secs() -> u64 {
         .unwrap_or(30)
 }
 
+/// Hard wall-clock, in seconds, for a single test's execution. A test that
+/// exceeds it is FAILED (verdict `timeout`) instead of hanging the whole run —
+/// the backstop for deadlocks/infinite loops. `0` disables it (default 300).
+pub fn test_timeout_secs() -> u64 {
+    env::var("TESTSPRITE_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+}
+
 /// The user's API key (encrypted AEAD token, `sk-user-...`).
 pub fn api_key() -> Option<String> {
     env::var("TSMCP_API_KEY")

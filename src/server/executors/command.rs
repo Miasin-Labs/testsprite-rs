@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use super::{ExecCtx, Executor, Outcome, clip};
+use super::{ExecCtx, Executor, Outcome, lead_with_first_error};
 
 pub struct CommandExecutor;
 
@@ -42,7 +42,7 @@ impl Executor for CommandExecutor {
                     format!(
                         "command failed (exit {}): {}",
                         o.status.code().unwrap_or(-1),
-                        clip(&buf, 2000)
+                        lead_with_first_error(&buf, 2000)
                     ),
                     cmd.to_string(),
                 )

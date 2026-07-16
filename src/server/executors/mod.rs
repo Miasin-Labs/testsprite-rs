@@ -136,9 +136,59 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
     format!("{head_str}\n…[{elided} chars elided]…\n{tail_str}")
 }
 
+/// Lead a failure message with the FIRST error-signature line in `output`, then
+/// the clipped full output — so a cascade shows its ROOT cause first, not the
+/// last symptom (e.g. "cmp-buffer failed" when the real cause was "cmp errored
+/// first"). `clip` already biases toward the head, but a noisy preamble can bury
+/// the first real error; this pulls it to the front explicitly.
+pub(crate) fn lead_with_first_error(output: &str, max: usize) -> String {
+    let clipped = clip(output, max);
+    match first_error_line(output) {
+        Some(root) if !clipped.trim_start().starts_with(root.as_str()) => {
+            format!("first error: {root}\n{clipped}")
+        }
+        _ => clipped,
+    }
+}
+
+/// The first line of `output` that looks like an error/failure, if any.
+fn first_error_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|t| {
+            let lower = t.to_lowercase();
+            t.contains("error[E")
+                || lower.starts_with("error:")
+                || lower.starts_with("error ")
+                || t.contains("panicked at")
+                || lower.contains("failed to ")
+                || lower.starts_with("assertion")
+                || lower.contains("cannot find")
+                || lower.contains("unresolved import")
+        })
+        .map(|t| t.chars().take(200).collect())
+}
+
 #[cfg(test)]
 mod clip_tests {
-    use super::clip;
+    use super::{clip, lead_with_first_error};
+
+    #[test]
+    fn leads_with_the_first_error_in_a_cascade() {
+        // Noisy preamble, the real root, then cascade symptoms at the tail.
+        let out = "Compiling foo\nwarning: unused import\n\
+                   error[E0433]: cannot find `Bar` in this scope\n  --> src/x.rs:3\n\
+                   error: aborting due to previous error\n\
+                   error: could not compile `foo`";
+        let led = lead_with_first_error(out, 2000);
+        assert!(led.starts_with("first error: error[E0433]"), "{led}");
+        // No error-signature line → just the clipped output, unchanged.
+        assert_eq!(
+            lead_with_first_error("all good\nnothing here", 2000),
+            "all good\nnothing here"
+        );
+    }
 
     #[test]
     fn short_output_passes_through_trimmed() {

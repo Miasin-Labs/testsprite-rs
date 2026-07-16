@@ -93,6 +93,17 @@ pub struct EndpointSpec {
     /// right = pass".
     #[serde(default)]
     pub expect_body: Option<Value>,
+    /// Require the response body to parse as this format (`json` | `yaml` |
+    /// `toml`) — the general "emitted output must be valid <format>" check.
+    /// `expect_json: true` is sugar for `expect_parses: "json"`.
+    #[serde(default)]
+    pub expect_parses: Option<String>,
+    /// A follow-up request run only when this one passes — a read-after-write
+    /// check: mutate here, then GET and assert the state actually changed via
+    /// the follow-up's own `expect_status`/`expect_body`. Chains (`then.then`),
+    /// so it catches "the write returned ok but nothing actually changed".
+    #[serde(default)]
+    pub then: Option<Box<EndpointSpec>>,
 }
 
 /// A planned case + its executable spec.
@@ -129,6 +140,14 @@ fn parse_endpoint_spec(v: &Value) -> Option<EndpointSpec> {
         headers: v.get("headers").cloned().filter(Value::is_object),
         expect_json: v.get("expect_json").and_then(Value::as_bool),
         expect_body: v.get("expect_body").cloned().filter(|b| !b.is_null()),
+        expect_parses: v
+            .get("expect_parses")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        then: v
+            .get("then")
+            .and_then(|t| serde_json::from_value::<EndpointSpec>(t.clone()).ok())
+            .map(Box::new),
     })
 }
 

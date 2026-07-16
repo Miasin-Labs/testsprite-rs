@@ -91,8 +91,37 @@ pub fn new_running_entity(
     })
 }
 
-/// Execute one endpoint spec against `base_url`; returns (passed, error, code).
+/// Execute a spec: the primary request, then — only if it passes — each `then`
+/// follow-up in order (a read-after-write check that the state actually
+/// changed). Returns (passed, error, code); the code artifact is the primary's.
 pub async fn execute_spec(
+    spec: &EndpointSpec,
+    base_url: &str,
+    vars: &HashMap<String, String>,
+) -> (bool, String, String) {
+    let (ok, err, code) = execute_one(spec, base_url, vars).await;
+    if !ok {
+        return (ok, err, code);
+    }
+    let mut cur = spec.then.as_deref();
+    let mut step = 1;
+    while let Some(next) = cur {
+        let (n_ok, n_err, _) = execute_one(next, base_url, vars).await;
+        if !n_ok {
+            return (
+                false,
+                format!("primary request passed but follow-up step {step} failed: {n_err}"),
+                code,
+            );
+        }
+        cur = next.then.as_deref();
+        step += 1;
+    }
+    (true, String::new(), code)
+}
+
+/// Execute ONE request for a spec (ignoring `then`); returns (passed, error, code).
+async fn execute_one(
     spec: &EndpointSpec,
     base_url: &str,
     vars: &HashMap<String, String>,
@@ -150,12 +179,12 @@ pub async fn execute_spec(
 
 /// Does this spec assert anything about the response body (so it must be read)?
 fn response_body_asserted(spec: &EndpointSpec) -> bool {
-    spec.expect_body.is_some() || spec.expect_json == Some(true)
+    spec.expect_body.is_some() || spec.expect_json == Some(true) || spec.expect_parses.is_some()
 }
 
 /// Validate a response against a spec: the status band first, then — when the
-/// spec asks — that the body is valid JSON and deep-contains `expect_body`.
-/// Pure (no I/O) so the whole verdict logic is unit-testable.
+/// spec asks — that the body parses as its declared format and deep-contains
+/// `expect_body`. Pure (no I/O) so the whole verdict logic is unit-testable.
 pub(crate) fn check_response(spec: &EndpointSpec, status: u16, body: &str) -> (bool, String) {
     if !spec.expect_status.accepts(status) {
         return (
@@ -166,25 +195,56 @@ pub(crate) fn check_response(spec: &EndpointSpec, status: u16, body: &str) -> (b
     if !response_body_asserted(spec) {
         return (true, String::new());
     }
-    let parsed: Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(e) => {
-            let preview: String = body.chars().take(120).collect();
+    // "Emitted output must be valid <format>" — the round-trip / YAML-bug class.
+    if let Some(fmt) = spec.expect_parses.as_deref()
+        && let Err(msg) = parses_as(fmt, body)
+    {
+        return (false, format!("status {status} ok but {msg}"));
+    }
+    // JSON structural checks.
+    if spec.expect_json == Some(true) || spec.expect_body.is_some() {
+        let parsed: Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                let preview: String = body.chars().take(120).collect();
+                return (
+                    false,
+                    format!(
+                        "status {status} ok but response body is not valid JSON ({e}): {preview}"
+                    ),
+                );
+            }
+        };
+        if let Some(expected) = &spec.expect_body
+            && let Some(path) = json_mismatch(&parsed, expected, "$")
+        {
             return (
                 false,
-                format!("status {status} ok but response body is not valid JSON ({e}): {preview}"),
+                format!("status {status} ok but response body {path}"),
             );
         }
-    };
-    if let Some(expected) = &spec.expect_body
-        && let Some(path) = json_mismatch(&parsed, expected, "$")
-    {
-        return (
-            false,
-            format!("status {status} ok but response body {path}"),
-        );
     }
     (true, String::new())
+}
+
+/// `Ok` if `body` parses as the named format (`json` | `yaml` | `toml`), else a
+/// human-readable reason.
+fn parses_as(fmt: &str, body: &str) -> Result<(), String> {
+    let preview = || body.chars().take(120).collect::<String>();
+    match fmt.to_ascii_lowercase().as_str() {
+        "json" => serde_json::from_str::<Value>(body)
+            .map(|_| ())
+            .map_err(|e| format!("response body is not valid JSON ({e}): {}", preview())),
+        "yaml" => serde_yaml::from_str::<serde_yaml::Value>(body)
+            .map(|_| ())
+            .map_err(|e| format!("response body is not valid YAML ({e}): {}", preview())),
+        "toml" => toml::from_str::<toml::Value>(body)
+            .map(|_| ())
+            .map_err(|e| format!("response body is not valid TOML ({e}): {}", preview())),
+        other => Err(format!(
+            "unknown expect_parses format {other:?} (use json|yaml|toml)"
+        )),
+    }
 }
 
 /// `None` if `actual` deep-contains `expected`; otherwise the JSON path of the
@@ -381,6 +441,25 @@ mod tests {
         let (ok, err) = check_response(&s, 200, r#"{"user":{"id":7},"roles":["admin"]}"#);
         assert!(!ok);
         assert!(err.contains("missing $.user.active"), "{err}");
+    }
+
+    #[test]
+    fn expect_parses_validates_the_body_format() {
+        // The YAML-frontmatter bug class: emitted output that must be valid YAML.
+        let y = spec(serde_json::json!({"method": "GET", "path": "/cfg", "expect_parses": "yaml"}));
+        assert!(check_response(&y, 200, "name: ok\nlist:\n  - a\n").0);
+        // `name: ok: broken` is the exact unquoted-colon YAML defect.
+        let (ok, err) = check_response(&y, 200, "name: ok: broken");
+        assert!(!ok);
+        assert!(err.contains("not valid YAML"), "{err}");
+
+        let j = spec(serde_json::json!({"method": "GET", "path": "/x", "expect_parses": "json"}));
+        assert!(check_response(&j, 200, r#"{"a":1}"#).0);
+        assert!(!check_response(&j, 200, "<html>").0);
+
+        // An unknown format is reported, never silently passed.
+        let u = spec(serde_json::json!({"method": "GET", "path": "/x", "expect_parses": "xml"}));
+        assert!(!check_response(&u, 200, "<x/>").0);
     }
 
     #[test]

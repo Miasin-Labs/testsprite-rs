@@ -116,6 +116,12 @@ pub fn classify(passed: bool, error: &str, kind: TestKind) -> (Verdict, Option<&
         return (Verdict::Blocked, Some("infra"));
     }
 
+    // The harness's own wall-clock killed the test — a hang/deadlock, not a
+    // subprocess message, so it is a real failure for every modality.
+    if lower.contains("exceeded the") && lower.contains("time limit") {
+        return (Verdict::Failed, Some("timeout"));
+    }
+
     // Everything below reads the target's response or our transport's
     // complaint. For `rust`/`command` the error is a subprocess's output, so
     // none of it applies: a failing cargo test is a failing cargo test, and
@@ -389,6 +395,28 @@ mod tests {
             classify(false, "GET /admin -> 403 Forbidden", TestKind::Backend),
             (Verdict::Blocked, Some("auth"))
         );
+    }
+
+    #[test]
+    fn a_harness_timeout_is_failed_timeout_for_every_modality() {
+        // The wall-clock backstop for hangs/deadlocks must fail (not block, not
+        // get excused as subprocess noise) whichever executor produced it.
+        for kind in [
+            TestKind::Rust,
+            TestKind::Command,
+            TestKind::Backend,
+            TestKind::Frontend,
+        ] {
+            assert_eq!(
+                classify(
+                    false,
+                    "test exceeded the 300s time limit (possible hang/deadlock)",
+                    kind
+                ),
+                (Verdict::Failed, Some("timeout")),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{ExecCtx, Executor, Outcome, clip};
+use super::{ExecCtx, Executor, Outcome, lead_with_first_error};
 
 pub struct RustExecutor;
 
@@ -52,7 +52,10 @@ async fn cargo_build(crate_dir: &str) -> Outcome {
         .await;
     match out {
         Ok(o) if o.status.success() => Outcome::pass(code),
-        Ok(o) => Outcome::fail(clip(&String::from_utf8_lossy(&o.stderr), 2000), code),
+        Ok(o) => Outcome::fail(
+            lead_with_first_error(&String::from_utf8_lossy(&o.stderr), 2000),
+            code,
+        ),
         Err(e) => Outcome::fail(format!("cargo failed to launch: {e}"), code),
     }
 }
@@ -85,7 +88,7 @@ async fn run_cargo_test(crate_dir: &str, code: &str) -> Outcome {
         Ok(o) => {
             let mut msg = String::from_utf8_lossy(&o.stdout).to_string();
             msg.push_str(&String::from_utf8_lossy(&o.stderr));
-            Outcome::fail(clip(&msg, 2000), code.to_string())
+            Outcome::fail(lead_with_first_error(&msg, 2000), code.to_string())
         }
         Err(e) => Outcome::fail(format!("cargo failed to launch: {e}"), code.to_string()),
     }
