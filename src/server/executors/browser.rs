@@ -44,11 +44,13 @@ impl BrowserExecutor {
     async fn script_for(&self, case: &Value, ctx: &ExecCtx) -> Result<String, String> {
         let browser = ctx.browser.as_deref().unwrap_or("chromium");
         let shot_path = shot_path(case, ctx, browser).await;
+        let video_path = video_path(case, ctx, browser).await;
         if let Some(body) = plan_steps_body(case, &ctx.variables, shot_path.as_deref()) {
             return Ok(wrap_script(
                 &ctx.target,
                 browser,
                 shot_path.as_deref(),
+                video_path.as_deref(),
                 &body,
             ));
         }
@@ -66,6 +68,7 @@ impl BrowserExecutor {
             &ctx.target,
             browser,
             shot_path.as_deref(),
+            video_path.as_deref(),
             &body,
         ))
     }
@@ -81,6 +84,19 @@ async fn shot_path(case: &Value, ctx: &ExecCtx, browser: &str) -> Option<std::pa
     }
     let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
     Some(dir.join(format!("{id}-{browser}.png")))
+}
+
+/// Per-case video destination under `testsprite_tests/videos`, sibling to shots.
+async fn video_path(case: &Value, ctx: &ExecCtx, browser: &str) -> Option<std::path::PathBuf> {
+    let shots = ctx.shots_dir.as_ref()?;
+    let root = shots.parent()?;
+    let dir = root.join("videos");
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        tracing::warn!("could not create videos dir {dir:?}: {e}");
+        return None;
+    }
+    let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
+    Some(dir.join(format!("{id}-{browser}.webm")))
 }
 
 /// Compile frontend `planSteps` into deterministic Playwright statements.
@@ -344,6 +360,7 @@ fn wrap_script(
     url: &str,
     browser: &str,
     shot_path: Option<&std::path::Path>,
+    video_path: Option<&std::path::Path>,
     body: &str,
 ) -> String {
     // Headless Chromium under this executor's sandboxless environment needs
@@ -360,11 +377,27 @@ fn wrap_script(
         ),
         None => String::new(),
     };
+    let context_options = match video_path.and_then(|p| p.parent()) {
+        Some(dir) => format!(
+            "{{ recordVideo: {{ dir: {:?} }} }}",
+            dir.display().to_string()
+        ),
+        None => "{}".to_string(),
+    };
+    let video_line = match video_path {
+        Some(path) => format!(
+            "  if (video) {{ try {{ const p = await video.path(); fs.renameSync(p, {:?}); }} catch (_) {{}} }}\n",
+            path.display().to_string()
+        ),
+        None => String::new(),
+    };
     format!(
-        r#"const {{ {browser} }} = require('playwright');
+        r#"const fs = require('fs');
+const {{ {browser} }} = require('playwright');
 (async () => {{
   const browser = await {browser}.launch({launch_args});
-  const page = await browser.newPage();
+  const context = await browser.newContext({context_options});
+  const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   let failed = null;
@@ -377,7 +410,9 @@ fn wrap_script(
     }})();
     if (errors.length) throw new Error('page errors: ' + errors.join('; '));
   }} catch (e) {{ failed = e; }}
-{screenshot_line}  await browser.close();
+{screenshot_line}  const video = page.video();
+  await context.close();
+{video_line}  await browser.close();
   if (failed) {{ console.error(String(failed)); process.exit(1); }}
   console.log('ok');
 }})().catch(e => {{ console.error(e); process.exit(1); }});
@@ -581,10 +616,13 @@ mod tests {
             "http://localhost:3000",
             "chromium",
             Some(Path::new("/tmp/shots/tc1-chromium.png")),
+            Some(Path::new("/tmp/videos/tc1-chromium.webm")),
             "await page.click('#go');",
         );
         assert!(s.contains("page.screenshot("), "no screenshot in:\n{s}");
         assert!(s.contains("/tmp/shots/tc1-chromium.png"));
+        assert!(s.contains("recordVideo"), "no video recording in:\n{s}");
+        assert!(s.contains("/tmp/videos/tc1-chromium.webm"));
         // The generated body is embedded inside an isolating async IIFE, so a
         // stray `return`/redeclaration in it can't skip the harness cleanup.
         assert!(
@@ -601,7 +639,7 @@ mod tests {
 
     #[test]
     fn wrap_script_omits_screenshot_without_a_path() {
-        let s = wrap_script("http://localhost:3000", "chromium", None, "");
+        let s = wrap_script("http://localhost:3000", "chromium", None, None, "");
         assert!(!s.contains("page.screenshot("));
         // The harness still guards the initial navigation.
         assert!(s.contains("bad status"));

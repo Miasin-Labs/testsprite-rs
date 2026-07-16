@@ -39,6 +39,7 @@ pub async fn get(root: &Path, run_id: i64, out_dir: &Path) -> anyhow::Result<Pat
 
     if let Some(test_id) = run.get("test_id").and_then(Value::as_str) {
         copy_screenshots(root, test_id, out_dir)?;
+        copy_videos(root, test_id, out_dir)?;
     }
 
     Ok(out_dir.to_path_buf())
@@ -136,6 +137,7 @@ pub async fn write_replay(root: &Path, id: &str, out: &Path) -> anyhow::Result<P
         .cloned()
         .unwrap_or_default();
     let shots = screenshots(root, id)?;
+    let vids = videos(root, id)?;
     let mut html = String::from(
         "<!doctype html><meta charset=utf-8><title>TestSprite Replay</title>\
          <style>body{font-family:system-ui;margin:2rem;background:#111;color:#eee}\
@@ -170,6 +172,12 @@ pub async fn write_replay(root: &Path, id: &str, out: &Path) -> anyhow::Result<P
         html.push_str(&format!(
             "<h2>Final screenshot</h2><img src=\"{}\" alt=\"final screenshot\">",
             html_escape(&rel_for_html(out, final_shot))
+        ));
+    }
+    if let Some(video) = vids.last() {
+        html.push_str(&format!(
+            "<h2>Recording</h2><video controls src=\"{}\" style=\"max-width:100%\"></video>",
+            html_escape(&rel_for_html(out, video))
         ));
     }
     std::fs::write(out, html)?;
@@ -232,8 +240,39 @@ fn copy_screenshots(root: &Path, test_id: &str, out_dir: &Path) -> anyhow::Resul
     Ok(())
 }
 
+fn copy_videos(root: &Path, test_id: &str, out_dir: &Path) -> anyhow::Result<()> {
+    let vids = videos(root, test_id)?;
+    let dst = out_dir.join("videos");
+    for video in vids {
+        let Some(name) = video.file_name() else {
+            continue;
+        };
+        std::fs::create_dir_all(&dst)?;
+        let _ = std::fs::copy(&video, dst.join(name));
+    }
+    Ok(())
+}
+
 fn screenshots(root: &Path, test_id: &str) -> anyhow::Result<Vec<PathBuf>> {
     let dir = crate::local::ts_dir(root).join("shots");
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(test_id) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn videos(root: &Path, test_id: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let dir = crate::local::ts_dir(root).join("videos");
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -565,9 +604,13 @@ mod tests {
             .await
             .unwrap();
         let out = root.join("bundle");
+        let videos = crate::local::ts_dir(&root).join("videos");
+        std::fs::create_dir_all(&videos).unwrap();
+        std::fs::write(videos.join("t1-chromium.webm"), b"webm").unwrap();
         get(&root, run_id, &out).await.unwrap();
         assert!(out.join("run.json").exists());
         assert!(out.join("qa-artifact.json").exists());
+        assert!(out.join("videos/t1-chromium.webm").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -684,12 +727,16 @@ mod tests {
         let shots = crate::local::ts_dir(&root).join("shots");
         std::fs::create_dir_all(&shots).unwrap();
         std::fs::write(shots.join("front-chromium-step01.png"), b"png").unwrap();
+        let videos = crate::local::ts_dir(&root).join("videos");
+        std::fs::create_dir_all(&videos).unwrap();
+        std::fs::write(videos.join("front-chromium.webm"), b"webm").unwrap();
         let out = root.join("replay.html");
         write_replay(&root, "front", &out).await.unwrap();
         let html = std::fs::read_to_string(out).unwrap();
         assert!(html.contains("Login"));
         assert!(html.contains("Input Email"));
         assert!(html.contains("front-chromium-step01.png"));
+        assert!(html.contains("front-chromium.webm"));
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -190,9 +190,9 @@ healing when the primary selector drifts:
 
 This matches the product architecture shown in TestSprite demos: generated or
 authored test steps become executable browser actions; runs return pass/fail plus
-visual evidence, without maintaining hand-written Playwright files for every
+visual evidence (screenshots plus `.webm` video recordings), without maintaining hand-written Playwright files for every
 flow. Edit steps with `testsprite-rs test plan put <id> --file steps.json`, then
-render the local replay with `testsprite-rs test replay <id> --out replay.html`.
+render the local replay with `testsprite-rs test replay <id> --out replay.html` (includes screenshots and video when present).
 
 ## How this maps to the cloud/CLI flow
 
