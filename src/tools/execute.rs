@@ -319,7 +319,8 @@ pub fn mcp_next_action(project_path: &str, exe: &str) -> Value {
 
 #[cfg(test)]
 mod redact_tests {
-    use super::{parse_host_port, redact};
+    use super::{instruction_with_auth, mcp_next_action, parse_host_port, redact, write_outputs};
+    use crate::types::{Config, TestCase, TestEntity, TestType};
 
     #[test]
     fn parse_host_port_defaults_the_port_by_scheme() {
@@ -360,5 +361,72 @@ mod redact_tests {
             redact("http://proxy.example:8080"),
             "http://proxy.example:8080"
         );
+    }
+
+    #[test]
+    fn auth_instruction_appends_only_when_configured() {
+        let mut cfg = Config {
+            login_user: Some("u@example.com".into()),
+            login_password: Some("pw".into()),
+            ..Default::default()
+        };
+        let frontend = instruction_with_auth(&cfg, TestType::Frontend, "base");
+        assert!(frontend.contains("base"));
+        assert!(frontend.contains("u@example.com"));
+        assert!(frontend.contains("pw"));
+
+        cfg.login_user = None;
+        cfg.login_password = None;
+        assert_eq!(
+            instruction_with_auth(&cfg, TestType::Frontend, "base"),
+            "base"
+        );
+
+        cfg.backend_auth_type = Some("bearer".into());
+        cfg.backend_credential = Some("token".into());
+        let backend = instruction_with_auth(&cfg, TestType::Backend, "base");
+        assert!(backend.contains("\"authType\":\"bearer\""), "{backend}");
+        assert!(backend.contains("\"credential\":\"token\""), "{backend}");
+    }
+
+    #[tokio::test]
+    async fn write_outputs_creates_result_code_and_raw_report_files() {
+        let root = crate::local::tmp_root();
+        let paths = crate::paths::Paths::new(&root);
+        std::fs::create_dir_all(paths.tmp_dir()).unwrap();
+        let plan = vec![TestCase {
+            id: "TC001".into(),
+            title: "Login ok".into(),
+            description: String::new(),
+            priority: None,
+        }];
+        let results = vec![TestEntity {
+            project_id: Some("p".into()),
+            test_id: Some("t".into()),
+            user_id: Some("u".into()),
+            title: Some("Login ok".into()),
+            description: Some("d".into()),
+            code: Some("print('ok')".into()),
+            test_status: Some("PASSED".into()),
+            test_error: None,
+            test_visualization: None,
+            modified: Some("now".into()),
+        }];
+        write_outputs(&paths, "proj", TestType::Frontend, &plan, &results)
+            .await
+            .unwrap();
+        assert!(paths.test_results().exists());
+        assert!(paths.raw_report().exists());
+        assert!(paths.dir().join("TC001_Login_ok.py").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn mcp_next_action_points_at_raw_and_final_reports() {
+        let v = mcp_next_action("/repo", "testsprite-rs");
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(text.contains("generate-code-and-execute"));
+        assert!(text.contains("raw_report.md"));
+        assert!(text.contains("testsprite-mcp-test-report.md"));
     }
 }
