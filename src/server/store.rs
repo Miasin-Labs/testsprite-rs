@@ -292,6 +292,40 @@ fn seed_runtime_vars(session: &mut HashMap<String, String>) {
         let digest = Sha256::digest(verifier.as_bytes());
         session.insert("pkceChallenge".to_string(), base64url(&digest));
     }
+    // Parallel-safe test data: seed fresh unique tokens so a spec can write
+    // `testuser_${uuid}@x.com` and every test (and every concurrent run) gets a
+    // distinct value — no two tests collide on a shared account/record. These
+    // are per-flow (the session is built once per test case), so a login step
+    // and a later step in the SAME test see the SAME `${uuid}`.
+    for (k, v) in dynamic_tokens() {
+        session.entry(k).or_insert(v);
+    }
+}
+
+/// Fresh, unique substitution tokens for one test execution. Exposed to the
+/// command / browser executors so every modality shares the same parallel-safe
+/// data vocabulary. `uuid` (full v4), `uuid8` (short), `ts` (unix seconds),
+/// `rand` (short alphanumeric).
+pub(crate) fn dynamic_tokens() -> Vec<(String, String)> {
+    let full = Uuid::new_v4();
+    let short: String = full.simple().to_string().chars().take(8).collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string();
+    let rand: String = Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(10)
+        .collect();
+    vec![
+        ("uuid".to_string(), full.to_string()),
+        ("uuid8".to_string(), short),
+        ("ts".to_string(), ts),
+        ("rand".to_string(), rand),
+    ]
 }
 
 fn base64url(bytes: &[u8]) -> String {
@@ -920,6 +954,44 @@ mod tests {
         assert_eq!(value["nested"][0], "env-value");
         assert_eq!(value["nested"][1]["missing"], "xy");
         assert_eq!(value["n"], 3);
+    }
+
+    #[test]
+    fn dynamic_tokens_are_unique_per_call_and_wellformed() {
+        let a: HashMap<String, String> = dynamic_tokens().into_iter().collect();
+        let b: HashMap<String, String> = dynamic_tokens().into_iter().collect();
+        for k in ["uuid", "uuid8", "ts", "rand"] {
+            assert!(a.contains_key(k), "missing {k}");
+        }
+        // Two calls yield distinct uuids (parallel-safety guarantee).
+        assert_ne!(a["uuid"], b["uuid"], "each test must get a fresh uuid");
+        assert_ne!(a["uuid8"], b["uuid8"]);
+        assert_eq!(a["uuid8"].len(), 8);
+        assert!(a["ts"].chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn seeded_dynamic_tokens_interpolate_into_a_spec() {
+        // A spec body written with ${uuid} resolves to the per-flow seeded
+        // value, and the SAME value across two references in one flow.
+        let mut session = HashMap::new();
+        seed_runtime_vars(&mut session);
+        let out = interpolate_value(
+            &json!({"email": "user_${uuid}@x.com", "again": "${uuid}"}),
+            &session,
+        );
+        let email = out["email"].as_str().unwrap();
+        let again = out["again"].as_str().unwrap();
+        assert!(email.starts_with("user_") && email.ends_with("@x.com"));
+        assert!(
+            email.contains(again),
+            "same uuid within one flow: {email} vs {again}"
+        );
+        // A caller-supplied ${uuid} (static var) is NOT overwritten by seeding.
+        let mut fixed = HashMap::new();
+        fixed.insert("uuid".to_string(), "FIXED".to_string());
+        seed_runtime_vars(&mut fixed);
+        assert_eq!(fixed["uuid"], "FIXED");
     }
 
     #[test]

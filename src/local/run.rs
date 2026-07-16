@@ -121,6 +121,12 @@ pub async fn run_collect(
     jobs: usize,
     serve: bool,
 ) -> anyhow::Result<Vec<Value>> {
+    // Serialize with any other testsprite-rs run against this project: two
+    // concurrent runs would race on the shared app/session/seeded data (the
+    // real plugin guards the same way with execution.lock). Held for the whole
+    // run, released on return. This is the single acquire seam — run_collect
+    // never calls itself, so there is no re-entrancy to worry about.
+    let _run_lock = crate::local::lock::RunLock::acquire(root)?;
     let project = project::load(root).await.ok();
 
     let target = url_override

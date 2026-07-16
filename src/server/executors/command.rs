@@ -34,6 +34,14 @@ impl Executor for CommandExecutor {
         for (k, v) in &ctx.variables {
             process.env(k, v);
         }
+        // Parallel-safe test data: fresh per-invocation tokens so a wrapped
+        // Playwright/pytest run can mint a UNIQUE user/record and never collide
+        // with a concurrent run against the same app. Exposed lowercase
+        // (`$uuid`) and as `TESTSPRITE_UUID` for shell ergonomics.
+        for (k, v) in crate::server::store::dynamic_tokens() {
+            process.env(&k, &v);
+            process.env(format!("TESTSPRITE_{}", k.to_uppercase()), &v);
+        }
         let out = process.output().await;
 
         match out {

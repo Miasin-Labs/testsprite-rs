@@ -21,6 +21,7 @@ pub mod gate;
 pub mod generate;
 pub mod guidelines;
 pub mod lint;
+pub mod lock;
 pub mod mutation;
 pub mod project;
 pub mod rerun;

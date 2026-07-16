@@ -45,7 +45,14 @@ impl BrowserExecutor {
         let browser = ctx.browser.as_deref().unwrap_or("chromium");
         let shot_path = shot_path(case, ctx, browser).await;
         let video_path = video_path(case, ctx, browser).await;
-        if let Some(body) = plan_steps_body(case, &ctx.variables, shot_path.as_deref()) {
+        // Parallel-safe test data: this test's own fresh `${uuid}`/`${ts}`/etc.
+        // for planStep interpolation, so concurrent frontend flows never reuse
+        // the same generated account/record.
+        let mut vars = ctx.variables.clone();
+        for (k, v) in crate::server::store::dynamic_tokens() {
+            vars.entry(k).or_insert(v);
+        }
+        if let Some(body) = plan_steps_body(case, &vars, shot_path.as_deref()) {
             return Ok(wrap_script(
                 &ctx.target,
                 browser,
