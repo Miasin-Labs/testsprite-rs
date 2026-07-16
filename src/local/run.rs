@@ -96,6 +96,41 @@ pub async fn run(
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
+/// Best-effort: read the latest stored PRD's `test_data_strategy` and merge its
+/// derived variables into `variables` without clobbering user-set keys. A
+/// missing/malformed PRD is silently skipped — a run must behave exactly as
+/// before when no strategy is present.
+async fn inject_strategy_vars(
+    root: &Path,
+    variables: &mut std::collections::HashMap<String, String>,
+) {
+    use crate::server::store::{StrategyVar, TPL_PREFIX, strategy_vars};
+    let Ok(Some(id)) = store::latest_prd_id(root).await else {
+        return;
+    };
+    let Ok(Some(prd)) = store::load_prd(root, &id).await else {
+        return;
+    };
+    for (name, var) in strategy_vars(&prd) {
+        match var {
+            // A literal fills the concrete variable directly.
+            StrategyVar::Literal(v) => {
+                variables.entry(name).or_insert(v);
+            }
+            // A template is stashed for fresh per-case expansion in the
+            // executor (seed_runtime_vars). Only stash when the concrete name
+            // isn't already user-set.
+            StrategyVar::Template(tpl) => {
+                if !variables.contains_key(&name) {
+                    variables
+                        .entry(format!("{TPL_PREFIX}{name}"))
+                        .or_insert(tpl);
+                }
+            }
+        }
+    }
+}
+
 /// Stored tests eligible for a whole-suite run: everything except cases the
 /// acceptance gate quarantined. Shared by the gate's smoke tier and any other
 /// caller that needs "the suite as it would actually run".
@@ -181,7 +216,12 @@ pub async fn run_collect(
     };
 
     let llm = crate::server::llm::LlmClient::from_env(model);
-    let variables = project::load_variables(root);
+    let mut variables = project::load_variables(root);
+    // Inject the PRD's `test_data_strategy` (best-effort): literals go straight
+    // in; templates are stashed as `__tsdata_tpl__<name>` so each test case
+    // expands them fresh (`${email}` → a unique per-case address). User-set
+    // variables always win — this only fills gaps.
+    inject_strategy_vars(root, &mut variables).await;
     let ctx = ExecCtx {
         target: target.clone(),
         llm: llm.clone(),

@@ -31,16 +31,21 @@ impl Executor for CommandExecutor {
         // `.testsprite.env` / variables.json are loaded into ExecCtx.variables
         // for spec interpolation; command tests need the same environment so
         // repo helper scripts can mint OAuth tokens or read test credentials.
-        for (k, v) in &ctx.variables {
+        // Parallel-safe test data: fresh per-invocation tokens + expanded
+        // test_data_strategy templates so a wrapped Playwright/pytest run can
+        // mint a UNIQUE user/record and never collide with a concurrent run.
+        let mut env: std::collections::HashMap<String, String> = ctx.variables.clone();
+        crate::server::store::seed_dynamic(&mut env);
+        for (k, v) in &env {
+            // Skip the internal template stash; expose only concrete values.
+            if k.starts_with("__tsdata_tpl__") {
+                continue;
+            }
             process.env(k, v);
-        }
-        // Parallel-safe test data: fresh per-invocation tokens so a wrapped
-        // Playwright/pytest run can mint a UNIQUE user/record and never collide
-        // with a concurrent run against the same app. Exposed lowercase
-        // (`$uuid`) and as `TESTSPRITE_UUID` for shell ergonomics.
-        for (k, v) in crate::server::store::dynamic_tokens() {
-            process.env(&k, &v);
-            process.env(format!("TESTSPRITE_{}", k.to_uppercase()), &v);
+            // Also expose the dynamic tokens uppercased for shell ergonomics.
+            if matches!(k.as_str(), "uuid" | "uuid8" | "ts" | "rand") {
+                process.env(format!("TESTSPRITE_{}", k.to_uppercase()), v);
+            }
         }
         let out = process.output().await;
 

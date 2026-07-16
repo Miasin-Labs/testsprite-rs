@@ -292,14 +292,126 @@ fn seed_runtime_vars(session: &mut HashMap<String, String>) {
         let digest = Sha256::digest(verifier.as_bytes());
         session.insert("pkceChallenge".to_string(), base64url(&digest));
     }
-    // Parallel-safe test data: seed fresh unique tokens so a spec can write
-    // `testuser_${uuid}@x.com` and every test (and every concurrent run) gets a
-    // distinct value — no two tests collide on a shared account/record. These
-    // are per-flow (the session is built once per test case), so a login step
-    // and a later step in the SAME test see the SAME `${uuid}`.
-    for (k, v) in dynamic_tokens() {
-        session.entry(k).or_insert(v);
+    seed_dynamic(session);
+}
+
+/// Seed the parallel-safe dynamic tokens and expand any stashed
+/// `test_data_strategy` templates — the modality-agnostic half of runtime
+/// seeding, shared by the backend flow, the browser executor, and the command
+/// executor so every kind of test draws from the same per-case data vocabulary.
+///
+/// Fresh unique tokens (`${uuid}` etc.) mean every test — and every concurrent
+/// run — gets a distinct account/record and cannot collide. Idempotent within
+/// one map (`or_insert`), so a login step and a later step in the SAME case see
+/// the SAME `${uuid}`, and a user-set value is never overwritten.
+pub(crate) fn seed_dynamic(session: &mut HashMap<String, String>) {
+    let tokens: HashMap<String, String> = dynamic_tokens().into_iter().collect();
+    for (k, v) in &tokens {
+        session.entry(k.clone()).or_insert_with(|| v.clone());
     }
+    // Expand `__tsdata_tpl__<name>` (e.g. `testuser_{uuid}@x.com`) into the
+    // concrete variable `<name>` using THIS case's fresh tokens.
+    let templates: Vec<(String, String)> = session
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix(TPL_PREFIX)
+                .map(|name| (name.to_string(), v.clone()))
+        })
+        .collect();
+    for (name, tpl) in templates {
+        let expanded = expand_template(&tpl, &tokens);
+        session.entry(name).or_insert(expanded);
+    }
+}
+
+/// Variables-map key prefix under which a `test_data_strategy` template is
+/// stashed so [`seed_runtime_vars`] can expand it fresh per test case. The PRD
+/// ingester writes `__tsdata_tpl__email` = `testuser_{uuid}@x.com`.
+pub(crate) const TPL_PREFIX: &str = "__tsdata_tpl__";
+
+/// A resolved `test_data_strategy` entry: a fixed value, or a template with
+/// `{uuid}`/`{ts}`/`{rand}` tokens to expand fresh per case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StrategyVar {
+    Literal(String),
+    Template(String),
+}
+
+/// Parse a PRD's `test_data_strategy` block into named variables. Keys ending
+/// `_template` become [`StrategyVar::Template`] under the stripped name; other
+/// string values become [`StrategyVar::Literal`]. Prose/config keys
+/// (`CRITICAL`, `uuid_generation`, non-strings) are skipped. Each snake_case
+/// name also gets a camelCase alias so `${app_url}` and `${appUrl}` both work.
+pub(crate) fn strategy_vars(prd: &Value) -> Vec<(String, StrategyVar)> {
+    let Some(obj) = prd.get("test_data_strategy").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (k, v) in obj {
+        let Some(s) = v.as_str() else { continue };
+        if matches!(k.as_str(), "CRITICAL" | "uuid_generation") {
+            continue;
+        }
+        let (name, var) = match k.strip_suffix("_template") {
+            Some(base) => (base.to_string(), StrategyVar::Template(s.to_string())),
+            None => (k.clone(), StrategyVar::Literal(s.to_string())),
+        };
+        let alias = snake_to_camel(&name);
+        out.push((name, var.clone()));
+        if alias != *out.last().unwrap().0 {
+            out.push((alias, var));
+        }
+    }
+    out
+}
+
+/// `app_url` -> `appUrl`. Unchanged when there are no underscores.
+fn snake_to_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut upper = false;
+    for c in s.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Expand ONLY the dynamic tokens `{uuid}`/`{uuid8}`/`{ts}`/`{rand}` in a
+/// `test_data_strategy` template; every other `{...}` (e.g. a `{id}` path
+/// param) is left verbatim so [`engine::concrete_path`] can still resolve it.
+pub(crate) fn expand_template(template: &str, tokens: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('}') {
+            Some(end) => {
+                let key = &after[..end];
+                match tokens.get(key) {
+                    Some(v) => out.push_str(v),
+                    None => {
+                        out.push('{');
+                        out.push_str(key);
+                        out.push('}');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Fresh, unique substitution tokens for one test execution. Exposed to the
@@ -968,6 +1080,69 @@ mod tests {
         assert_ne!(a["uuid8"], b["uuid8"]);
         assert_eq!(a["uuid8"].len(), 8);
         assert!(a["ts"].chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn expand_template_expands_only_dynamic_tokens_leaving_path_params() {
+        let mut tokens = HashMap::new();
+        tokens.insert("uuid".to_string(), "U1".to_string());
+        tokens.insert("ts".to_string(), "T1".to_string());
+        // uuid/ts expand; the {id} path-param is left for concrete_path.
+        assert_eq!(
+            expand_template("user_{uuid}@x.com/{id}?t={ts}", &tokens),
+            "user_U1@x.com/{id}?t=T1"
+        );
+        // An unterminated brace is passed through unharmed.
+        assert_eq!(expand_template("a{uuid", &tokens), "a{uuid");
+    }
+
+    #[test]
+    fn strategy_vars_splits_templates_from_literals_with_camel_aliases() {
+        let prd = json!({
+            "test_data_strategy": {
+                "CRITICAL": "Tests run in PARALLEL. You MUST use UUID",
+                "uuid_generation": "fresh per test",
+                "email_template": "testuser_{uuid}@x.com",
+                "app_url_template": "https://app-{uuid}.example.com",
+                "password": "Test@1234",
+            }
+        });
+        let vars: HashMap<String, StrategyVar> = strategy_vars(&prd).into_iter().collect();
+        // Prose/config keys are skipped.
+        assert!(!vars.contains_key("CRITICAL"));
+        assert!(!vars.contains_key("uuid_generation"));
+        // Templates keep their {uuid}; literals are literal.
+        assert_eq!(
+            vars["email"],
+            StrategyVar::Template("testuser_{uuid}@x.com".to_string())
+        );
+        assert_eq!(
+            vars["password"],
+            StrategyVar::Literal("Test@1234".to_string())
+        );
+        // snake → camel alias present.
+        assert_eq!(vars["appUrl"], vars["app_url"]);
+        // No strategy block → empty, no panic.
+        assert!(strategy_vars(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn stashed_strategy_template_expands_fresh_per_case_via_seeding() {
+        // The run injects a template stash; each case's seeding expands it to a
+        // unique concrete value that ${email} then resolves to.
+        let mut base = HashMap::new();
+        base.insert(
+            format!("{TPL_PREFIX}email"),
+            "testuser_{uuid}@x.com".to_string(),
+        );
+        let mut case_a = base.clone();
+        seed_runtime_vars(&mut case_a);
+        let mut case_b = base.clone();
+        seed_runtime_vars(&mut case_b);
+        let email_a = interpolate_str("${email}", &case_a);
+        let email_b = interpolate_str("${email}", &case_b);
+        assert!(email_a.starts_with("testuser_") && email_a.ends_with("@x.com"));
+        assert_ne!(email_a, email_b, "each case gets a distinct address");
     }
 
     #[test]

@@ -46,12 +46,11 @@ impl BrowserExecutor {
         let shot_path = shot_path(case, ctx, browser).await;
         let video_path = video_path(case, ctx, browser).await;
         // Parallel-safe test data: this test's own fresh `${uuid}`/`${ts}`/etc.
-        // for planStep interpolation, so concurrent frontend flows never reuse
-        // the same generated account/record.
+        // (and any expanded test_data_strategy templates) for planStep
+        // interpolation, so concurrent frontend flows never reuse the same
+        // generated account/record.
         let mut vars = ctx.variables.clone();
-        for (k, v) in crate::server::store::dynamic_tokens() {
-            vars.entry(k).or_insert(v);
-        }
+        crate::server::store::seed_dynamic(&mut vars);
         if let Some(body) = plan_steps_body(case, &vars, shot_path.as_deref()) {
             return Ok(wrap_script(
                 &ctx.target,
