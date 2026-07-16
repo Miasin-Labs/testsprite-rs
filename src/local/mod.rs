@@ -21,6 +21,7 @@ pub mod generate;
 pub mod lint;
 pub mod project;
 pub mod rerun;
+pub mod retrieval;
 pub mod run;
 pub mod scaffold;
 pub mod schedule;
@@ -32,6 +33,7 @@ pub mod triage;
 pub mod verdict;
 pub mod visual;
 pub mod waves;
+pub mod worktree;
 
 use std::path::{Path, PathBuf};
 

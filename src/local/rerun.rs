@@ -92,7 +92,77 @@ fn weakened(original: &Value, healed: &Value) -> Option<String> {
         }
     }
 
+    // Coverage churn: a code heal must not stop referencing identifiers the
+    // original exercised. `identifiers(healed) ⊉ identifiers(original)` means
+    // the rewrite dropped a call/type the old test drove — the "scattershot
+    // regeneration covers less than what it replaced" failure mode, caught
+    // cheaply from the code text without a coverage run.
+    if let (Some(ob), Some(hb)) = (
+        original.get("code").and_then(Value::as_str),
+        healed.get("code").and_then(Value::as_str),
+    ) {
+        let before_ids = code_identifiers(ob);
+        let after_ids = code_identifiers(hb);
+        let dropped: Vec<&String> = before_ids.difference(&after_ids).collect();
+        if !dropped.is_empty() {
+            let mut names: Vec<&str> = dropped.iter().map(|s| s.as_str()).collect();
+            names.sort_unstable();
+            return Some(format!(
+                "coverage churn: healed test no longer references {}",
+                names.join(", ")
+            ));
+        }
+    }
+
     None
+}
+
+/// Distinct identifier-shaped tokens in a snippet, minus common test-harness
+/// noise — a cheap proxy for "what this test exercises".
+fn code_identifiers(code: &str) -> std::collections::BTreeSet<String> {
+    const NOISE: &[&str] = &[
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "let",
+        "mut",
+        "fn",
+        "test",
+        "use",
+        "self",
+        "await",
+        "async",
+        "if",
+        "else",
+        "match",
+        "return",
+        "unwrap",
+        "expect",
+    ];
+    let mut out = std::collections::BTreeSet::new();
+    let mut cur = String::new();
+    let flush = |cur: &mut String, out: &mut std::collections::BTreeSet<String>| {
+        if cur.len() >= 3
+            && cur
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && !NOISE.contains(&cur.as_str())
+        {
+            out.insert(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+    };
+    for c in code.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            cur.push(c);
+        } else {
+            flush(&mut cur, &mut out);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
 }
 
 /// Persist a heal only after it is verified, snapshotting the original first.
@@ -385,6 +455,38 @@ mod tests {
         let healed = json!({"code": "let _ = a();"});
         let why = weakened(&original, &healed).expect("must reject");
         assert!(why.contains("assertions dropped"), "{why}");
+    }
+
+    #[test]
+    fn a_heal_that_stops_exercising_a_function_is_rejected_for_coverage_churn() {
+        // Original drives both compute_totals and apply_discount; the "heal"
+        // keeps the assertion count but silently drops apply_discount — it now
+        // covers less. That is the scattershot-regeneration failure mode.
+        let original = json!({
+            "code": "assert_eq!(compute_totals(&items), 10);\nassert_eq!(apply_discount(10), 9);"
+        });
+        let healed = json!({
+            "code": "assert_eq!(compute_totals(&items), 10);\nassert_eq!(compute_totals(&more), 20);"
+        });
+        let why = weakened(&original, &healed).expect("must reject");
+        assert!(why.contains("coverage churn"), "{why}");
+        assert!(why.contains("apply_discount"), "{why}");
+
+        // Keeping (or adding) the exercised identifiers is fine.
+        let faithful = json!({
+            "code": "assert_eq!(compute_totals(&items), 10);\nassert_eq!(apply_discount(10), 9);\nassert!(apply_discount(0) == 0);"
+        });
+        assert_eq!(weakened(&original, &faithful), None);
+    }
+
+    #[test]
+    fn code_identifiers_extracts_calls_minus_harness_noise() {
+        let ids = code_identifiers("assert_eq!(compute_totals(&x), apply_discount(y));");
+        assert!(ids.contains("compute_totals"));
+        assert!(ids.contains("apply_discount"));
+        // Harness words and short tokens are not "coverage".
+        assert!(!ids.contains("assert_eq"));
+        assert!(!ids.contains("x"));
     }
 
     #[tokio::test]

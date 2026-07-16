@@ -29,6 +29,11 @@ pub struct GenOpts {
     pub gate: bool,
     /// Perspectives for unit-based generation (`--cover` / `--changed`).
     pub views: Vec<Perspective>,
+    /// Coverage-feedback rounds for `--cover` (1 = single-shot, the default):
+    /// after each round re-measure real coverage, keep only functions still
+    /// uncovered, and regenerate for them until coverage stops improving or the
+    /// cap is hit.
+    pub iterate: usize,
 }
 
 impl Default for GenOpts {
@@ -37,6 +42,7 @@ impl Default for GenOpts {
             budget: None,
             gate: true,
             views: Perspective::ALL.to_vec(),
+            iterate: 1,
         }
     }
 }
@@ -255,7 +261,74 @@ pub async fn generate_cover(
     if units.is_empty() {
         anyhow::bail!("no functions found under {}", path.display());
     }
-    generate_for_units(root, path, &units, model, "test generate --cover", opts).await
+    if opts.iterate <= 1 {
+        return generate_for_units(root, path, &units, model, "test generate --cover", opts).await;
+    }
+    generate_cover_iterate(root, path, model, opts).await
+}
+
+/// Coverage-feedback loop: generate, screen, re-measure real coverage, and
+/// regenerate only for functions STILL uncovered — stopping when a round adds
+/// no newly-covered function (a plateau) or the round cap / token budget is
+/// hit. Re-measuring is what turns "one blind pass" into "close the gaps that
+/// remain": a single pass predictably misses deep branches, and nothing else
+/// verifies a generated test actually covered what it targeted.
+async fn generate_cover_iterate(
+    root: &Path,
+    path: &Path,
+    model: &str,
+    opts: &GenOpts,
+) -> anyhow::Result<GenSummary> {
+    let mut all_ids = Vec::new();
+    let mut all_quarantined = Vec::new();
+    let mut prev_uncovered = usize::MAX;
+
+    for round in 1..=opts.iterate {
+        let gaps = crate::local::coverage::gaps(root, path).await?;
+        let remaining = gaps.uncovered;
+        if remaining.is_empty() {
+            eprintln!("cover --iterate: round {round}: nothing uncovered — done");
+            break;
+        }
+        // A round that closed nothing since last time is a plateau: the model
+        // cannot reach the residual functions (unreachable/infeasible paths),
+        // so keep spending is waste.
+        if remaining.len() >= prev_uncovered {
+            eprintln!(
+                "cover --iterate: round {round}: {} still uncovered, no progress last round — stopping",
+                remaining.len()
+            );
+            break;
+        }
+        prev_uncovered = remaining.len();
+
+        let one_round = GenOpts {
+            iterate: 1,
+            ..opts.clone()
+        };
+        eprintln!(
+            "cover --iterate: round {round}/{}: generating for {} uncovered function(s)",
+            opts.iterate,
+            remaining.len()
+        );
+        let summary = generate_for_units(
+            root,
+            path,
+            &remaining,
+            model,
+            "test generate --cover",
+            &one_round,
+        )
+        .await?;
+        all_ids.extend(summary.test_ids);
+        all_quarantined.extend(summary.quarantined);
+    }
+
+    Ok(GenSummary {
+        prd_id: None,
+        test_ids: all_ids,
+        quarantined: all_quarantined,
+    })
 }
 
 /// Code Diff Mode: generate a test for each function CHANGED since `since` that
@@ -276,6 +349,51 @@ pub async fn generate_changed(
         });
     }
     generate_for_units(root, root, &targets, model, "test generate --changed", opts).await
+}
+
+/// [`generate_changed`] plus a cross-version fault-check: each generated
+/// `rust`/`command` case is run against a scratch worktree of the base
+/// revision AND the current tree. A case is kept only if it FAILS on the base
+/// and PASSES on HEAD (it genuinely detects the change). The others are
+/// classified, not silently kept:
+/// - pass-on-both → `suspect_oracle` (asserts nothing the change affected),
+/// - fail-on-both → `residual_alignment` (encodes stale/pre-change semantics),
+/// - unevaluable on the base (non-local target, worktree unavailable) → kept
+///   as-is with a note, exactly like the acceptance gate's blocked path.
+pub async fn generate_changed_fault_checked(
+    root: &Path,
+    since: &str,
+    model: &str,
+    opts: &GenOpts,
+) -> anyhow::Result<GenSummary> {
+    let summary = generate_changed(root, since, model, opts).await?;
+    if summary.test_ids.is_empty() {
+        return Ok(summary);
+    }
+    let base_rev = merge_base(root, since).unwrap_or_else(|| since.to_string());
+    let quarantined =
+        crate::local::accept::fault_check(root, &summary.test_ids, &base_rev, model).await?;
+    Ok(GenSummary {
+        quarantined,
+        ..summary
+    })
+}
+
+/// The merge-base of HEAD and `since` — the revision the change diverged from,
+/// the honest "before" for a fault-check. Falls back to `None` (caller uses
+/// `since` directly) when git can't compute it.
+fn merge_base(root: &Path, since: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "HEAD", since])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// Ask the TestSprite LLM to adversarially generate high-signal QA cases from
@@ -417,6 +535,19 @@ async fn generate_for_units(
             "{what} needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
         )
     };
+    // Few-shot exemplars: the repo's own most-related stored tests, mined by
+    // dependency-set overlap with the targets, so generation mirrors the
+    // project's real setup/argument/return shapes instead of inventing them.
+    let exemplars = {
+        let vocab: Vec<String> = crate::local::coverage::structural_surface(scan)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| u.name)
+            .collect();
+        let targets: Vec<String> = picked.iter().map(|u| u.name.clone()).collect();
+        let tests = store::list(root).await.unwrap_or_default();
+        crate::local::retrieval::exemplars_for(&vocab, &targets, &tests, 3)
+    };
     let mut cases = Vec::new();
     let mut errors = Vec::new();
     for view in &opts.views {
@@ -428,7 +559,10 @@ async fn generate_for_units(
             );
             break;
         }
-        match llm.generate_from_functions(&functions, *view).await {
+        match llm
+            .generate_from_functions(&functions, &exemplars, *view)
+            .await
+        {
             Ok(mut proposed) => {
                 for c in &mut proposed {
                     if c.is_object() {

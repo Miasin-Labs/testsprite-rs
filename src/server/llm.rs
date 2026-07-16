@@ -512,6 +512,7 @@ impl LlmClient {
     pub async fn generate_from_functions(
         &self,
         functions: &Value,
+        exemplars: &[Value],
         perspective: Perspective,
     ) -> Result<Vec<Value>> {
         let system = format!(
@@ -524,8 +525,18 @@ impl LlmClient {
             perspective.id_prefix(),
             perspective.id_prefix(),
         );
+        // Repo's own related tests as few-shot grounding for style/setup/values.
+        let exemplar_block = if exemplars.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nRelated existing tests from THIS repo — mirror their setup, argument \
+                 shapes, and assertion style (do not copy them verbatim):\n{}",
+                serde_json::to_string_pretty(&Value::Array(exemplars.to_vec()))?
+            )
+        };
         let user = format!(
-            "Functions to cover:\n{}",
+            "Functions to cover:\n{}{exemplar_block}",
             serde_json::to_string_pretty(functions)?
         );
         let out = self.chat(&system, &user, true).await?;
@@ -1270,6 +1281,7 @@ mod tests {
             client
                 .generate_from_functions(
                     &json!([{ "name": "foo", "file": "a.rs", "branches": 2 }]),
+                    &[],
                     Perspective::Normal,
                 )
                 .await
@@ -1402,8 +1414,9 @@ mod tests {
         let client = LlmClient::new("k".into(), "gpt-4o-mini".into());
 
         let functions = json!([{ "name": "f", "file": "a.rs", "branches": 3 }]);
+        let exemplars = vec![json!({ "title": "existing related test", "code": "f();" })];
         let plan = client
-            .generate_from_functions(&functions, Perspective::Boundary)
+            .generate_from_functions(&functions, &exemplars, Perspective::Boundary)
             .await
             .unwrap();
         assert_eq!(plan[0]["id"], "BND001");
@@ -1416,6 +1429,10 @@ mod tests {
             !system.contains("ERROR and EXCEPTION"),
             "boundary view must not carry the exception clause: {system}"
         );
+        // The retrieved exemplar rides along in the user prompt.
+        let user = sent[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(user.contains("existing related test"), "{user}");
+        assert!(user.contains("Related existing tests"), "{user}");
         server.abort();
     }
 

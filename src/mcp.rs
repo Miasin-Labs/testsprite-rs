@@ -171,12 +171,27 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let opts = crate::local::generate::GenOpts {
                 budget: args.get("budget").and_then(|v| v.as_u64()),
                 gate: args.get("gate").and_then(|v| v.as_bool()).unwrap_or(true),
+                iterate: args
+                    .get("iterate")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| (n as usize).max(1))
+                    .unwrap_or(1),
                 ..Default::default()
             };
             let out = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
-                crate::local::generate::generate_changed(&root, since, model.as_ref(), &opts)
+                if args.get("fault_check").and_then(|v| v.as_bool()) == Some(true) {
+                    crate::local::generate::generate_changed_fault_checked(
+                        &root,
+                        since,
+                        model.as_ref(),
+                        &opts,
+                    )
                     .await?
+                } else {
+                    crate::local::generate::generate_changed(&root, since, model.as_ref(), &opts)
+                        .await?
+                }
             } else {
                 let kind = args
                     .get("type")

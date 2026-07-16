@@ -425,6 +425,15 @@ enum TestCmd {
         /// normal,boundary,exception). Default: all three.
         #[arg(long)]
         views: Option<String>,
+        /// --cover coverage-feedback rounds: after each round re-measure real
+        /// coverage and regenerate only for still-uncovered functions, until a
+        /// plateau or this many rounds. 1 = single-shot (default).
+        #[arg(long, default_value_t = 1)]
+        iterate: usize,
+        /// --changed only: keep a generated regression test only if it FAILS on
+        /// the base revision and PASSES on HEAD (proves it detects the change).
+        #[arg(long)]
+        fault_check: bool,
     },
     /// Explore a live frontend page and generate deterministic planSteps candidates.
     Explore {
@@ -1176,8 +1185,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             budget,
             no_gate,
             views,
+            iterate,
+            fault_check,
         } => {
-            let opts = gen_opts(budget, no_gate, views.as_deref())?;
+            let mut opts = gen_opts(budget, no_gate, views.as_deref())?;
+            opts.iterate = iterate.max(1);
             if cover {
                 let p = path.unwrap_or(std::env::current_dir()?);
                 let out = local::generate::generate_cover(&root, &p, &model, &opts).await?;
@@ -1187,7 +1199,12 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             }
             if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
-                let out = local::generate::generate_changed(&root, since, &model, &opts).await?;
+                let out = if fault_check {
+                    local::generate::generate_changed_fault_checked(&root, since, &model, &opts)
+                        .await?
+                } else {
+                    local::generate::generate_changed(&root, since, &model, &opts).await?
+                };
                 if out.test_ids.is_empty() {
                     println!(
                         "no changed functions need new tests (nothing changed, or all covered)"
