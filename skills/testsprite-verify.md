@@ -38,9 +38,12 @@ testsprite-rs test run --changed --since origin/main   # or vs a branch, for the
 ```
 This is the fast pre-merge loop: it maps your `git diff` to the functions you
 touched and runs the tests that mention them. `testsprite-rs test generate
---changed` synthesizes a test for any changed function no test mentions yet. Over
-MCP: `testsprite_run` / `testsprite_generate` with `changed:true`
-(`since` optional). Use the explicit flow below when you need a specific test.
+--changed` synthesizes a test for any changed function no test mentions yet; add
+`--fault-check` to keep a generated regression test **only if it fails on the
+base revision and passes on HEAD** (proving it detects your change) — one that
+passes on both is quarantined as not-a-regression. Over MCP: `testsprite_run` /
+`testsprite_generate` with `changed:true` (`since`/`fault_check` optional). Use
+the explicit flow below when you need a specific test.
 
 Selection is by function-**name** mention, so it cannot see through a `spec` or
 `command` test — those carry no Rust function name. When something changed but
@@ -63,6 +66,18 @@ testsprite-rs test run --json
 Over MCP: `testsprite_run` (and `testsprite_generate`). If you can
 write the covering test yourself, prefer `testsprite_store_test` (`spec`,
 `steps`, or `code`) + `testsprite_run` — deterministic, no OpenAI key needed.
+
+LLM-generated cases pass an **acceptance gate** before they count: each is run
+once against the current (green) baseline, and one that fails on unchanged code
+is **quarantined** as `suspect_oracle` — it stays stored and shows `[quarantined]`
+in `test list`, but is excluded from whole-suite runs until you inspect it. A
+quarantined case is usually a hallucinated assertion, but occasionally a real
+bug it surfaced early; `testsprite-rs test run --id <id>` runs it explicitly and
+`testsprite-rs test release <id>` reinstates it once you've confirmed the oracle.
+Pass `--no-gate` to skip screening, `--budget <tokens>` to cap LLM spend, and
+`--cover --iterate[=N]` to regenerate against still-uncovered functions until a
+plateau. Deterministic (`--from`/`--doc`/hand-written) cases are never gated —
+they carry no hallucinated oracle.
 Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL/QUERY call) and `planSteps` for frontend browser flows. Use `.testsprite.env`/process env placeholders, not hard-coded secrets. Prefer a single self-contained test; assert concrete, observable outcomes.
 For a repo with its own test runner (cargo/pytest/jest), the best flow is
 `testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
@@ -117,12 +132,22 @@ first, and rejects any rewrite that would weaken the assertion).
 
 ### 4. Gate / coverage
 ```bash
-testsprite-rs gate            # JUnit + JSON + exit 1 on any failure (CI)
-testsprite-rs coverage        # cargo llvm-cov (Rust) + tree-sitter structural surface
+testsprite-rs gate                        # JUnit + JSON + exit 1 on any failure (CI)
+testsprite-rs gate --smoke                # run one case per group first; escalate to full suite only if it passes
+testsprite-rs gate --min-mutation 60      # ALSO fail if the mutation kill score < 60% (weak oracles, not just failing tests)
+testsprite-rs coverage                    # cargo llvm-cov (Rust) + tree-sitter structural surface
+testsprite-rs coverage --mutation         # ORACLE STRENGTH: cargo-mutants kill rate — a green, high-coverage suite can still catch zero bugs
 # artifacts:
 testsprite-rs test report --out testsprite_tests/testsprite-report.pdf
 testsprite-rs test dashboard --out testsprite_tests/dashboard.html
 ```
+Coverage says a line *ran*; mutation says a test would *catch a bug* in it — the
+two dissociate, so treat a high coverage number with a low kill score as a suite
+of weak oracles, and strengthen the assertions on the surviving mutants it lists.
+`testsprite-rs test triage` groups failures by root cause, ranked most-debuggable
+first; `testsprite-rs test guidelines` distills your recurring failures into
+do/don't rules (also auto-fed into generation prompts to stop the model repeating
+them).
 
 ## If you can't run it
 Say so explicitly: "Shipped but I could not run any testsprite-rs test because

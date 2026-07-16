@@ -29,11 +29,19 @@ testsprite-rs project init --type backend --name "<repo>" --url <base-url>
 ### 3. Generate the suite (deterministic first, LLM when useful)
 ```bash
 testsprite-rs project summarize                         # code_summary.yaml: stack/features/routes
-testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml  # on-device specs if api_endpoints exist
+testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml  # on-device specs (+ boundary probes) if api_endpoints exist
 testsprite-rs test generate --doc openapi.json           # Postman/OpenAPI/HAR/GraphQL SDL -> deterministic specs
+testsprite-rs test generate --cover --iterate=3          # one test per uncovered function (rust/py/js/ts/go), re-measuring coverage each round
 testsprite-rs test explore --depth 1 --store             # frontend: discover planSteps from live app
-testsprite-rs test audit --model gpt-5.3-codex,gpt-5.5 --store  # LLM adversarial QA, merged
+testsprite-rs test audit --model gpt-5.3-codex,gpt-5.5 --store  # LLM adversarial QA, merged (consensus-voted, novelty-filtered)
 ```
+LLM-generated cases (`--cover`, `--audit`, `--instruction`) are auto-screened
+against the current baseline before they count: a case that fails on unchanged
+code is **quarantined** as a suspect oracle (shown `[quarantined]` in `test list`,
+excluded from suite runs until you `test release <id>` it). Deterministic
+`--from`/`--doc` cases are never gated. `--cover` fans each function through
+normal/boundary/exception views, so the seed suite exercises error paths, not
+just the happy path.
 Or from your coding agent over MCP: **`testsprite_generate_code_summary`**, **`testsprite_generate`**, **`testsprite_explore`**, and **`testsprite_audit`**. If you (the
 coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
 (hand over your `spec`, `steps`, `planSteps`, or `code`) + `testsprite_run` — it runs deterministically
