@@ -198,7 +198,19 @@ fn compile_text_step(s: &str, vars: &std::collections::HashMap<String, String>) 
         let original = &s[s.len() - label.len()..];
         return format!("  await clickByText({});\n", js_str(original.trim()));
     }
-    if lower.starts_with("navigate") {
+    if lower.starts_with("navigate") || lower.starts_with("go to") || lower.starts_with("open ") {
+        // Official steps read like "Navigate to /playground" — go straight to
+        // the named path/URL when one is present; otherwise just settle the
+        // page (a nav to a label like "Dashboard" has no deterministic target).
+        if let Some(target) = s
+            .split_whitespace()
+            .find(|t| t.starts_with('/') || t.starts_with("http"))
+        {
+            return format!(
+                "  await page.goto({}, {{ waitUntil: 'load', timeout: 20000 }});\n",
+                js_str(&interpolate(target, vars))
+            );
+        }
         return "  await page.waitForLoadState('networkidle').catch(() => {});\n".to_string();
     }
     if lower.starts_with("verify ") || lower.starts_with("assert ") {
@@ -275,13 +287,27 @@ fn compile_object_step(
             {
                 format!(
                     "  await page.goto({}, {{ waitUntil: 'load', timeout: 20000 }});\n",
-                    js_str(url)
+                    js_str(&interpolate(url, vars))
                 )
             } else {
                 "  await page.waitForLoadState('networkidle').catch(() => {});\n".to_string()
             }
         }
-        _ => format!("  console.log({});\n", js_str("unsupported plan step")),
+        // The official frontend plan uses natural-language steps shaped
+        // `{type:"action", description:"Navigate to /playground"}` — no
+        // selector/value. When a structural action didn't match but there is a
+        // `description` (or `text`), compile it as a natural-language step so
+        // real official plans import and run instead of being skipped.
+        _ => match o
+            .get("description")
+            .or_else(|| o.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(desc) => compile_text_step(desc, vars),
+            None => format!("  console.log({});\n", js_str("unsupported plan step")),
+        },
     }
 }
 
@@ -701,6 +727,34 @@ mod tests {
         );
         assert!(body.contains("button[type=submit]"), "{body}");
         assert!(body.contains("Dashboard"), "{body}");
+    }
+
+    #[test]
+    fn official_natural_language_plan_steps_compile_to_real_playwright() {
+        // The exact shape of the official testsprite_frontend_test_plan.json:
+        // a bare array of {type:"action", description:"<natural language>"}.
+        let case = json!({
+            "steps": [
+                {"type":"action","description":"Navigate to /playground"},
+                {"type":"action","description":"Input Email: ${EMAIL}"},
+                {"type":"action","description":"Click Sign In"},
+                {"type":"action","description":"Verify Welcome Back"},
+            ]
+        });
+        let mut vars = HashMap::new();
+        vars.insert("EMAIL".to_string(), "user@x.com".to_string());
+        let body = plan_steps_body(&case, &vars, None).unwrap();
+        // "Navigate to /playground" → a real goto, not a bare wait.
+        assert!(body.contains("page.goto(\"/playground\""), "{body}");
+        // "Input Email: ..." → fill the email field with the interpolated value.
+        assert!(body.contains("input[type=email]"), "{body}");
+        assert!(body.contains("user@x.com"), "{body}");
+        // "Click Sign In" → clickByText.
+        assert!(body.contains("clickByText(\"Sign In\")"), "{body}");
+        // "Verify Welcome Back" → an assertion on visible text.
+        assert!(body.contains("Welcome Back"), "{body}");
+        // None of the official steps fell through to "unsupported".
+        assert!(!body.contains("unsupported plan step"), "{body}");
     }
 
     #[test]
