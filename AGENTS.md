@@ -246,8 +246,9 @@ to the LLM. This is what makes generated backend cases actually runnable — pai
 with `--serve` to exercise them live. Unreachable failures (connection-refused /
 urllib3 "error sending request"/"max retries") now classify as `network`/Blocked
 (env, not a bug) with a "run `test run --serve`" hint instead of a raw traceback.
-OpenAPI write methods (POST/PUT/PATCH) get a **synthesized request body** from the
-`requestBody` schema (`$ref` resolved; literal `example`/`examples` preferred) so
+OpenAPI write methods (POST/PUT/PATCH) and body-bearing **QUERY** endpoints get
+a **synthesized request body** from the `requestBody` schema (`$ref` resolved;
+literal `example`/`examples` preferred) so
 they don't send an empty payload → spurious 400/422, and their status is left
 lenient (any non-5xx) since a best-effort body may not pass validation. Extracted
 bodies are **secret-redacted** (`password`/`token`/`api_key`/… → `"***"`) so a HAR
@@ -264,6 +265,29 @@ API 401s every case. `project set-var authToken <token>` (or `bearer`) makes
 stays in gitignored `variables.json`, never in the stored case). A spec case may
 also carry a `headers: {..}` object (sent verbatim). This is what lets deterministic
 Postman/OpenAPI cases actually pass against an OAuth/JWT API.
+
+**QA architecture parity (local, no cloud)** — the official demo flow is now
+covered locally: `project summarize` writes `testsprite_tests/tmp/code_summary.yaml`
+(tech stack, features/files, route literals incl. common Rust/JS/Python/Next
+patterns and HTTP **QUERY**); `test generate --from <summary>` creates backend
+`spec` cases **on-device** when `api_endpoints` exist, falling back to the LLM
+only when no runnable surface is present. `test audit --store` is the LLM-backed
+adversarial planner (assume broken; propose edge/security/regression tests).
+Backend QA supports multi-step `steps` with `.testsprite.env` / process-env
+`${VAR}` interpolation, `form`, `save` extraction, bearer auth, GraphQL shorthand,
+`expect_body`/`expect_json`/`expect_parses`, and read-after-write `then` chains.
+Frontend QA supports deterministic `planSteps` (`fill`/`click`/`assert_text`/
+`navigate`) with selector fallback arrays, plus `test explore [--depth N]
+[--interactions] [--store]` to inventory/click through a live app and generate
+candidate UI tests. Runs write sanitized artifacts; inspect/export via `test
+artifact get`, `test report --out report.md|report.pdf`, `test dashboard`, and
+`test replay` (screenshots + `.webm` videos). Generated suites can be reviewed
+with `prd review`, recorded with `prd approve`, and enforced via `test run
+--require-approved-prd` / `loop --require-approved-prd`. MCP equivalents exist:
+`testsprite_generate_code_summary`, `testsprite_audit`, `testsprite_explore`,
+`testsprite_artifact_get`, `testsprite_report`, `testsprite_dashboard`,
+`testsprite_replay`, `testsprite_prd_review`, `testsprite_prd_approve`,
+`testsprite_get_test`, and `testsprite_plan_put`.
 
 ## The official TestSprite today (reverse-engineered, 2026-07)
 
