@@ -2,9 +2,10 @@
 //! and no account.
 //!
 //! Installs the two agent-facing skills (onboard + verify) into the target
-//! repo's `.claude/skills/<name>/SKILL.md` so an agent working there discovers
-//! how to seed and verify a local test suite. The skill bodies are embedded in
-//! the binary (`include_str!`), so an install always matches this build — no
+//! repo for both Claude Code (`.claude/skills/<name>/SKILL.md`) and Codex
+//! (`.codex/skills/<name>/SKILL.md`) so agents working there discover how to
+//! seed and verify a local test suite. The skill bodies are embedded in the
+//! binary (`include_str!`), so an install always matches this build — no
 //! dependency on the source tree being present.
 //!
 //! Note: this does NOT copy testsprite-rs's own `AGENTS.md` — that documents how
@@ -48,36 +49,41 @@ pub struct Installed {
     pub written: bool,
 }
 
-/// Install the agent skills under `root/.claude/skills`. Existing files are left
-/// untouched (reported as skipped) unless `force` is set — never clobber a
-/// repo's customized skill without being asked.
+const SKILL_ROOTS: &[&str] = &[".claude/skills", ".codex/skills"];
+
+/// Install the agent skills under `.claude/skills` and `.codex/skills`.
+/// Existing files are left untouched (reported as skipped) unless `force` is
+/// set — never clobber a repo's customized skill without being asked.
 pub fn install(root: &Path, force: bool) -> anyhow::Result<Vec<Installed>> {
-    let mut out = Vec::with_capacity(SKILLS.len());
-    for skill in SKILLS {
-        let dir = root.join(".claude").join("skills").join(skill.name);
-        let file = dir.join("SKILL.md");
-        if file.exists() && !force {
+    let mut out = Vec::with_capacity(SKILLS.len() * SKILL_ROOTS.len());
+    for skill_root in SKILL_ROOTS {
+        for skill in SKILLS {
+            let dir = root.join(skill_root).join(skill.name);
+            let file = dir.join("SKILL.md");
+            if file.exists() && !force {
+                out.push(Installed {
+                    path: file,
+                    written: false,
+                });
+                continue;
+            }
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            // The description is emitted as a double-quoted YAML scalar: it contains
+            // `: ` (a mapping indicator) and could contain `#`, so an unquoted value
+            // would be invalid frontmatter and the skill would fail to load.
+            let content = format!(
+                "---\nname: {}\ndescription: {}\n---\n\n{}",
+                skill.name,
+                yaml_quote(skill.description),
+                skill.body.trim_start()
+            );
+            std::fs::write(&file, content)
+                .with_context(|| format!("writing {}", file.display()))?;
             out.push(Installed {
                 path: file,
-                written: false,
+                written: true,
             });
-            continue;
         }
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        // The description is emitted as a double-quoted YAML scalar: it contains
-        // `: ` (a mapping indicator) and could contain `#`, so an unquoted value
-        // would be invalid frontmatter and the skill would fail to load.
-        let content = format!(
-            "---\nname: {}\ndescription: {}\n---\n\n{}",
-            skill.name,
-            yaml_quote(skill.description),
-            skill.body.trim_start()
-        );
-        std::fs::write(&file, content).with_context(|| format!("writing {}", file.display()))?;
-        out.push(Installed {
-            path: file,
-            written: true,
-        });
     }
     Ok(out)
 }
@@ -110,7 +116,9 @@ pub fn setup(root: &Path, force: bool) -> anyhow::Result<i32> {
     );
     println!();
     println!("Point your agent at the installed skills, or add to AGENTS.md:");
-    println!("  > Test with testsprite-rs; see .claude/skills/testsprite-verify.");
+    println!(
+        "  > Test with testsprite-rs; see .claude/skills/testsprite-verify or .codex/skills/testsprite-verify."
+    );
     Ok(0)
 }
 
@@ -122,14 +130,17 @@ mod tests {
     fn install_writes_both_skills_with_frontmatter() {
         let root = crate::local::tmp_root();
         let installed = install(&root, false).unwrap();
-        assert_eq!(installed.len(), 2);
+        assert_eq!(installed.len(), 4);
         assert!(installed.iter().all(|i| i.written));
 
-        let onboard = root.join(".claude/skills/testsprite-onboard/SKILL.md");
-        let verify = root.join(".claude/skills/testsprite-verify/SKILL.md");
-        assert!(onboard.exists() && verify.exists());
+        for skill_root in [".claude/skills", ".codex/skills"] {
+            let onboard = root.join(skill_root).join("testsprite-onboard/SKILL.md");
+            let verify = root.join(skill_root).join("testsprite-verify/SKILL.md");
+            assert!(onboard.exists() && verify.exists(), "{skill_root}");
+        }
 
-        let text = std::fs::read_to_string(&verify).unwrap();
+        let text =
+            std::fs::read_to_string(root.join(".codex/skills/testsprite-verify/SKILL.md")).unwrap();
         assert!(text.starts_with("---\n"), "{text:.40}");
 
         // The frontmatter must be VALID YAML — the verify description contains a

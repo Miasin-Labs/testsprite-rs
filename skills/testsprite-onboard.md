@@ -26,15 +26,17 @@ testsprite-rs project init --type backend --name "<repo>" --url <base-url>
 #   --type ∈ backend | frontend | mcp | rust ; frontend needs a real --url
 ```
 
-### 3. Generate the suite (LLM; needs OPENAI_API_KEY, else deterministic)
+### 3. Generate the suite (deterministic first, LLM when useful)
 ```bash
-testsprite-rs test generate --instruction "cover <the key behaviors you found>"
-testsprite-rs test generate --cover        # one test per currently-uncovered function
-testsprite-rs test generate --doc README.md   # distill a PRD from a README/notes/spec, then plan
+testsprite-rs project summarize                         # code_summary.yaml: stack/features/routes
+testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml  # on-device specs if api_endpoints exist
+testsprite-rs test generate --doc openapi.json           # Postman/OpenAPI/HAR/GraphQL SDL -> deterministic specs
+testsprite-rs test explore --depth 1 --store             # frontend: discover planSteps from live app
+testsprite-rs test audit --model gpt-5.3-codex,gpt-5.5 --store  # LLM adversarial QA, merged
 ```
-Or from your coding agent over MCP: **`testsprite_generate`**. If you (the
+Or from your coding agent over MCP: **`testsprite_generate_code_summary`**, **`testsprite_generate`**, **`testsprite_explore`**, and **`testsprite_audit`**. If you (the
 coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
-(hand over your `spec` or `code`) + `testsprite_run` — it runs deterministically
+(hand over your `spec`, `steps`, `planSteps`, or `code`) + `testsprite_run` — it runs deterministically
 with no OpenAI key. Aim for
 ~8–15 tests on the core behaviors; don't pad. Every assertion must name a
 **concrete, observable** outcome (status code, body field, element, count) — never
@@ -60,20 +62,25 @@ body, form, or path. Put local secrets in `.testsprite.env` (gitignored) or CI
 env; never store passwords/tokens in SQLite. A single static bearer still works
 with `testsprite-rs project set-var authToken <token>` or `spec.headers`, but a
 multi-step flow is the right shape when you need to prove login/OAuth/session
-behavior. Use `graphql:{query,variables?,expect_no_errors?,expect_data?}` for
-GraphQL; it is just a shorthand on the same HTTP QA runner.
+behavior. Use `graphql:{query,variables?,expect_no_errors?,expect_data?}` for GraphQL; it is just a shorthand on the same HTTP QA runner. GraphQL SDL docs import directly (`test generate --doc schema.graphql`) when fields need no required args. HTTP `QUERY` endpoints are supported.
 
-### 4. Smoke-run a few
+### 4. Review then smoke-run
 ```bash
-testsprite-rs test run --json                 # all; or --id <id> for a subset
+testsprite-rs prd review --out prd-review.html
+# after reading generated requirements/plan:
+testsprite-rs prd approve
+testsprite-rs test run --json --require-approved-prd  # all; or --id <id>
 ```
 Or **`testsprite_run`** over MCP. Each result carries `verdict`
 (passed|failed|blocked), `failureKind`, and on failure an LLM `cause` + `fix`.
 
-### 5. Report
-Tell the user plainly: "N tests covering <flows>; smoke-ran M — <pass/fail>; run
-the rest with `testsprite-rs test run`, or gate CI with `testsprite-rs gate`
-(`testsprite-rs ci init` drops a ready pull_request workflow)."
+### 5. Report/artifacts
+```bash
+testsprite-rs test report --out testsprite_tests/testsprite-report.pdf
+testsprite-rs test dashboard --out testsprite_tests/dashboard.html
+testsprite-rs test replay <frontend-id> --out testsprite_tests/replay.html
+```
+Tell the user plainly: "N tests covering <flows>; smoke-ran M — <pass/fail>; artifacts at <paths>; run the rest with `testsprite-rs test run`, or gate CI with `testsprite-rs gate` (`testsprite-rs ci init` drops a ready pull_request workflow)."
 
 ## Don'ts
 - Don't write narrative assertions an AI judge can rubber-stamp.

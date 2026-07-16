@@ -21,7 +21,7 @@ typecheck, and lint do **not** count.
 ### 0. The one-call loop (fastest path)
 ```bash
 testsprite-rs loop --changed --generate   # generate-for-changed → run → triage → surface
-testsprite-rs loop --json                 # whole surface, one JSON report
+testsprite-rs loop --json --require-approved-prd
 ```
 Over MCP: `testsprite_loop` (`changed`/`since`/`generate`/`fix`/`serve`). It runs
 generate-if-uncovered → run → triage → surface in one call and returns
@@ -53,16 +53,17 @@ means "I could not tell what covers this", never "you're clear".
 testsprite-rs test list                              # existing tests
 testsprite-rs test run --id <id> --json              # run one that covers the change
 # or synthesize one for the new behavior:
-testsprite-rs test generate --instruction "<the behavior you changed>"
-testsprite-rs test audit --store          # adversarial LLM proposes edge/security/regression tests
+testsprite-rs project summarize
+# deterministic from routes, no LLM if api_endpoints exist:
+testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml
+# or adversarial multi-model LLM when useful:
+testsprite-rs test audit --model gpt-5.3-codex,gpt-5.5 --store
 testsprite-rs test run --json
 ```
 Over MCP: `testsprite_run` (and `testsprite_generate`). If you can
 write the covering test yourself, prefer `testsprite_store_test` (`spec`,
 `steps`, or `code`) + `testsprite_run` — deterministic, no OpenAI key needed.
-Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL call)
-with `.testsprite.env`/process env placeholders, not hand-written Python. Prefer
-a single self-contained test; assert concrete, observable outcomes.
+Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL/QUERY call) and `planSteps` for frontend browser flows. Use `.testsprite.env`/process env placeholders, not hard-coded secrets. Prefer a single self-contained test; assert concrete, observable outcomes.
 For a repo with its own test runner (cargo/pytest/jest), the best flow is
 `testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
 own tests for them, then register a `kind:"command"` test (code = the run command,
@@ -102,8 +103,7 @@ testsprite-rs test get <id>                 # exact stored JSON
 testsprite-rs test plan put <id> --file steps.json
 testsprite-rs test replay <id> --out replay.html
 ```
-Use this for frontend selector/step drift: update `planSteps`, rerun the same
-stored test, and inspect the replay HTML/screenshots.
+Use this for frontend selector/step drift: update `planSteps` (include `selectors:[...]` fallbacks), rerun the same stored test, and inspect replay HTML/screenshots/video.
 
 ### 3. Read the verdict, act on failure
 On failure the result carries `failureKind`, an LLM `cause`, and a suggested
@@ -119,6 +119,9 @@ first, and rejects any rewrite that would weaken the assertion).
 ```bash
 testsprite-rs gate            # JUnit + JSON + exit 1 on any failure (CI)
 testsprite-rs coverage        # cargo llvm-cov (Rust) + tree-sitter structural surface
+# artifacts:
+testsprite-rs test report --out testsprite_tests/testsprite-report.pdf
+testsprite-rs test dashboard --out testsprite_tests/dashboard.html
 ```
 
 ## If you can't run it
