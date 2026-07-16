@@ -26,12 +26,15 @@ impl Executor for CommandExecutor {
             );
         };
 
-        let out = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&ctx.root)
-            .output()
-            .await;
+        let mut process = tokio::process::Command::new("sh");
+        process.arg("-c").arg(cmd).current_dir(&ctx.root);
+        // `.testsprite.env` / variables.json are loaded into ExecCtx.variables
+        // for spec interpolation; command tests need the same environment so
+        // repo helper scripts can mint OAuth tokens or read test credentials.
+        for (k, v) in &ctx.variables {
+            process.env(k, v);
+        }
+        let out = process.output().await;
 
         match out {
             Ok(o) if o.status.success() => Outcome::pass(cmd.to_string()),
@@ -74,6 +77,16 @@ mod tests {
     async fn passes_on_exit_zero() {
         let case = serde_json::json!({ "code": "true" });
         let outcome = CommandExecutor.run(&case, &ctx()).await;
+        assert!(outcome.passed, "{}", outcome.error);
+    }
+
+    #[tokio::test]
+    async fn injects_testsprite_variables_into_command_env() {
+        let mut ctx = ctx();
+        ctx.variables
+            .insert("TESTSPRITE_COMMAND_SECRET".to_string(), "ok".to_string());
+        let case = serde_json::json!({ "code": "test \"$TESTSPRITE_COMMAND_SECRET\" = ok" });
+        let outcome = CommandExecutor.run(&case, &ctx).await;
         assert!(outcome.passed, "{}", outcome.error);
     }
 
