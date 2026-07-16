@@ -58,6 +58,9 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE project ADD COLUMN start_command TEXT")
         .execute(pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE prd ADD COLUMN approved_at TEXT")
+        .execute(pool)
+        .await;
     Ok(())
 }
 
@@ -127,6 +130,7 @@ CREATE TABLE IF NOT EXISTS prd (
     source     TEXT NOT NULL DEFAULT '',
     prd_json   TEXT NOT NULL,
     plan_json  TEXT NOT NULL DEFAULT '[]',
+    approved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS pending_actions_conv_idx ON pending_actions (conversation_id, action_id);

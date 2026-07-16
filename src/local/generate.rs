@@ -1,5 +1,7 @@
 //! Generate local test cases with the LLM (PRD → plan → stored cases).
-//! Generated cases have no `spec`, so `test run` LLM-generates their code.
+//! When the model can infer endpoints, generated cases may carry deterministic
+//! `spec`/`steps` and run without per-run codegen; description-only cases still
+//! fall back to LLM-generated code at execution time.
 //!
 //! The PRD and the test plan are persisted — the SQLite `prd` table plus the
 //! `standard_prd.json` / `*_test_plan.json` files the original plugin writes —
@@ -19,6 +21,13 @@ use crate::server::llm::LlmClient;
 /// the stored test-case ids.
 pub struct GenSummary {
     pub prd_id: Option<String>,
+    pub test_ids: Vec<String>,
+}
+
+/// Result of adversarial QA planning: the cases the LLM proposed and the ids
+/// stored when `--store` was set.
+pub struct AuditSummary {
+    pub cases: Vec<Value>,
     pub test_ids: Vec<String>,
 }
 
@@ -84,7 +93,8 @@ pub async fn generate(
         let body = std::fs::read_to_string(p)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
         let value: Value = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("parsing {}: {e}", p.display()))?;
+            .or_else(|_| serde_yaml::from_str(&body))
+            .map_err(|e| anyhow::anyhow!("parsing {} as JSON/YAML: {e}", p.display()))?;
         if !value.is_object() {
             anyhow::bail!("{} does not contain a JSON object", p.display());
         }
@@ -166,6 +176,42 @@ pub async fn generate_changed(root: &Path, since: &str, model: &str) -> anyhow::
         });
     }
     generate_for_units(root, &targets, model, "test generate --changed").await
+}
+
+/// Ask the TestSprite LLM to adversarially generate high-signal QA cases from
+/// the current code summary, stored suite, latest results, and coverage gaps.
+pub async fn adversarial(
+    root: &Path,
+    scan: &Path,
+    model: &str,
+    store: bool,
+) -> anyhow::Result<AuditSummary> {
+    let Some(llm) = LlmClient::from_env(model) else {
+        anyhow::bail!(
+            "test audit needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
+        )
+    };
+    let summary = crate::local::summary::generate(root).unwrap_or_else(|_| json!({}));
+    let stored_tests = store::export_all(root).await.unwrap_or_default();
+    let latest_results = store::latest_results(root).await.unwrap_or_default();
+    let coverage = crate::local::coverage::gaps(root, scan)
+        .await
+        .ok()
+        .and_then(|g| serde_json::to_value(g).ok())
+        .unwrap_or(Value::Null);
+    let context = json!({
+        "code_summary": summary,
+        "stored_tests": stored_tests,
+        "latest_results": latest_results,
+        "coverage_gaps": coverage,
+    });
+    let cases = llm.generate_adversarial_tests(&context).await?;
+    let test_ids = if store {
+        store_cases(root, cases.clone(), None, None).await?
+    } else {
+        Vec::new()
+    };
+    Ok(AuditSummary { cases, test_ids })
 }
 
 /// Shared: ask the LLM for one case per unit (capped at 40) and store them.

@@ -54,12 +54,15 @@ testsprite-rs test list                              # existing tests
 testsprite-rs test run --id <id> --json              # run one that covers the change
 # or synthesize one for the new behavior:
 testsprite-rs test generate --instruction "<the behavior you changed>"
+testsprite-rs test audit --store          # adversarial LLM proposes edge/security/regression tests
 testsprite-rs test run --json
 ```
 Over MCP: `testsprite_run` (and `testsprite_generate`). If you can
-write the covering test yourself, prefer `testsprite_store_test` (`spec` or
-`code`) + `testsprite_run` — deterministic, no OpenAI key needed. Prefer a
-single self-contained test; assert concrete, observable outcomes.
+write the covering test yourself, prefer `testsprite_store_test` (`spec`,
+`steps`, or `code`) + `testsprite_run` — deterministic, no OpenAI key needed.
+Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL call)
+with `.testsprite.env`/process env placeholders, not hand-written Python. Prefer
+a single self-contained test; assert concrete, observable outcomes.
 For a repo with its own test runner (cargo/pytest/jest), the best flow is
 `testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
 own tests for them, then register a `kind:"command"` test (code = the run command,
@@ -84,6 +87,23 @@ the app running at the project's target URL: point at a live URL, or persist a
 start command with `testsprite-rs project set-start "<cmd>"` and run `test run
 --serve` (or MCP `testsprite_run` `serve:true`) — testsprite boots the app, runs,
 and tears it down. Prefer this over wrapping `cargo test` when you have real HTTP behavior to check.
+
+### 2a. Enforce generated-plan review
+Generated cases are stamped with `prdId`. For high-stakes/generated suites, require the human review checkpoint before running:
+```bash
+testsprite-rs prd review --out prd-review.html
+testsprite-rs prd approve
+testsprite-rs test run --require-approved-prd
+```
+
+### 2b. Inspect/update visual steps
+```bash
+testsprite-rs test get <id>                 # exact stored JSON
+testsprite-rs test plan put <id> --file steps.json
+testsprite-rs test replay <id> --out replay.html
+```
+Use this for frontend selector/step drift: update `planSteps`, rerun the same
+stored test, and inspect the replay HTML/screenshots.
 
 ### 3. Read the verdict, act on failure
 On failure the result carries `failureKind`, an LLM `cause`, and a suggested

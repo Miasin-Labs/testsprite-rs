@@ -124,14 +124,14 @@ pub async fn save_prd(
 /// List stored PRDs newest-first as `{id, source, features, cases, createdAt}`.
 pub async fn list_prds(root: &Path) -> anyhow::Result<Vec<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, source, prd_json, plan_json, created_at FROM prd ORDER BY created_at DESC, rowid DESC",
+    let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, source, prd_json, plan_json, created_at, approved_at FROM prd ORDER BY created_at DESC, rowid DESC",
     )
     .fetch_all(&pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, source, prd_json, plan_json, created_at)| {
+        .map(|(id, source, prd_json, plan_json, created_at, approved_at)| {
             let prd: Value = serde_json::from_str(&prd_json).unwrap_or(Value::Null);
             let features = prd
                 .get("features")
@@ -142,7 +142,7 @@ pub async fn list_prds(root: &Path) -> anyhow::Result<Vec<Value>> {
                 .ok()
                 .and_then(|p| p.as_array().map(|a| a.len()))
                 .unwrap_or(0);
-            serde_json::json!({ "id": id, "source": source, "features": features, "cases": cases, "createdAt": created_at })
+            serde_json::json!({ "id": id, "source": source, "features": features, "cases": cases, "createdAt": created_at, "approvedAt": approved_at })
         })
         .collect())
 }
@@ -150,20 +150,73 @@ pub async fn list_prds(root: &Path) -> anyhow::Result<Vec<Value>> {
 /// Load one PRD (its requirements + generated plan) by id.
 pub async fn load_prd(root: &Path, id: &str) -> anyhow::Result<Option<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let row: Option<(String, String, String, String, String)> =
-        sqlx::query_as("SELECT id, source, prd_json, plan_json, created_at FROM prd WHERE id=?")
-            .bind(id)
-            .fetch_optional(&pool)
-            .await?;
-    Ok(row.map(|(id, source, prd_json, plan_json, created_at)| {
-        serde_json::json!({
-            "id": id,
-            "source": source,
-            "createdAt": created_at,
-            "prd": serde_json::from_str::<Value>(&prd_json).unwrap_or(Value::Null),
-            "plan": serde_json::from_str::<Value>(&plan_json).unwrap_or(Value::Null),
-        })
-    }))
+    let row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, source, prd_json, plan_json, created_at, approved_at FROM prd WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(&pool)
+    .await?;
+    Ok(row.map(
+        |(id, source, prd_json, plan_json, created_at, approved_at)| {
+            serde_json::json!({
+                "id": id,
+                "source": source,
+                "createdAt": created_at,
+                "approvedAt": approved_at,
+                "prd": serde_json::from_str::<Value>(&prd_json).unwrap_or(Value::Null),
+                "plan": serde_json::from_str::<Value>(&plan_json).unwrap_or(Value::Null),
+            })
+        },
+    ))
+}
+
+/// Mark a PRD/test plan as reviewed and approved. Returns the timestamp.
+pub async fn approve_prd(root: &Path, id: &str) -> anyhow::Result<String> {
+    let pool = crate::local::db::open(root).await?;
+    let done = sqlx::query("UPDATE prd SET approved_at=datetime('now') WHERE id=?")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        bail!("no PRD {id}");
+    }
+    let ts: String = sqlx::query_scalar("SELECT approved_at FROM prd WHERE id=?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+    Ok(ts)
+}
+
+/// If any selected test is stamped with a `prdId`, require that PRD to have
+/// been approved. `ids=[]` means all stored tests.
+pub async fn assert_prds_approved(root: &Path, ids: &[String]) -> anyhow::Result<()> {
+    let tests = if ids.is_empty() {
+        list(root).await?
+    } else {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(load_one(root, id).await?);
+        }
+        out
+    };
+    let mut missing = Vec::new();
+    for t in tests {
+        let Some(prd_id) = t.extra.get("prdId").and_then(Value::as_str) else {
+            continue;
+        };
+        match load_prd(root, prd_id).await? {
+            Some(prd) if prd.get("approvedAt").and_then(Value::as_str).is_some() => {}
+            Some(_) => missing.push(format!("{} -> {prd_id}", t.id)),
+            None => missing.push(format!("{} -> missing PRD {prd_id}", t.id)),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "PRD approval required before running generated tests: {}. Review with `testsprite-rs prd review <id>` then `testsprite-rs prd approve <id>`.",
+            missing.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// The most recent PRD id, if any.
@@ -207,6 +260,22 @@ pub async fn load_one(root: &Path, id: &str) -> anyhow::Result<LocalTest> {
             Ok(test)
         }
     }
+}
+
+/// Load one stored test as the exact top-level JSON shape executors see.
+pub async fn get_value(root: &Path, id: &str) -> anyhow::Result<Value> {
+    Ok(load_one(root, id).await?.to_case_value())
+}
+
+/// Replace a frontend test's `planSteps` with a JSON array.
+pub async fn put_plan_steps(root: &Path, id: &str, steps: Value) -> anyhow::Result<()> {
+    let mut test = load_one(root, id).await?;
+    let Value::Array(_) = steps else {
+        bail!("plan steps must be a JSON array");
+    };
+    test.extra.insert("planSteps".to_string(), steps);
+    add_value(root, test.to_case_value()).await?;
+    Ok(())
 }
 
 /// Rename a stored test — update its `title` (column + the JSON body). Fixes the
@@ -319,15 +388,15 @@ pub async fn prune_all(root: &Path, keep: usize) -> anyhow::Result<u64> {
 /// The latest run result (if any) per stored test, joined to its title.
 pub async fn latest_results(root: &Path) -> anyhow::Result<Vec<Value>> {
     let pool = crate::local::db::open(root).await?;
-    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT t.id, t.title, r.passed, r.failure_kind, r.analysis \
+    let rows: Vec<(String, String, i64, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT t.id, t.title, r.passed, r.failure_kind, r.error, r.analysis \
          FROM tests t JOIN runs r ON r.run_id = (SELECT MAX(run_id) FROM runs WHERE test_id = t.id)",
     )
     .fetch_all(&pool)
     .await?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, title, passed, failure_kind, analysis) in rows {
+    for (id, title, passed, failure_kind, error, analysis) in rows {
         let cause = analysis
             .as_deref()
             .and_then(|a| serde_json::from_str::<Value>(a).ok())
@@ -336,7 +405,9 @@ pub async fn latest_results(root: &Path) -> anyhow::Result<Vec<Value>> {
             "id": id,
             "title": title,
             "passed": passed != 0,
+            "verdict": if passed != 0 { "passed" } else { "failed" },
             "failureKind": failure_kind,
+            "error": error,
             "cause": cause,
         }));
     }
@@ -781,6 +852,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_plan_steps_replaces_only_the_steps() {
+        let root = crate::local::tmp_root();
+        add_value(
+            &root,
+            serde_json::json!({"id":"front","title":"F","kind":"frontend","planSteps":["old"]}),
+        )
+        .await
+        .unwrap();
+        put_plan_steps(
+            &root,
+            "front",
+            serde_json::json!(["new", {"action":"click","text":"Go"}]),
+        )
+        .await
+        .unwrap();
+        let loaded = get_value(&root, "front").await.unwrap();
+        assert_eq!(loaded["title"], "F");
+        assert_eq!(loaded["planSteps"][0], "new");
+        assert_eq!(loaded["planSteps"][1]["text"], "Go");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
     async fn write_result_then_load_result_returns_latest() {
         let root = crate::local::tmp_root();
         add_value(&root, serde_json::json!({"id":"t1","title":"T"}))
@@ -917,6 +1011,7 @@ mod tests {
         assert_eq!(listed[0]["id"], id);
         assert_eq!(listed[0]["features"], 2);
         assert_eq!(listed[0]["cases"], 2);
+        assert!(listed[0]["approvedAt"].is_null());
 
         let loaded = load_prd(&root, &id).await.unwrap().unwrap();
         assert_eq!(loaded["prd"]["product_overview"], "a todo api");
@@ -925,6 +1020,37 @@ mod tests {
             latest_prd_id(&root).await.unwrap().as_deref(),
             Some(id.as_str())
         );
+        let approved_at = approve_prd(&root, &id).await.unwrap();
+        assert!(!approved_at.is_empty());
+        let approved = load_prd(&root, &id).await.unwrap().unwrap();
+        assert_eq!(approved["approvedAt"], approved_at);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_prds_approved_blocks_unapproved_generated_tests() {
+        let root = crate::local::tmp_root();
+        let prd = serde_json::json!({"features":[{"name":"A"}]});
+        let plan = vec![serde_json::json!({"id":"TC001","title":"T"})];
+        let prd_id = save_prd(&root, "instruction:a", &prd, &plan).await.unwrap();
+        add_value(
+            &root,
+            serde_json::json!({"id":"generated","title":"G","prdId": prd_id}),
+        )
+        .await
+        .unwrap();
+
+        let err = assert_prds_approved(&root, &["generated".to_string()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PRD approval required"), "{err}");
+
+        approve_prd(&root, &prd_id).await.unwrap();
+        assert_prds_approved(&root, &["generated".to_string()])
+            .await
+            .unwrap();
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -178,7 +178,7 @@ pub async fn rerun(
             .kind
             .unwrap_or_else(|| project.as_ref().map(|p| p.kind).unwrap_or_default());
         let ex = crate::server::executors::for_kind(kind);
-        let case = serde_json::to_value(t)?;
+        let case = t.to_case_value();
         let mut outcome = ex.run(&case, &ctx).await;
 
         let mut healed = false;

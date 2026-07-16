@@ -75,14 +75,39 @@ impl Expect {
 /// One executable endpoint check derived from the code summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointSpec {
+    /// Optional step id, used in multi-step QA flows and artifacts.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default = "default_method")]
     pub method: String,
+    #[serde(default)]
     pub path: String,
     #[serde(default)]
     pub body: Option<Value>,
+    /// Form body (`application/x-www-form-urlencoded`) for OAuth/login flows.
+    #[serde(default)]
+    pub form: Option<Value>,
     #[serde(default)]
     pub expect_status: Expect,
     #[serde(default)]
     pub headers: Option<Value>,
+    /// Shorthand auth. String = bearer token variable/name; object supports
+    /// `{ "bearer": "${token}" }` or `{ "token": "${token}" }`.
+    #[serde(default)]
+    pub auth: Option<Value>,
+    /// Disable redirect-following when a flow needs to capture `Location` (e.g.
+    /// OAuth authorize -> code). Defaults to true.
+    #[serde(default)]
+    pub follow_redirects: Option<bool>,
+    /// Save values from this response into the per-test session map:
+    /// `{ "accessToken": "$.access_token", "code": "header.location.query.code" }`.
+    #[serde(default)]
+    pub save: Option<std::collections::HashMap<String, String>>,
+    /// GraphQL shorthand. When set, the executor turns the step into
+    /// `POST /graphql` with `{query, variables, operationName}` and JSON
+    /// assertions. This rides the same HTTP flow runner as REST/OAuth.
+    #[serde(default)]
+    pub graphql: Option<GraphqlSpec>,
     /// Require the response body to parse as JSON (catches a 200 that returns an
     /// HTML error page or a truncated payload). Implied by `expect_body`.
     #[serde(default)]
@@ -104,6 +129,26 @@ pub struct EndpointSpec {
     /// so it catches "the write returned ok but nothing actually changed".
     #[serde(default)]
     pub then: Option<Box<EndpointSpec>>,
+}
+
+fn default_method() -> String {
+    "GET".to_string()
+}
+
+/// GraphQL request/assertion shorthand for [`EndpointSpec`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphqlSpec {
+    #[serde(default)]
+    pub path: Option<String>,
+    pub query: String,
+    #[serde(default)]
+    pub variables: Option<Value>,
+    #[serde(default, rename = "operationName", alias = "operation_name")]
+    pub operation_name: Option<String>,
+    #[serde(default)]
+    pub expect_no_errors: Option<bool>,
+    #[serde(default)]
+    pub expect_data: Option<Value>,
 }
 
 /// A planned case + its executable spec.
@@ -130,14 +175,24 @@ fn parse_endpoint_spec(v: &Value) -> Option<EndpointSpec> {
     let method = v.get("method")?.as_str()?.to_uppercase();
     let path = v.get("path")?.as_str()?.to_string();
     Some(EndpointSpec {
+        id: v.get("id").and_then(Value::as_str).map(str::to_string),
         method,
         path,
         body: v.get("body").cloned().filter(|b| !b.is_null()),
+        form: v.get("form").cloned().filter(|b| !b.is_null()),
         expect_status: v
             .get("expect_status")
             .and_then(|s| serde_json::from_value(s.clone()).ok())
             .unwrap_or_default(),
         headers: v.get("headers").cloned().filter(Value::is_object),
+        auth: v.get("auth").cloned().filter(|b| !b.is_null()),
+        follow_redirects: v.get("follow_redirects").and_then(Value::as_bool),
+        save: v
+            .get("save")
+            .and_then(|s| serde_json::from_value(s.clone()).ok()),
+        graphql: v
+            .get("graphql")
+            .and_then(|g| serde_json::from_value(g.clone()).ok()),
         expect_json: v.get("expect_json").and_then(Value::as_bool),
         expect_body: v.get("expect_body").cloned().filter(|b| !b.is_null()),
         expect_parses: v

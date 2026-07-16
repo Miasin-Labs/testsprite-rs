@@ -78,25 +78,66 @@ pub async fn set_start(root: &Path, command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read `testsprite_tests/variables.json` — a `{param: value}` map that seeds
-/// `{param}` path segments in deterministic specs (so `{id}` can hit a real
-/// record instead of the `1` probe). Empty when absent/unparseable: variables
-/// are best-effort, never fatal.
+/// Read local QA variables:
+///
+/// - `.testsprite.env` (gitignored secrets; KEY=value, comments allowed)
+/// - `testsprite_tests/variables.json` (checked test data / path params)
+///
+/// `variables.json` wins on key collision. Missing/unparseable files are
+/// best-effort, never fatal. `${KEY}` interpolation also falls back to the
+/// process environment at execution time, so CI secrets do not need to be
+/// copied into either file.
 pub fn load_variables(root: &Path) -> HashMap<String, String> {
+    let mut vars = load_env_file(&root.join(".testsprite.env"));
     let path = super::ts_dir(root).join("variables.json");
     let Ok(body) = std::fs::read_to_string(&path) else {
-        return HashMap::new();
+        return vars;
     };
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(&body).unwrap_or_default();
-    raw.into_iter()
-        .map(|(k, v)| {
-            let s = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            (k, s)
-        })
-        .collect()
+    for (k, v) in raw {
+        let s = match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        vars.insert(k, s);
+    }
+    vars
+}
+
+fn load_env_file(path: &Path) -> HashMap<String, String> {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    parse_env(&body)
+}
+
+fn parse_env(body: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        out.insert(key.to_string(), unquote_env(v.trim()));
+    }
+    out
+}
+
+fn unquote_env(v: &str) -> String {
+    if v.len() >= 2
+        && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
+    {
+        return v[1..v.len() - 1].to_string();
+    }
+    v.to_string()
 }
 
 /// Upsert one `key=value` into `testsprite_tests/variables.json` (created if
@@ -161,6 +202,30 @@ mod tests {
         let root = crate::local::tmp_root();
         let err = load(&root).await.unwrap_err();
         assert!(err.to_string().contains("project init"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn variables_loads_gitignored_env_and_json_overrides() {
+        let root = crate::local::tmp_root();
+        std::fs::write(
+            root.join(".testsprite.env"),
+            "# local only\nexport ERS_EMAIL=cole@example.com\nTOKEN=\"secret token\"\nid=from-env\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(crate::local::ts_dir(&root)).unwrap();
+        std::fs::write(
+            crate::local::ts_dir(&root).join("variables.json"),
+            r#"{"id":"from-json","n":7}"#,
+        )
+        .unwrap();
+
+        let vars = load_variables(&root);
+        assert_eq!(vars["ERS_EMAIL"], "cole@example.com");
+        assert_eq!(vars["TOKEN"], "secret token");
+        assert_eq!(vars["id"], "from-json");
+        assert_eq!(vars["n"], "7");
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 

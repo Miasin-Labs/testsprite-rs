@@ -44,6 +44,14 @@ impl BrowserExecutor {
     async fn script_for(&self, case: &Value, ctx: &ExecCtx) -> Result<String, String> {
         let browser = ctx.browser.as_deref().unwrap_or("chromium");
         let shot_path = shot_path(case, ctx, browser).await;
+        if let Some(body) = plan_steps_body(case, &ctx.variables, shot_path.as_deref()) {
+            return Ok(wrap_script(
+                &ctx.target,
+                browser,
+                shot_path.as_deref(),
+                &body,
+            ));
+        }
         let body = match ctx.llm.as_ref() {
             Some(llm) => match llm.generate_playwright(case, &ctx.prd, &ctx.target).await {
                 Ok(b) => b,
@@ -73,6 +81,251 @@ async fn shot_path(case: &Value, ctx: &ExecCtx, browser: &str) -> Option<std::pa
     }
     let id = case.get("id").and_then(Value::as_str).unwrap_or("case");
     Some(dir.join(format!("{id}-{browser}.png")))
+}
+
+/// Compile frontend `planSteps` into deterministic Playwright statements.
+///
+/// This is the local equivalent of TestSprite's visible step list ("Input
+/// Email", "Input Password", "Click Sign In", "Navigate to Dashboard"): store
+/// the steps once, then run the same browser actions without per-run LLM code.
+fn plan_steps_body(
+    case: &Value,
+    vars: &std::collections::HashMap<String, String>,
+    shot_path: Option<&std::path::Path>,
+) -> Option<String> {
+    let steps = case
+        .get("planSteps")
+        .or_else(|| case.get("steps"))?
+        .as_array()?;
+    if steps.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        r#"
+async function fillFirst(selectors, value) {
+  for (const s of selectors) {
+    const loc = page.locator(s).first();
+    if (await loc.count()) { await loc.fill(value); return; }
+  }
+  throw new Error('no fill target for ' + selectors.join(', '));
+}
+async function clickFirst(selectors) {
+  for (const s of selectors) {
+    const loc = page.locator(s).first();
+    if (await loc.count()) { await loc.click(); return; }
+  }
+  throw new Error('no click target for ' + selectors.join(', '));
+}
+async function clickByText(text) {
+  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const button = page.getByRole('button', { name: new RegExp(escaped, 'i') }).first();
+  if (await button.count()) { await button.click(); return; }
+  await page.getByText(text, { exact: false }).first().click();
+}
+"#,
+    );
+    for (idx, step) in steps.iter().enumerate() {
+        out.push_str(&compile_plan_step(step, idx + 1, vars, shot_path));
+    }
+    Some(out)
+}
+
+fn compile_plan_step(
+    step: &Value,
+    idx: usize,
+    vars: &std::collections::HashMap<String, String>,
+    shot_path: Option<&std::path::Path>,
+) -> String {
+    let mut js = match step {
+        Value::String(s) => compile_text_step(s, vars),
+        Value::Object(o) => compile_object_step(o, vars),
+        _ => format!("  console.log('skip unsupported step {idx}');\n"),
+    };
+    if let Some(path) = step_shot_path(shot_path, idx) {
+        js.push_str(&format!(
+            "  try {{ await page.screenshot({{ path: {}, fullPage: true }}); }} catch (_) {{}}\n",
+            js_str(&path.display().to_string())
+        ));
+    }
+    js
+}
+
+fn compile_text_step(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let lower = s.to_ascii_lowercase();
+    let value = s.split_once(':').map(|(_, v)| interpolate(v.trim(), vars));
+    if lower.contains("email") && (lower.contains("input") || lower.contains("enter")) {
+        return fill_js(
+            &[
+                "input[type=email]",
+                "input[name*=email i]",
+                "input[placeholder*=email i]",
+            ],
+            value.as_deref().unwrap_or(""),
+        );
+    }
+    if lower.contains("password") && (lower.contains("input") || lower.contains("enter")) {
+        return fill_js(
+            &["input[type=password]", "input[name*=password i]"],
+            value.as_deref().unwrap_or(""),
+        );
+    }
+    if let Some(label) = lower
+        .strip_prefix("click ")
+        .or_else(|| lower.strip_prefix("tap "))
+    {
+        let original = &s[s.len() - label.len()..];
+        return format!("  await clickByText({});\n", js_str(original.trim()));
+    }
+    if lower.starts_with("navigate") {
+        return "  await page.waitForLoadState('networkidle').catch(() => {});\n".to_string();
+    }
+    if lower.starts_with("verify ") || lower.starts_with("assert ") {
+        let text = s
+            .split_once(':')
+            .map(|(_, v)| v)
+            .or_else(|| s.split_once(' ').map(|(_, v)| v))
+            .unwrap_or(s);
+        return format!(
+            "  await page.getByText({}, {{ exact: false }}).first().waitFor({{ timeout: 10000 }});\n",
+            js_str(text.trim())
+        );
+    }
+    format!("  console.log({});\n", js_str(&format!("manual step: {s}")))
+}
+
+fn compile_object_step(
+    o: &serde_json::Map<String, Value>,
+    vars: &std::collections::HashMap<String, String>,
+) -> String {
+    let action = o
+        .get("action")
+        .or_else(|| o.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let selectors = selector_list(o);
+    let text = o.get("text").and_then(Value::as_str);
+    let value = o
+        .get("value")
+        .and_then(Value::as_str)
+        .map(|v| interpolate(v, vars))
+        .unwrap_or_default();
+
+    match action.as_str() {
+        "fill" | "input" | "type" => {
+            if selectors.is_empty() {
+                fill_js(&["input:visible"], &value)
+            } else {
+                format!(
+                    "  await fillFirst([{}], {});\n",
+                    selectors
+                        .iter()
+                        .map(|s| js_str(s))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    js_str(&value)
+                )
+            }
+        }
+        "click" | "tap" => {
+            if selectors.is_empty() {
+                format!("  await clickByText({});\n", js_str(text.unwrap_or(&value)))
+            } else {
+                format!(
+                    "  await clickFirst([{}]);\n",
+                    selectors
+                        .iter()
+                        .map(|s| js_str(s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        "assert_text" | "expect_text" | "verify" | "assert" => format!(
+            "  await page.getByText({}, {{ exact: false }}).first().waitFor({{ timeout: 10000 }});\n",
+            js_str(text.unwrap_or(&value))
+        ),
+        "goto" | "navigate" => {
+            if let Some(url) = o
+                .get("url")
+                .or_else(|| o.get("path"))
+                .and_then(Value::as_str)
+            {
+                format!(
+                    "  await page.goto({}, {{ waitUntil: 'load', timeout: 20000 }});\n",
+                    js_str(url)
+                )
+            } else {
+                "  await page.waitForLoadState('networkidle').catch(() => {});\n".to_string()
+            }
+        }
+        _ => format!("  console.log({});\n", js_str("unsupported plan step")),
+    }
+}
+
+fn selector_list(o: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(s) = o.get("selector").and_then(Value::as_str)
+        && !s.is_empty()
+    {
+        out.push(s.to_string());
+    }
+    if let Some(arr) = o.get("selectors").and_then(Value::as_array) {
+        for s in arr
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if !out.iter().any(|existing| existing == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn fill_js(selectors: &[&str], value: &str) -> String {
+    let selectors = selectors
+        .iter()
+        .map(|s| js_str(s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("  await fillFirst([{selectors}], {});\n", js_str(value))
+}
+
+fn step_shot_path(shot_path: Option<&std::path::Path>, idx: usize) -> Option<std::path::PathBuf> {
+    let p = shot_path?;
+    let stem = p.file_stem()?.to_string_lossy();
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    Some(p.with_file_name(format!("{stem}-step{idx:02}.{ext}")))
+}
+
+fn interpolate(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let key = &after[..end];
+        out.push_str(
+            vars.get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .unwrap_or_default()
+                .as_str(),
+        );
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// Wrap a test `body` in a Playwright harness that OWNS the browser lifecycle
@@ -315,9 +568,12 @@ fn resolve_node_path() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::Path;
 
-    use super::wrap_script;
+    use serde_json::json;
+
+    use super::{plan_steps_body, wrap_script};
 
     #[test]
     fn wrap_script_always_screenshots_when_a_path_is_given() {
@@ -349,5 +605,56 @@ mod tests {
         assert!(!s.contains("page.screenshot("));
         // The harness still guards the initial navigation.
         assert!(s.contains("bad status"));
+    }
+
+    #[test]
+    fn plan_steps_compile_login_style_actions_and_step_shots() {
+        let mut vars = HashMap::new();
+        vars.insert("EMAIL".to_string(), "gym@example.com".to_string());
+        vars.insert("PASSWORD".to_string(), "12345gym".to_string());
+        let case = json!({
+            "id": "login-flow",
+            "planSteps": [
+                "Input Email: ${EMAIL}",
+                "Input Password: ${PASSWORD}",
+                "Click Sign In",
+                {"action":"assert_text","text":"Welcome Back"}
+            ]
+        });
+        let body = plan_steps_body(
+            &case,
+            &vars,
+            Some(Path::new("/tmp/shots/login-flow-chromium.png")),
+        )
+        .unwrap();
+        assert!(body.contains("input[type=email]"), "{body}");
+        assert!(body.contains("gym@example.com"), "{body}");
+        assert!(body.contains("input[type=password]"), "{body}");
+        assert!(body.contains("12345gym"), "{body}");
+        assert!(body.contains("clickByText(\"Sign In\")"), "{body}");
+        assert!(body.contains("Welcome Back"), "{body}");
+        assert!(body.contains("login-flow-chromium-step01.png"), "{body}");
+    }
+
+    #[test]
+    fn object_plan_steps_compile_selector_actions() {
+        let case = json!({
+            "planSteps": [
+                {"action":"fill","selector":"#stale","selectors":["#email"],"value":"a@example.com"},
+                {"action":"click","selector":"#missing","selectors":["button[type=submit]"]},
+                {"action":"verify","text":"Dashboard"}
+            ]
+        });
+        let body = plan_steps_body(&case, &HashMap::new(), None).unwrap();
+        assert!(
+            body.contains("fillFirst([\"#stale\", \"#email\"]"),
+            "{body}"
+        );
+        assert!(
+            body.contains("clickFirst([\"#missing\", \"button[type=submit]\"]"),
+            "{body}"
+        );
+        assert!(body.contains("button[type=submit]"), "{body}");
+        assert!(body.contains("Dashboard"), "{body}");
     }
 }

@@ -18,27 +18,41 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 fn tool_list() -> Value {
     json!({
         "tools": [
+            { "name": "testsprite_generate_code_summary",
+              "description": "Scan the repo and write TestSprite's code summary (tech_stack, features/files, api_endpoints) to testsprite_tests/tmp/code_summary.yaml by default. This is the official first step before normalized PRD/test-plan generation.",
+              "inputSchema": obj_schema(&[("path","string"),("out","string")]) },
             { "name": "testsprite_generate",
               "description": "Generate local test cases. doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref.",
               "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
+            { "name": "testsprite_explore",
+              "description": "Autonomous exploratory frontend QA: open a live page with Playwright, inventory visible inputs/buttons/links/headings, and generate deterministic frontend planSteps candidates. Set store=true to add them to the local test DB. interactions=true also clicks visible controls on fresh pages and generates action+assertion candidates (opt-in because clicks can mutate state).",
+              "inputSchema": obj_schema(&[("url","string"),("store","boolean"),("depth","number"),("limit","number"),("interactions","boolean")]) },
+            { "name": "testsprite_audit",
+              "description": "Use TestSprite's LLM to adversarially propose high-signal QA tests from code summary, stored tests, latest results, and coverage gaps. Set store=true to persist proposed cases.",
+              "inputSchema": obj_schema(&[("path","string"),("model","string"),("store","boolean")]) },
             { "name": "testsprite_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",
-              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean")]) },
+              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean"),("require_approved_prd","boolean")]) },
             { "name": "testsprite_loop",
               "description": "The regression loop in ONE call — the agent-facing 'run the whole surface after every change and hand the breaks back'. Optionally generates tests for changed functions (generate:true + changed:true), runs the suite (the changed subset when changed:true, else all — and on an unattributable change it runs everything rather than reporting an empty green), triages failures into root-cause clusters, and returns one actionable report: {selection, total, passed, failed, blocked, failures:[{id,title,verdict,failureKind,cause}], clusters, next_action, green}. `blocked` (auth/network/infra) is counted apart from real `failed`. Prefer this over calling generate/run/triage separately.",
-              "inputSchema": obj_schema(&[("changed","boolean"),("since","string"),("generate","boolean"),("model","string"),("fix","boolean"),("serve","boolean")]) },
+              "inputSchema": obj_schema(&[("changed","boolean"),("since","string"),("generate","boolean"),("model","string"),("fix","boolean"),("serve","boolean"),("require_approved_prd","boolean")]) },
             { "name": "testsprite_store_test",
-              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Provide `spec` ({method,path,expect_status?,body?,headers?}) for an HTTP assertion OR `code` for a python/rust test body. Prefer this over testsprite_generate when you can write the test yourself. Set kind:\"command\" with code set to a shell command (e.g. `cargo test -p mycrate --test foo`) to run your repo's OWN tests deterministically — pass on exit 0.",
+              "description": "Store a test YOU already wrote so testsprite can run + track it deterministically (no LLM). Backend: provide `spec` or `steps` for HTTP/OAuth/GraphQL QA flows. Frontend: provide `planSteps` (fill/click/assert/navigate actions) for Playwright-driven UI QA with screenshots. Or provide `code` for python/rust/command tests. Prefer this over testsprite_generate when you can write the test yourself.",
               "inputSchema": json!({ "type": "object", "properties": {
                   "title": {"type": "string"},
                   "kind": {"type": "string", "enum": ["backend","frontend","mcp","rust","command"]},
                   "description": {"type": "string"},
                   "code": {"type": "string"},
-                  "spec": {"type": "object", "description": "HTTP assertion: {method, path, expect_status?, body?, headers?, expect_json?, expect_body?}. expect_status is an exact code (200) or a band: \"success\" (2xx/3xx, the default), \"accepted\" (2xx/3xx or 400/422, for writes with a synthesized body), or \"any\" (<500). expect_body:{...} additionally requires the response JSON to deep-contain that shape (every key/value must match; extra response fields are fine; arrays positional) — turns \"200 = pass\" into \"200 AND the payload is right = pass\". expect_json:true just requires a parseable JSON body; expect_parses:\"json|yaml|toml\" requires the body to parse as that format. then:{...} is a follow-up request run only if this one passes — a read-after-write check (mutate here, then GET and assert the state changed via the follow-up's expect_body); it chains via then.then."},
+                  "spec": {"type": "object", "description": "One HTTP QA step: {method,path,expect_status?,headers?,auth?,body?|form?,expect_json?,expect_body?,expect_parses?,save?,then?,graphql?}. expect_status is an exact code (200) or a band: \"success\" (2xx/3xx default), \"accepted\" (2xx/3xx or 400/422), or \"any\" (<500). auth:{bearer:\"${accessToken}\"} attaches a bearer from the per-test session; project variables come from .testsprite.env (gitignored), testsprite_tests/variables.json, or process env. save:{accessToken:\"$.access_token\", code:\"header.location.query.code\"} captures values for later ${var} interpolation. graphql:{query,variables?,operationName?,expect_no_errors?,expect_data?} is shorthand for POST /graphql and fails on GraphQL errors by default. then:{...} chains a follow-up read-after-write check."},
+                  "steps": {"type": "array", "description": "Multi-step QA flow: array of the same HTTP step shape as spec. Steps share a session map, so OAuth/login can save a token and later REST/GraphQL steps can use ${accessToken}. Run artifacts record sanitized request/response evidence for every step."},
+                  "planSteps": {"type": "array", "description": "Frontend UI steps for kind:\"frontend\". Strings like \"Input Email: ${EMAIL}\", \"Input Password: ${PASSWORD}\", \"Click Sign In\", \"Verify: Dashboard\" or objects like {action:\"fill\",selector:\"#email\",value:\"${EMAIL}\"}, {action:\"click\",text:\"Sign In\"}, {action:\"assert_text\",text:\"Dashboard\"}. Values interpolate from .testsprite.env/variables/process env. The browser executor turns them into Playwright and captures screenshots."}
               }}) },
             { "name": "testsprite_list_tests",
               "description": "List every stored test as {id,title,kind}. Use this to map the opaque ids other tools return back to what they actually are — no need to run anything or shell out to the CLI.",
               "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_get_test",
+              "description": "Get one stored test definition as the exact JSON shape the executor consumes (spec/steps/planSteps flattened at top level).",
+              "inputSchema": obj_schema(&[("id","string")]) },
             { "name": "testsprite_delete_test",
               "description": "Delete a stored test and its run history by id. Use it to prune duplicate/munged auto-generated cases; storing is an upsert, so without this the suite only grows.",
               "inputSchema": obj_schema(&[("id","string")]) },
@@ -69,6 +83,27 @@ fn tool_list() -> Value {
             { "name": "testsprite_run_history",
               "description": "Show a stored test's full run history (append-only): every recorded run newest-first with pass/fail, verdict, failureKind, and timestamp. Use it to spot regressions and intermittent failures over time.",
               "inputSchema": obj_schema(&[("id","string")]) },
+            { "name": "testsprite_artifact_get",
+              "description": "Export one run's evidence bundle by numeric run_id (from testsprite_run_history): run.json, qa-artifact.json/executed-artifact.txt, and screenshots when present.",
+              "inputSchema": obj_schema(&[("run_id","number"),("out","string")]) },
+            { "name": "testsprite_report",
+              "description": "Write a latest-results report summarizing pass/fail, failures, and clusters. Markdown by default, PDF when out ends with .pdf, JSON when json=true.",
+              "inputSchema": obj_schema(&[("out","string"),("json","boolean")]) },
+            { "name": "testsprite_dashboard",
+              "description": "Write a static local dashboard HTML: pass counts, stored test list, latest status, and failure clusters.",
+              "inputSchema": obj_schema(&[("out","string")]) },
+            { "name": "testsprite_prd_review",
+              "description": "Write an HTML review page for a stored PRD + generated test plan. Use before approving/running large generated suites.",
+              "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
+            { "name": "testsprite_prd_approve",
+              "description": "Mark a stored PRD/test plan as reviewed and approved; records approvedAt in the local DB.",
+              "inputSchema": obj_schema(&[("id","string")]) },
+            { "name": "testsprite_plan_put",
+              "description": "Replace a frontend test's planSteps with a JSON array. Use this like the dashboard's Update/Re-generate Steps control.",
+              "inputSchema": obj_schema(&[("id","string"),("steps","array")]) },
+            { "name": "testsprite_replay",
+              "description": "Write a visual replay HTML for a frontend test's stored planSteps and screenshots.",
+              "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
         ]
     })
 }
@@ -105,7 +140,20 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let exe = std::env::current_exe()?.to_string_lossy().to_string();
             Ok(tools::execute::mcp_next_action(&project_path, &exe))
         }
-        "testsprite_generate_code_summary" => Ok(code_summary_instruction(&project_path)),
+        "testsprite_generate_code_summary" => {
+            let root = std::env::current_dir()?;
+            let scan = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or(root);
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from);
+            let (path, summary) = crate::local::summary::write(&scan, out.as_deref())?;
+            Ok(json!({ "path": path, "summary": summary }))
+        }
         "testsprite_bootstrap" => bootstrap(&project_path, args).await,
         "testsprite_generate" => {
             let model = args
@@ -136,6 +184,50 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .await?
             };
             Ok(json!({ "generated": out.test_ids.len(), "ids": out.test_ids, "prdId": out.prd_id }))
+        }
+        "testsprite_explore" => {
+            let root = std::env::current_dir()?;
+            let url = match args.get("url").and_then(|v| v.as_str()) {
+                Some(u) => u.to_string(),
+                None => crate::local::project::load(&root)
+                    .await?
+                    .target_url
+                    .ok_or_else(|| anyhow::anyhow!("missing url and project has no targetUrl"))?,
+            };
+            crate::local::explore::explore(
+                &root,
+                crate::local::explore::ExploreOpts {
+                    url: &url,
+                    store: args.get("store").and_then(|v| v.as_bool()).unwrap_or(false),
+                    depth: args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize,
+                    limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize,
+                    interactions: args
+                        .get("interactions")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                },
+            )
+            .await
+        }
+        "testsprite_audit" => {
+            let root = std::env::current_dir()?;
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini");
+            let scan = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or(root.clone());
+            let out = crate::local::generate::adversarial(
+                &root,
+                &scan,
+                model,
+                args.get("store").and_then(|v| v.as_bool()).unwrap_or(false),
+            )
+            .await?;
+            Ok(json!({ "proposed": out.cases.len(), "cases": out.cases, "stored": out.test_ids }))
         }
         "testsprite_run" => {
             let model = args
@@ -182,6 +274,13 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 }
             };
             let serve = args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false);
+            if args
+                .get("require_approved_prd")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                crate::local::store::assert_prds_approved(&root, &ids).await?;
+            }
             let results =
                 crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1, serve)
                     .await?;
@@ -212,6 +311,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 model,
                 fix: args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false),
                 serve: args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false),
+                require_approved_prd: args
+                    .get("require_approved_prd")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             };
             let report = crate::local::cycle::cycle(&root, opts).await?;
             Ok(serde_json::to_value(report)?)
@@ -253,6 +356,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 })
                 .collect();
             Ok(json!({ "count": rows.len(), "tests": rows }))
+        }
+        "testsprite_get_test" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            crate::local::store::get_value(&root, id).await
         }
         "testsprite_delete_test" => {
             let root = std::env::current_dir()?;
@@ -364,6 +475,99 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 "runs": crate::local::store::run_history(&root, id).await?
             }))
         }
+        "testsprite_artifact_get" => {
+            let root = std::env::current_dir()?;
+            let run_id = args
+                .get("run_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: run_id"))?;
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    crate::local::ts_dir(&root)
+                        .join("artifacts")
+                        .join(run_id.to_string())
+                });
+            let dir = crate::local::artifact::get(&root, run_id, &out).await?;
+            Ok(json!({ "path": dir }))
+        }
+        "testsprite_report" => {
+            let root = std::env::current_dir()?;
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| crate::local::ts_dir(&root).join("testsprite-report.md"));
+            let json_out = args.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+            let path = crate::local::artifact::write_report(&root, &out, json_out).await?;
+            Ok(json!({ "path": path }))
+        }
+        "testsprite_dashboard" => {
+            let root = std::env::current_dir()?;
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| crate::local::ts_dir(&root).join("dashboard.html"));
+            let path = crate::local::artifact::write_dashboard(&root, &out).await?;
+            Ok(json!({ "path": path }))
+        }
+        "testsprite_prd_review" => {
+            let root = std::env::current_dir()?;
+            let id = match args.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => crate::local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| crate::local::ts_dir(&root).join("prd-review.html"));
+            let path = crate::local::artifact::write_prd_review(&root, &id, &out).await?;
+            Ok(json!({ "path": path, "id": id }))
+        }
+        "testsprite_prd_approve" => {
+            let root = std::env::current_dir()?;
+            let id = match args.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => crate::local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let approved_at = crate::local::store::approve_prd(&root, &id).await?;
+            Ok(json!({ "id": id, "approvedAt": approved_at }))
+        }
+        "testsprite_plan_put" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            let steps = args
+                .get("steps")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: steps"))?;
+            crate::local::store::put_plan_steps(&root, id, steps).await?;
+            Ok(json!({ "updated": id }))
+        }
+        "testsprite_replay" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            let out = args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| crate::local::ts_dir(&root).join(format!("{id}-replay.html")));
+            let path = crate::local::artifact::write_replay(&root, id, &out).await?;
+            Ok(json!({ "path": path }))
+        }
         other => anyhow::bail!("Unknown tool: {other}"),
     }
 }
@@ -391,15 +595,6 @@ async fn bootstrap(project_path: &str, args: &Value) -> Result<Value> {
         },
     };
     tools::init::initialization(init_args).await
-}
-
-fn code_summary_instruction(project_path: &str) -> Value {
-    let target = crate::paths::Paths::new(project_path).code_summary();
-    tools::next_action(vec![
-        json!({ "type": "instruction",
-                "text": format!("Scan the codebase, extract tech stack + features, and write a YAML summary to {}.", target.display()) }),
-        json!({ "type": "tool_use", "tool": "testsprite_generate_standardized_prd" }),
-    ])
 }
 
 /// Wrap a tool result as MCP `content`.

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -99,63 +100,105 @@ pub async fn execute_spec(
     base_url: &str,
     vars: &HashMap<String, String>,
 ) -> (bool, String, String) {
-    let (ok, err, code) = execute_one(spec, base_url, vars).await;
-    if !ok {
-        return (ok, err, code);
-    }
+    let mut steps = vec![spec.clone()];
     let mut cur = spec.then.as_deref();
-    let mut step = 1;
     while let Some(next) = cur {
-        let (n_ok, n_err, _) = execute_one(next, base_url, vars).await;
-        if !n_ok {
-            return (
-                false,
-                format!("primary request passed but follow-up step {step} failed: {n_err}"),
-                code,
-            );
-        }
+        steps.push(next.clone());
         cur = next.then.as_deref();
-        step += 1;
     }
-    (true, String::new(), code)
+    execute_flow(&steps, base_url, vars).await
 }
 
-/// Execute ONE request for a spec (ignoring `then`); returns (passed, error, code).
-async fn execute_one(
-    spec: &EndpointSpec,
+/// Execute a multi-step QA flow. Each step can interpolate variables saved by
+/// earlier steps (`${accessToken}`), save values from body/headers, and assert
+/// response status/body. This is the TestSprite-style "session" substrate:
+/// OAuth/login, REST, and GraphQL all ride the same path.
+pub async fn execute_flow(
+    steps: &[EndpointSpec],
     base_url: &str,
     vars: &HashMap<String, String>,
 ) -> (bool, String, String) {
-    let code = engine::python_for(spec, base_url, vars);
+    let mut session = vars.clone();
+    seed_runtime_vars(&mut session);
+    let mut artifacts = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let (ok, err, artifact) = execute_one(step, base_url, &mut session, i + 1).await;
+        artifacts.push(artifact);
+        if !ok {
+            return (
+                false,
+                if i == 0 {
+                    err
+                } else {
+                    format!("step {} failed: {err}", i + 1)
+                },
+                artifact_json(&artifacts),
+            );
+        }
+    }
+    (true, String::new(), artifact_json(&artifacts))
+}
+
+/// Execute ONE request for a spec (ignoring `then`); returns
+/// (passed, error, sanitized artifact).
+async fn execute_one(
+    spec: &EndpointSpec,
+    base_url: &str,
+    session: &mut HashMap<String, String>,
+    step_no: usize,
+) -> (bool, String, Value) {
+    let effective = effective_spec(spec, session);
+    let path = interpolate_str(&effective.path, session);
     let url = format!(
         "{}{}",
         base_url.trim_end_matches('/'),
-        engine::concrete_path(&spec.path, vars)
+        engine::concrete_path(&path, session)
     );
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder()
+        .redirect(if effective.follow_redirects == Some(false) {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::limited(10)
+        })
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                false,
+                format!("request client failed: {e}"),
+                json!({"step": step_no, "error": "client build failed"}),
+            );
+        }
+    };
 
-    let mut req = match spec.method.as_str() {
+    let mut req = match effective.method.as_str() {
         "GET" => client.get(&url),
         "DELETE" => client.delete(&url),
         m => {
             let builder = client.request(m.parse().unwrap_or(reqwest::Method::POST), &url);
-            match &spec.body {
-                Some(b) => builder.json(b),
-                None => builder,
+            match (&effective.form, &effective.body) {
+                (Some(f), _) => builder
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(urlencoded(&form_pairs(&interpolate_value(f, session)))),
+                (None, Some(b)) => builder.json(&interpolate_value(b, session)),
+                (None, None) => builder,
             }
         }
     };
 
-    // Auth: a project-level bearer token (`project set-var authToken <t>` or
-    // `bearer`) goes on every spec run, so protected endpoints aren't just 401.
-    // Per-spec `headers` add/override.
-    if let Some(tok) = vars.get("authToken").or_else(|| vars.get("bearer")) {
+    if let Some(tok) = auth_token(&effective, session)
+        .or_else(|| session.get("authToken").cloned())
+        .or_else(|| session.get("bearer").cloned())
+    {
         req = req.bearer_auth(tok);
     }
-    if let Some(headers) = spec.headers.as_ref().and_then(Value::as_object) {
+    let mut artifact_headers = serde_json::Map::new();
+    if let Some(headers) = effective.headers.as_ref().and_then(Value::as_object) {
         for (k, v) in headers {
-            if let Some(vs) = v.as_str() {
+            if let Some(vs) = interpolate_value(v, session).as_str() {
                 req = req.header(k.as_str(), vs);
+                artifact_headers.insert(k.clone(), json!(redact_header(k, vs)));
             }
         }
     }
@@ -163,17 +206,389 @@ async fn execute_one(
     match req.timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            // Read the body only when the spec asserts about it — status-only
-            // cases keep their old, cheaper behavior.
-            let body = if response_body_asserted(spec) {
-                resp.text().await.unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let (ok, err) = check_response(spec, status, &body);
-            (ok, err, code)
+            let headers = resp.headers().clone();
+            let body = resp.text().await.unwrap_or_default();
+            let saved = save_from_response(&effective, &body, &headers, status, session);
+            let (ok, err) = check_response(&effective, status, &body);
+            let artifact = json!({
+                "step": step_no,
+                "id": effective.id,
+                "request": {
+                    "method": effective.method,
+                    "url": sanitize_url(&url),
+                    "headers": artifact_headers,
+                    "body": redact_json(&effective.body),
+                    "form": redact_json(&effective.form),
+                    "graphql": effective.graphql.as_ref().map(|_| true).unwrap_or(false),
+                },
+                "response": {
+                    "status": status,
+                    "headers": sanitize_headers(&headers),
+                    "bodySnippet": response_snippet(&body),
+                },
+                "saved": saved,
+                "passed": ok,
+                "error": err,
+            });
+            (ok, err, artifact)
         }
-        Err(e) => (false, format!("request failed: {e}"), code),
+        Err(e) => (
+            false,
+            format!("request failed: {e}"),
+            json!({"step": step_no, "request": {"method": effective.method, "url": sanitize_url(&url)}, "error": e.to_string()}),
+        ),
+    }
+}
+
+fn artifact_json(steps: &[Value]) -> String {
+    serde_json::to_string_pretty(&json!({
+        "kind": "testsprite-qa-artifact",
+        "steps": steps,
+    }))
+    .unwrap_or_else(|_| "{\"kind\":\"testsprite-qa-artifact\"}".to_string())
+}
+
+/// Normalize shorthands (currently GraphQL) into the generic HTTP spec fields.
+fn effective_spec(spec: &EndpointSpec, session: &HashMap<String, String>) -> EndpointSpec {
+    let mut s = spec.clone();
+    if let Some(g) = &spec.graphql {
+        s.method = "POST".to_string();
+        s.path = g.path.clone().unwrap_or_else(|| "/graphql".to_string());
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "query".to_string(),
+            Value::String(interpolate_str(&g.query, session)),
+        );
+        if let Some(vars) = &g.variables {
+            body.insert("variables".to_string(), interpolate_value(vars, session));
+        }
+        if let Some(op) = &g.operation_name {
+            body.insert("operationName".to_string(), Value::String(op.clone()));
+        }
+        s.body = Some(Value::Object(body));
+        s.expect_json = Some(true);
+        if g.expect_no_errors.unwrap_or(true) {
+            let mut expected = serde_json::Map::new();
+            let data = g.expect_data.clone().unwrap_or_else(|| json!({}));
+            expected.insert("data".to_string(), data);
+            s.expect_body = Some(Value::Object(expected));
+        } else if let Some(data) = &g.expect_data {
+            s.expect_body = Some(json!({ "data": data }));
+        }
+    }
+    s
+}
+
+fn seed_runtime_vars(session: &mut HashMap<String, String>) {
+    session
+        .entry("state".to_string())
+        .or_insert_with(|| Uuid::new_v4().to_string());
+    session
+        .entry("pkceVerifier".to_string())
+        .or_insert_with(|| format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()));
+    if !session.contains_key("pkceChallenge")
+        && let Some(verifier) = session.get("pkceVerifier")
+    {
+        let digest = Sha256::digest(verifier.as_bytes());
+        session.insert("pkceChallenge".to_string(), base64url(&digest));
+    }
+}
+
+fn base64url(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push(TABLE[(n & 63) as usize] as char);
+        i += 3;
+    }
+    match bytes.len() - i {
+        1 => {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        }
+        2 => {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        }
+        _ => {}
+    }
+    out
+}
+
+fn interpolate_str(s: &str, session: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let key = &after[..end];
+        let val = session
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+            .unwrap_or_default();
+        out.push_str(&val);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn interpolate_value(v: &Value, session: &HashMap<String, String>) -> Value {
+    match v {
+        Value::String(s) => Value::String(interpolate_str(s, session)),
+        Value::Array(a) => Value::Array(a.iter().map(|v| interpolate_value(v, session)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| (k.clone(), interpolate_value(v, session)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn form_pairs(v: &Value) -> Vec<(String, String)> {
+    v.as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| {
+                    let s = v
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string());
+                    (k.clone(), s)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn urlencoded(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn auth_token(spec: &EndpointSpec, session: &HashMap<String, String>) -> Option<String> {
+    let auth = spec.auth.as_ref()?;
+    match auth {
+        Value::String(s) => session
+            .get(s)
+            .cloned()
+            .or_else(|| Some(interpolate_str(s, session)))
+            .filter(|s| !s.is_empty()),
+        Value::Object(o) => o
+            .get("bearer")
+            .or_else(|| o.get("token"))
+            .and_then(Value::as_str)
+            .map(|s| interpolate_str(s, session))
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+fn save_from_response(
+    spec: &EndpointSpec,
+    body: &str,
+    headers: &reqwest::header::HeaderMap,
+    status: u16,
+    session: &mut HashMap<String, String>,
+) -> Vec<String> {
+    let Some(save) = &spec.save else {
+        return Vec::new();
+    };
+    let json_body = serde_json::from_str::<Value>(body).ok();
+    let mut saved = Vec::new();
+    for (key, selector) in save {
+        if let Some(value) = extract_selector(selector, json_body.as_ref(), headers, status) {
+            session.insert(key.clone(), value);
+            saved.push(key.clone());
+        }
+    }
+    saved
+}
+
+fn extract_selector(
+    selector: &str,
+    body: Option<&Value>,
+    headers: &reqwest::header::HeaderMap,
+    status: u16,
+) -> Option<String> {
+    if selector == "status" {
+        return Some(status.to_string());
+    }
+    if let Some(path) = selector.strip_prefix("$.") {
+        return json_path(body?, path).map(value_to_session_string);
+    }
+    if let Some(name) = selector.strip_prefix("header.") {
+        if let Some((header, query_key)) = name.split_once(".query.") {
+            let value = header_value(headers, header)?;
+            return query_param(&value, query_key);
+        }
+        return header_value(headers, name);
+    }
+    None
+}
+
+fn json_path<'a>(mut v: &'a Value, path: &str) -> Option<&'a Value> {
+    for part in path.split('.') {
+        let (key, idx) = match part.split_once('[') {
+            Some((k, rest)) => (k, rest.strip_suffix(']')?.parse::<usize>().ok()),
+            None => (part, None),
+        };
+        if !key.is_empty() {
+            v = v.get(key)?;
+        }
+        if let Some(i) = idx {
+            v = v.as_array()?.get(i)?;
+        }
+    }
+    Some(v)
+}
+
+fn value_to_session_string(v: &Value) -> String {
+    v.as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_string())
+}
+
+fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+        .and_then(|(_, v)| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let q = url
+        .split_once('?')?
+        .1
+        .split_once('#')
+        .map(|(q, _)| q)
+        .unwrap_or_else(|| url.split_once('?').map(|(_, q)| q).unwrap_or(""));
+    for pair in q.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(hex);
+            i += 3;
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn sanitize_url(url: &str) -> String {
+    match (url.split_once("://"), url.rsplit_once('@')) {
+        (Some((scheme, _)), Some((_, host))) => format!("{scheme}://[REDACTED]@{host}"),
+        _ => url.to_string(),
+    }
+}
+
+fn sanitize_headers(headers: &reqwest::header::HeaderMap) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in headers {
+        if let Ok(vs) = v.to_str() {
+            out.insert(k.as_str().to_string(), json!(redact_header(k.as_str(), vs)));
+        }
+    }
+    Value::Object(out)
+}
+
+fn response_snippet(body: &str) -> String {
+    let redacted = serde_json::from_str::<Value>(body)
+        .map(|v| redact_value(&v).to_string())
+        .unwrap_or_else(|_| body.to_string());
+    redacted.chars().take(500).collect()
+}
+
+fn redact_header(k: &str, v: &str) -> String {
+    if k.eq_ignore_ascii_case("authorization")
+        || k.eq_ignore_ascii_case("cookie")
+        || k.eq_ignore_ascii_case("set-cookie")
+    {
+        "[REDACTED]".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+fn redact_json(v: &Option<Value>) -> Value {
+    v.as_ref().map(redact_value).unwrap_or(Value::Null)
+}
+
+fn redact_value(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| {
+                    let lk = k.to_ascii_lowercase();
+                    let redacted = lk.contains("password")
+                        || lk.contains("secret")
+                        || lk.contains("token")
+                        || lk.contains("authorization")
+                        || lk.contains("cookie");
+                    (
+                        k.clone(),
+                        if redacted {
+                            Value::String("[REDACTED]".to_string())
+                        } else {
+                            redact_value(v)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(redact_value).collect()),
+        other => other.clone(),
     }
 }
 
@@ -215,6 +630,20 @@ pub(crate) fn check_response(spec: &EndpointSpec, status: u16, body: &str) -> (b
                 );
             }
         };
+        if spec
+            .graphql
+            .as_ref()
+            .and_then(|g| g.expect_no_errors)
+            .unwrap_or(spec.graphql.is_some())
+            && parsed
+                .get("errors")
+                .is_some_and(|e| !e.as_array().is_some_and(Vec::is_empty))
+        {
+            return (
+                false,
+                format!("status {status} ok but GraphQL errors were returned"),
+            );
+        }
         if let Some(expected) = &spec.expect_body
             && let Some(path) = json_mismatch(&parsed, expected, "$")
         {
@@ -460,6 +889,82 @@ mod tests {
         // An unknown format is reported, never silently passed.
         let u = spec(serde_json::json!({"method": "GET", "path": "/x", "expect_parses": "xml"}));
         assert!(!check_response(&u, 200, "<x/>").0);
+    }
+
+    #[test]
+    fn graphql_shorthand_fails_when_errors_are_present() {
+        let s = spec(serde_json::json!({
+            "graphql": {
+                "query": "{ me { id } }",
+                "expect_no_errors": true,
+                "expect_data": {"me": {}}
+            }
+        }));
+        let effective = effective_spec(&s, &HashMap::new());
+        assert_eq!(effective.method, "POST");
+        assert_eq!(effective.path, "/graphql");
+        assert!(effective.expect_json.unwrap());
+
+        let (ok, err) = check_response(
+            &effective,
+            200,
+            r#"{"data":{"me":null},"errors":[{"message":"nope"}]}"#,
+        );
+        assert!(!ok);
+        assert!(err.contains("GraphQL errors"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn flow_saves_token_interpolates_bearer_and_redacts_artifact() {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+
+        async fn token() -> Json<Value> {
+            Json(json!({"access_token":"secret-token"}))
+        }
+        async fn me(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+            match headers.get("authorization").and_then(|h| h.to_str().ok()) {
+                Some("Bearer secret-token") => (StatusCode::OK, Json(json!({"ok": true}))),
+                _ => (StatusCode::UNAUTHORIZED, Json(json!({"ok": false}))),
+            }
+        }
+
+        let app = Router::new()
+            .route("/token", post(token))
+            .route("/me", get(me));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let steps: Vec<EndpointSpec> = serde_json::from_value(json!([
+            {
+                "id": "login",
+                "method": "POST",
+                "path": "/token",
+                "expect_body": {"access_token": "secret-token"},
+                "save": {"accessToken": "$.access_token"}
+            },
+            {
+                "id": "me",
+                "method": "GET",
+                "path": "/me",
+                "auth": {"bearer": "${accessToken}"},
+                "expect_body": {"ok": true}
+            }
+        ]))
+        .unwrap();
+
+        let (ok, err, artifact) =
+            execute_flow(&steps, &format!("http://{addr}"), &HashMap::new()).await;
+        assert!(ok, "{err}\n{artifact}");
+        let parsed: Value = serde_json::from_str(&artifact).unwrap();
+        assert_eq!(parsed["kind"], "testsprite-qa-artifact");
+        assert_eq!(parsed["steps"][0]["saved"][0], "accessToken");
+        assert!(!artifact.contains("secret-token"), "{artifact}");
+        assert!(artifact.contains("[REDACTED]"), "{artifact}");
     }
 
     #[test]

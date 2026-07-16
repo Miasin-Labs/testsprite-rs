@@ -53,13 +53,15 @@ covered properly will still appear. Don't chase it to zero, and never write a
 function's name into a test title or command string to make it go away — that
 moves the number without testing anything.
 
-**Auth:** for anything behind a login, provide test credentials (or have the test
-inject the auth header itself) — otherwise authenticated flows come back `blocked`,
-not `failed`, and you'll chase a phantom bug. Use a dedicated test user (e.g.
-`you+test@example.com`, a known OTP/password) and configure it once so runs stay green.
-For `spec`/backend cases, set a bearer once with `testsprite-rs project set-var
-authToken <token>` — `execute_spec` then sends `Authorization: Bearer <token>` on
-every run (or give a case its own `spec.headers`).
+**Auth / real QA flows:** for anything behind a login, prefer deterministic
+`steps` over Python wrappers: one step logs in or mints a token, `save` captures
+it, later steps use `auth:{"bearer":"${accessToken}"}` or `${var}` in headers,
+body, form, or path. Put local secrets in `.testsprite.env` (gitignored) or CI
+env; never store passwords/tokens in SQLite. A single static bearer still works
+with `testsprite-rs project set-var authToken <token>` or `spec.headers`, but a
+multi-step flow is the right shape when you need to prove login/OAuth/session
+behavior. Use `graphql:{query,variables?,expect_no_errors?,expect_data?}` for
+GraphQL; it is just a shorthand on the same HTTP QA runner.
 
 ### 4. Smoke-run a few
 ```bash

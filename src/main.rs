@@ -128,6 +128,9 @@ enum Command {
         /// Start the target app (via `project set-start`) before running.
         #[arg(long)]
         serve: bool,
+        /// Refuse to run tests stamped with prdId unless that PRD was approved.
+        #[arg(long)]
+        require_approved_prd: bool,
         /// Print a single JSON CycleReport instead of human lines.
         #[arg(long)]
         json: bool,
@@ -206,6 +209,14 @@ enum PrdCmd {
     },
     /// Show a PRD's requirements + test plan (omit id for the latest).
     Show { id: Option<String> },
+    /// Write an HTML review page for a PRD + generated test plan.
+    Review {
+        id: Option<String>,
+        #[arg(long, default_value = "testsprite_tests/prd-review.html")]
+        out: PathBuf,
+    },
+    /// Mark a PRD/test plan as reviewed and approved.
+    Approve { id: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -261,6 +272,18 @@ enum ProjectCmd {
     },
     /// Print the current project.json.
     Show,
+    /// Generate TestSprite-style code summary (tech stack, features/files, endpoints).
+    Summarize {
+        /// Directory to scan (defaults to current repo).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Output file (default: testsprite_tests/tmp/code_summary.yaml).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the summary JSON to stdout too.
+        #[arg(long)]
+        json: bool,
+    },
     /// Set a path-param variable ({id} -> value) in testsprite_tests/variables.json.
     SetVar {
         /// Variable name (the {name} in a route, e.g. id).
@@ -292,6 +315,11 @@ enum TestCmd {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Show one stored test definition as JSON.
+    Get {
+        #[arg()]
+        id: String,
+    },
     /// Run stored tests locally through the executor seam (all, or only --id).
     Run {
         /// Run only this test id (repeatable); omit to run every test.
@@ -322,6 +350,9 @@ enum TestCmd {
         /// Start the target app before running (uses `project set-start`), stop it after.
         #[arg(long)]
         serve: bool,
+        /// Refuse to run tests stamped with prdId unless that PRD was approved.
+        #[arg(long)]
+        require_approved_prd: bool,
         /// Code Diff Mode: run only tests affected by files changed since --since.
         #[arg(long)]
         changed: bool,
@@ -379,6 +410,42 @@ enum TestCmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Explore a live frontend page and generate deterministic planSteps candidates.
+    Explore {
+        /// URL to explore (defaults to project targetUrl).
+        #[arg(long)]
+        url: Option<String>,
+        /// Same-origin crawl depth (0 = current page only).
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        /// Maximum pages to inventory.
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        /// Opt-in: click visible controls on fresh pages and generate action+assertion probes.
+        #[arg(long)]
+        interactions: bool,
+        /// Store generated candidates into the local test DB.
+        #[arg(long)]
+        store: bool,
+        /// Write the exploration report JSON to a file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Use the TestSprite LLM to adversarially propose high-signal QA tests.
+    Audit {
+        /// Path to scan for coverage gaps (default cwd).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// OpenAI model for adversarial planning.
+        #[arg(long, default_value = "gpt-4o-mini")]
+        model: String,
+        /// Store proposed cases in the local DB.
+        #[arg(long)]
+        store: bool,
+        /// Write proposed cases JSON to a file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Code Diff Mode: show which functions changed (git) and which tests they affect.
     Changed {
         /// Git ref to diff against (default: HEAD = uncommitted changes).
@@ -403,6 +470,38 @@ enum TestCmd {
         /// Print a single CliRunDiff JSON object instead of text lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Download one run's artifact bundle (request/response evidence, code, screenshots).
+    Artifact {
+        #[command(subcommand)]
+        cmd: ArtifactCmd,
+    },
+    /// Export a latest-results report (Markdown by default; .pdf writes PDF; JSON with --json).
+    Report {
+        /// Output path.
+        #[arg(long, default_value = "testsprite_tests/testsprite-report.md")]
+        out: PathBuf,
+        /// Write JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a static local dashboard HTML.
+    Dashboard {
+        /// Output path.
+        #[arg(long, default_value = "testsprite_tests/dashboard.html")]
+        out: PathBuf,
+    },
+    /// Replace a frontend test's planSteps from a JSON array file.
+    Plan {
+        #[command(subcommand)]
+        cmd: PlanCmd,
+    },
+    /// Write a visual replay HTML for a frontend test's stored steps/screenshots.
+    Replay {
+        #[arg()]
+        id: String,
+        #[arg(long, default_value = "testsprite_tests/replay.html")]
+        out: PathBuf,
     },
     /// Emit a schema-correct starter test (backend python | frontend plan).
     Scaffold {
@@ -489,6 +588,29 @@ enum TestCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ArtifactCmd {
+    /// Write a run bundle directory for `run_id`.
+    Get {
+        /// Numeric `runs.run_id` (see `test history <id>`).
+        run_id: i64,
+        /// Output directory.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanCmd {
+    /// Replace `planSteps` with the JSON array in `file`.
+    Put {
+        #[arg()]
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -536,6 +658,7 @@ async fn main() -> Result<()> {
             model,
             fix,
             serve,
+            require_approved_prd,
             json,
         } => {
             let root = std::env::current_dir()?;
@@ -546,6 +669,7 @@ async fn main() -> Result<()> {
                 model: &model,
                 fix,
                 serve,
+                require_approved_prd,
             };
             let code = local::cycle::cycle_report(&root, opts, json).await?;
             std::process::exit(code);
@@ -679,6 +803,7 @@ async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
                 None,
                 1,
                 false,
+                false,
             )
             .await?;
             std::process::exit(code);
@@ -764,6 +889,16 @@ async fn run_project(cmd: ProjectCmd) -> Result<()> {
             Ok(())
         }
         ProjectCmd::Show => local::project::show(&root).await,
+        ProjectCmd::Summarize { path, out, json } => {
+            let scan = path.unwrap_or(root);
+            let (written, summary) = local::summary::write(&scan, out.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!("wrote {}", written.display());
+            }
+            Ok(())
+        }
         ProjectCmd::SetVar { key, value } => {
             let vars = local::project::set_variable(&root, &key, &value)?;
             println!("set {key} = {value}  ({} variable(s) total)", vars.len());
@@ -813,6 +948,28 @@ async fn run_prd(cmd: PrdCmd) -> Result<()> {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("no PRD with id {id}"))?;
             println!("{}", serde_json::to_string_pretty(&prd)?);
+            Ok(())
+        }
+        PrdCmd::Review { id, out } => {
+            let id = match id {
+                Some(id) => id,
+                None => local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let path = local::artifact::write_prd_review(&root, &id, &out).await?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
+        PrdCmd::Approve { id } => {
+            let id = match id {
+                Some(id) => id,
+                None => local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let ts = local::store::approve_prd(&root, &id).await?;
+            println!("approved {id} at {ts}");
             Ok(())
         }
     }
@@ -875,6 +1032,11 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             }
             Ok(())
         }
+        TestCmd::Get { id } => {
+            let value = local::store::get_value(&root, &id).await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         TestCmd::Run {
             id,
             url,
@@ -887,6 +1049,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             changed,
             since,
             serve,
+            require_approved_prd,
         } => {
             let ids = if changed {
                 let since = since.as_deref().unwrap_or("HEAD");
@@ -938,6 +1101,7 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
                 browser.as_deref(),
                 jobs,
                 serve,
+                require_approved_prd,
             )
             .await?;
             std::process::exit(code);
@@ -1020,6 +1184,70 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
             }
             Ok(())
         }
+        TestCmd::Explore {
+            url,
+            depth,
+            limit,
+            interactions,
+            store,
+            out,
+        } => {
+            let target = match url {
+                Some(u) => u,
+                None => local::project::load(&root)
+                    .await?
+                    .target_url
+                    .ok_or_else(|| anyhow::anyhow!("no --url and project has no targetUrl"))?,
+            };
+            let report = local::explore::explore(
+                &root,
+                local::explore::ExploreOpts {
+                    url: &target,
+                    store,
+                    depth,
+                    limit,
+                    interactions,
+                },
+            )
+            .await?;
+            if let Some(out) = out {
+                if let Some(parent) = out.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
+                println!("wrote {}", out.display());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            Ok(())
+        }
+        TestCmd::Audit {
+            path,
+            model,
+            store,
+            out,
+        } => {
+            let scan = path.unwrap_or(std::env::current_dir()?);
+            let audit = local::generate::adversarial(&root, &scan, &model, store).await?;
+            if let Some(out) = out {
+                if let Some(parent) = out.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&out, serde_json::to_string_pretty(&audit.cases)?)?;
+                println!("wrote {}", out.display());
+            }
+            println!("adversarial proposed {} test(s)", audit.cases.len());
+            if store {
+                for id in &audit.test_ids {
+                    println!("  {id}");
+                }
+            }
+            Ok(())
+        }
         TestCmd::Changed { since, json } => {
             let since = since.as_deref().unwrap_or("HEAD");
             let code = local::changed::changed_report(&root, since, json).await?;
@@ -1032,6 +1260,39 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Diff { a, b, json } => {
             let code = local::diff::diff(&root, &a, &b, json).await?;
             std::process::exit(code);
+        }
+        TestCmd::Artifact { cmd } => match cmd {
+            ArtifactCmd::Get { run_id, out } => {
+                let dir = local::artifact::get(&root, run_id, &out).await?;
+                println!("wrote {}", dir.display());
+                Ok(())
+            }
+        },
+        TestCmd::Report { out, json } => {
+            let path = local::artifact::write_report(&root, &out, json).await?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
+        TestCmd::Dashboard { out } => {
+            let path = local::artifact::write_dashboard(&root, &out).await?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
+        TestCmd::Plan { cmd } => match cmd {
+            PlanCmd::Put { id, file } => {
+                let body = std::fs::read_to_string(&file)?;
+                let steps: serde_json::Value = serde_json::from_str(&body)
+                    .or_else(|_| serde_yaml::from_str(&body))
+                    .map_err(|e| anyhow::anyhow!("parsing {} as JSON/YAML: {e}", file.display()))?;
+                local::store::put_plan_steps(&root, &id, steps).await?;
+                println!("updated planSteps for {id}");
+                Ok(())
+            }
+        },
+        TestCmd::Replay { id, out } => {
+            let path = local::artifact::write_replay(&root, &id, &out).await?;
+            println!("wrote {}", path.display());
+            Ok(())
         }
         TestCmd::Scaffold { kind, json } => {
             let code = local::scaffold::scaffold(&kind, json)?;

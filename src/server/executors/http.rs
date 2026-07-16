@@ -16,6 +16,25 @@ impl Executor for HttpExecutor {
     }
 
     async fn run(&self, case: &Value, ctx: &ExecCtx) -> Outcome {
+        // Deterministic multi-step QA flow: each step is an EndpointSpec.
+        if let Some(steps) = case.get("steps").and_then(Value::as_array) {
+            let specs: Vec<EndpointSpec> = steps
+                .iter()
+                .filter_map(|s| from_value::<EndpointSpec>(s.clone()).ok())
+                .collect();
+            if specs.len() != steps.len() {
+                return Outcome::fail(
+                    "one or more flow steps are not valid endpoint specs",
+                    String::new(),
+                );
+            }
+            let (ok, err, code) = store::execute_flow(&specs, &ctx.target, &ctx.variables).await;
+            return Outcome {
+                passed: ok,
+                error: err,
+                code,
+            };
+        }
         // Deterministic: the case embeds an executable endpoint spec.
         if let Some(spec) = case
             .get("spec")

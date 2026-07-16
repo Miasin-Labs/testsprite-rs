@@ -95,6 +95,21 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
     if kind == TestKind::Backend {
         if let Some(spec) = &test.spec {
             issues.extend(check_backend_spec(spec));
+        } else if let Some(steps) = test.extra.get("steps").and_then(Value::as_array) {
+            if steps.is_empty() {
+                issues.push(Issue::Hard {
+                    field: "steps",
+                    msg: "steps must contain at least one request".to_string(),
+                });
+            }
+            for (i, step) in steps.iter().enumerate() {
+                for issue in check_backend_spec(step) {
+                    issues.push(match issue {
+                        Issue::Warn(msg) => Issue::Warn(format!("steps[{i}]: {msg}")),
+                        Issue::Hard { field, msg } => Issue::Hard { field, msg },
+                    });
+                }
+            }
         } else if test.description.trim().is_empty() {
             issues.push(Issue::Warn(
                 "nothing to run: no spec and no description for LLM".to_string(),
@@ -116,6 +131,7 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
 
 fn check_backend_spec(spec: &Value) -> Vec<Issue> {
     let mut issues = Vec::new();
+    let has_graphql = spec.get("graphql").is_some();
 
     match spec.get("method").and_then(Value::as_str) {
         Some(m) if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&m) => {}
@@ -123,6 +139,7 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
             field: "method",
             msg: format!("invalid spec.method {m:?}"),
         }),
+        None if has_graphql => {}
         None => issues.push(Issue::Hard {
             field: "method",
             msg: "spec.method missing or not a string".to_string(),
@@ -135,6 +152,7 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
             field: "path",
             msg: format!("spec.path {p:?} must start with '/'"),
         }),
+        None if has_graphql => {}
         None => issues.push(Issue::Hard {
             field: "path",
             msg: "spec.path missing or not a string".to_string(),

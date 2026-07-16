@@ -29,7 +29,11 @@ pub async fn run(
     browser: Option<&str>,
     jobs: usize,
     serve: bool,
+    require_approved_prd: bool,
 ) -> anyhow::Result<i32> {
+    if require_approved_prd {
+        store::assert_prds_approved(root, ids).await?;
+    }
     let report = run_collect(root, ids, url_override, model, fix, browser, jobs, serve).await?;
 
     if report.is_empty() {
@@ -272,10 +276,7 @@ async fn run_one(
 ) -> Outcome {
     let kind = t.kind.unwrap_or(default_kind);
     let ex = crate::server::executors::for_kind(kind);
-    let case = match serde_json::to_value(t) {
-        Ok(c) => c,
-        Err(e) => return Outcome::fail(format!("could not serialize case: {e}"), String::new()),
-    };
+    let case = t.to_case_value();
     // Hard wall-clock: a hang/deadlock (e.g. blocking_read in an async test)
     // becomes a FAILED/timeout verdict instead of stalling the whole run.
     let secs = crate::envs::test_timeout_secs();
@@ -333,7 +334,7 @@ async fn post_process(
     let Some(client) = llm else {
         return (None, None);
     };
-    let case = serde_json::to_value(t).unwrap_or_else(|_| serde_json::json!({ "id": t.id }));
+    let case = t.to_case_value();
 
     let analysis = match client
         .analyze_failure(&case, &outcome.code, &outcome.error)

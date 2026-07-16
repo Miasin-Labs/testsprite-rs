@@ -141,11 +141,21 @@ impl LlmClient {
         serde_json::from_str(&out).context("normalized PRD was not valid JSON")
     }
 
-    /// Generate a backend test plan (array of {id,title,description}) from a PRD.
+    /// Generate a backend test plan from a PRD. Prefer deterministic `spec` or
+    /// `steps` cases when enough endpoint detail exists; description-only cases
+    /// remain the fallback.
     pub async fn generate_plan(&self, prd: &Value) -> Result<Vec<Value>> {
         let system = "You are TestSprite's test planner. Given a PRD, produce backend API test \
-            cases as JSON: {\"plan\":[{\"id\":\"TC001\",\"title\":...,\"description\":...}]}. \
-            Cover happy paths and key error cases. Respond with JSON only.";
+            cases as JSON: {\"plan\":[{\"id\":\"TC001\",\"title\":...,\"description\":...,\
+            \"kind\":\"backend\",\"spec\":{...}}]}. Prefer deterministic runnable cases: \
+            use `spec` for one HTTP assertion and `steps` for real QA flows (login/OAuth -> \
+            save token -> call protected endpoint). A step shape is {method,path,headers?,\
+            auth?,body?|form?,expect_status?,expect_json?,expect_body?,expect_parses?,save?,\
+            graphql?}. Use `${VAR}` placeholders for secrets from .testsprite.env/process env; \
+            never invent or embed real credentials. GraphQL may use `graphql`:{query,variables?,\
+            operationName?,expect_no_errors?,expect_data?}. Description-only cases are allowed \
+            only when no endpoint/payload can be inferred. Cover happy paths and key error cases. \
+            Respond with JSON only.";
         let user = format!("PRD:\n{}", serde_json::to_string_pretty(prd)?);
         let out = self.chat(system, &user, true).await?;
         let v: Value = serde_json::from_str(&out).context("plan was not valid JSON")?;
@@ -153,6 +163,21 @@ impl LlmClient {
         plan.as_array()
             .cloned()
             .ok_or_else(|| anyhow!("plan was not an array"))
+    }
+
+    /// Generate adversarial QA cases from the current project context:
+    /// code-summary, stored suite, latest results, and coverage gaps. This is
+    /// TestSprite-style "assume it is broken; prove otherwise" planning, and it
+    /// should prefer deterministic `spec` / `steps` / `planSteps` over
+    /// description-only cases.
+    pub async fn generate_adversarial_tests(&self, context: &Value) -> Result<Vec<Value>> {
+        let (system, user) = adversarial_plan_prompt(context)?;
+        let out = self.chat(&system, &user, true).await?;
+        let v: Value = serde_json::from_str(&out).context("adversarial plan was not valid JSON")?;
+        let plan = v.get("plan").cloned().unwrap_or(v);
+        plan.as_array()
+            .cloned()
+            .ok_or_else(|| anyhow!("adversarial plan was not an array"))
     }
 
     /// Generate executable Python (`requests`) test code for one case.
@@ -355,6 +380,25 @@ impl LlmClient {
     }
 }
 
+fn adversarial_plan_prompt(context: &Value) -> Result<(String, String)> {
+    let system = "You are TestSprite's adversarial QA planner. Assume the app is wrong by \
+        default. Given code summary, existing tests, latest results, and coverage gaps, propose \
+        high-signal tests that would catch real product defects, false-green checks, auth/scope \
+        mistakes, broken payloads, missing UI behavior, and regression-prone edges. Prefer \
+        deterministic runnable cases: backend `spec` or `steps`, frontend `planSteps`; use \
+        description-only only if no endpoint/selector can be inferred. Never embed secrets; use \
+        ${VARS} placeholders from .testsprite.env/process env. Respond JSON only: \
+        {\"plan\":[{\"id\":\"ADV001\",\"title\":\"...\",\"description\":\"...\",\
+        \"kind\":\"backend|frontend|command\",\"category\":\"security|functional|edge|regression\",\
+        \"priority\":\"critical|high|medium|low\",\"adversarialReason\":\"why this might be broken\",\
+        \"spec\":{...} OR \"steps\":[...] OR \"planSteps\":[...]}]}.";
+    let user = format!(
+        "Project context:\n{}",
+        serde_json::to_string_pretty(context)?
+    );
+    Ok((system.to_string(), user))
+}
+
 /// Remove ```python ... ``` fences if the model added them.
 fn strip_code_fences(s: &str) -> String {
     let t = s.trim();
@@ -364,4 +408,22 @@ fn strip_code_fences(s: &str) -> String {
         .unwrap_or(t);
     let t = t.strip_suffix("```").unwrap_or(t);
     t.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adversarial_prompt_demands_deterministic_runnable_cases() {
+        let (system, user) =
+            adversarial_plan_prompt(&json!({"code_summary":{"project_name":"x"}})).unwrap();
+        assert!(system.contains("adversarial QA planner"));
+        assert!(system.contains("Assume the app is wrong"));
+        assert!(system.contains("spec"));
+        assert!(system.contains("steps"));
+        assert!(system.contains("planSteps"));
+        assert!(system.contains("Never embed secrets") || system.contains("never embed secrets"));
+        assert!(user.contains("code_summary"));
+    }
 }

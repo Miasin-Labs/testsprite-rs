@@ -50,6 +50,7 @@ pub struct CycleOpts<'a> {
     pub model: &'a str,
     pub fix: bool,
     pub serve: bool,
+    pub require_approved_prd: bool,
 }
 
 /// Run one full loop pass and return its [`CycleReport`].
@@ -100,6 +101,9 @@ pub async fn cycle(root: &Path, opts: CycleOpts<'_>) -> anyhow::Result<CycleRepo
     }
 
     // 3. Run. Empty ids = the whole suite (all / unattributable / generated).
+    if opts.require_approved_prd {
+        crate::local::store::assert_prds_approved(root, &ids).await?;
+    }
     let results =
         run::run_collect(root, &ids, None, opts.model, opts.fix, None, 1, opts.serve).await?;
 
