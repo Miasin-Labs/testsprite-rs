@@ -513,6 +513,7 @@ impl LlmClient {
         &self,
         functions: &Value,
         exemplars: &[Value],
+        prevention: &str,
         perspective: Perspective,
     ) -> Result<Vec<Value>> {
         let system = format!(
@@ -538,7 +539,7 @@ impl LlmClient {
             )
         };
         let user = format!(
-            "Functions to cover:\n{}{exemplar_block}",
+            "Functions to cover:\n{}{exemplar_block}{prevention}",
             serde_json::to_string_pretty(functions)?
         );
         let out = self.chat(&system, &user, true).await?;
@@ -1284,6 +1285,7 @@ mod tests {
                 .generate_from_functions(
                     &json!([{ "name": "foo", "file": "a.rs", "branches": 2 }]),
                     &[],
+                    "",
                     Perspective::Normal,
                 )
                 .await
@@ -1418,7 +1420,7 @@ mod tests {
         let functions = json!([{ "name": "f", "file": "a.rs", "branches": 3 }]);
         let exemplars = vec![json!({ "title": "existing related test", "code": "f();" })];
         let plan = client
-            .generate_from_functions(&functions, &exemplars, Perspective::Boundary)
+            .generate_from_functions(&functions, &exemplars, "", Perspective::Boundary)
             .await
             .unwrap();
         assert_eq!(plan[0]["id"], "BND001");

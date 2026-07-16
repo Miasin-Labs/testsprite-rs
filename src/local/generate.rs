@@ -664,6 +664,13 @@ async fn generate_for_units(
         let tests = store::list(root).await.unwrap_or_default();
         crate::local::retrieval::exemplars_for(&vocab, &targets, &tests, 3)
     };
+    // Prevention corpus: this project's own recurring failures as do/don't
+    // guidance, so generation stops re-making the mistakes triage already saw.
+    let prevention = crate::local::guidelines::render_prompt_block(
+        &crate::local::guidelines::mine(root, 8)
+            .await
+            .unwrap_or_default(),
+    );
     let mut cases = Vec::new();
     let mut errors = Vec::new();
     for view in &opts.views {
@@ -676,7 +683,7 @@ async fn generate_for_units(
             break;
         }
         match llm
-            .generate_from_functions(&functions, &exemplars, *view)
+            .generate_from_functions(&functions, &exemplars, &prevention, *view)
             .await
         {
             Ok(mut proposed) => {

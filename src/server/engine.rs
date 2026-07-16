@@ -129,6 +129,91 @@ pub struct EndpointSpec {
     /// so it catches "the write returned ok but nothing actually changed".
     #[serde(default)]
     pub then: Option<Box<EndpointSpec>>,
+    /// How STRING leaves in `expect_body` are compared to the response.
+    /// Defaults to [`MatchMode::Exact`] (byte-for-byte). The wire field is
+    /// `"match"` (a keyword, hence the rename), so a spec opts into tolerance
+    /// with `"match": "fuzzy"` — never the default, because a lenient oracle
+    /// that waves through a wrong response is more dangerous than a brittle one.
+    #[serde(default, rename = "match")]
+    pub match_mode: MatchMode,
+}
+
+/// String-leaf comparison mode for [`EndpointSpec::expect_body`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// Byte-for-byte string equality — the historical, default behavior.
+    #[default]
+    Exact,
+    /// Normalize each string leaf (NFC-ish + case-fold + trim + collapse
+    /// internal whitespace) and accept when the normalized Levenshtein
+    /// similarity is at least [`DEFAULT_FUZZY_THRESHOLD`]. String leaves only;
+    /// every number, bool, and structural shape still matches exactly.
+    Fuzzy,
+}
+
+/// Minimum normalized Levenshtein similarity (`0.0..=1.0`) for two normalized
+/// strings to count as a fuzzy match. `0.9` tolerates a few typo-scale edits
+/// on a short string while still rejecting a genuinely different word.
+pub const DEFAULT_FUZZY_THRESHOLD: f64 = 0.9;
+
+/// Normalize a string for fuzzy comparison: compose common combining marks,
+/// case-fold, trim, and collapse internal whitespace runs to a single space.
+pub fn normalize(s: &str) -> String {
+    s.chars()
+        .flat_map(compose_combining)
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A minimal NFC-style fold for the handful of precomposable Latin marks that
+/// show up in test data (accents entered as base + combining mark). Anything
+/// else passes through unchanged — this is normalization for oracle tolerance,
+/// not a full Unicode NFC implementation (which would need an external crate,
+/// and Cargo.toml is fixed).
+fn compose_combining(c: char) -> Vec<char> {
+    // Strip standalone combining diacritics so "e\u{301}" and "é" fold to "e".
+    if ('\u{0300}'..='\u{036F}').contains(&c) {
+        return Vec::new();
+    }
+    vec![c]
+}
+
+/// True when `expected` and `actual` match within `threshold` after
+/// normalization. Identical (post-normalize) strings always match.
+pub fn fuzzy_str_match(expected: &str, actual: &str, threshold: f64) -> bool {
+    let e = normalize(expected);
+    let a = normalize(actual);
+    if e == a {
+        return true;
+    }
+    let dist = levenshtein(&e, &a);
+    let max = e.chars().count().max(a.chars().count());
+    if max == 0 {
+        return true;
+    }
+    let similarity = 1.0 - dist as f64 / max as f64;
+    similarity >= threshold
+}
+
+/// Levenshtein edit distance over chars (O(n·m) DP, one row) — fine for the
+/// short strings response bodies carry.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == *cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 fn default_method() -> String {
@@ -203,6 +288,10 @@ fn parse_endpoint_spec(v: &Value) -> Option<EndpointSpec> {
             .get("then")
             .and_then(|t| serde_json::from_value::<EndpointSpec>(t.clone()).ok())
             .map(Box::new),
+        match_mode: v
+            .get("match")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -577,6 +666,38 @@ mod tests {
     fn substitute_all_params_replaces_every_brace_segment() {
         assert_eq!(substitute_all_params("/a/{x}/b/{y}", "0"), "/a/0/b/0");
         assert_eq!(substitute_all_params("/health", "0"), "/health");
+    }
+
+    #[test]
+    fn normalize_folds_case_whitespace_and_combining_marks() {
+        assert_eq!(normalize("  Welcome   Back  "), "welcome back");
+        // base + combining acute folds to the base letter.
+        assert_eq!(normalize("Cafe\u{0301}"), normalize("cafe"));
+    }
+
+    #[test]
+    fn fuzzy_str_match_accepts_cosmetic_but_rejects_different_words() {
+        assert!(fuzzy_str_match("Welcome Back", "welcome  back", 0.9));
+        assert!(fuzzy_str_match("identical", "identical", 0.9));
+        assert!(!fuzzy_str_match("hello", "goodbye", 0.9));
+        // A single-char typo on a longer string clears 0.9; a huge threshold
+        // rejects it.
+        assert!(fuzzy_str_match("dashboard", "dashborad", 0.7));
+        assert!(!fuzzy_str_match("dashboard", "dashborad", 0.99));
+    }
+
+    #[test]
+    fn match_mode_wire_form_defaults_to_exact_and_parses_fuzzy() {
+        let default: EndpointSpec =
+            serde_json::from_value(json!({"method":"GET","path":"/a"})).unwrap();
+        assert_eq!(default.match_mode, MatchMode::Exact);
+        let fuzzy: EndpointSpec =
+            serde_json::from_value(json!({"method":"GET","path":"/a","match":"fuzzy"})).unwrap();
+        assert_eq!(fuzzy.match_mode, MatchMode::Fuzzy);
+        // The manual api_endpoints parser reads it too.
+        let parsed =
+            parse_endpoint_spec(&json!({"method":"GET","path":"/a","match":"fuzzy"})).unwrap();
+        assert_eq!(parsed.match_mode, MatchMode::Fuzzy);
     }
 
     #[test]

@@ -645,7 +645,7 @@ pub(crate) fn check_response(spec: &EndpointSpec, status: u16, body: &str) -> (b
             );
         }
         if let Some(expected) = &spec.expect_body
-            && let Some(path) = json_mismatch(&parsed, expected, "$")
+            && let Some(path) = json_mismatch(&parsed, expected, "$", spec.match_mode)
         {
             return (
                 false,
@@ -680,7 +680,13 @@ fn parses_as(fmt: &str, body: &str) -> Result<(), String> {
 /// first mismatch with a reason. Objects match as a subset (every expected key
 /// must be present and match), arrays positionally (actual at least as long,
 /// each expected element contained), scalars by equality.
-fn json_mismatch(actual: &Value, expected: &Value, path: &str) -> Option<String> {
+fn json_mismatch(
+    actual: &Value,
+    expected: &Value,
+    path: &str,
+    mode: crate::server::engine::MatchMode,
+) -> Option<String> {
+    use crate::server::engine::{DEFAULT_FUZZY_THRESHOLD, MatchMode, fuzzy_str_match};
     match expected {
         Value::Object(exp) => {
             let Some(act) = actual.as_object() else {
@@ -690,7 +696,7 @@ fn json_mismatch(actual: &Value, expected: &Value, path: &str) -> Option<String>
                 let child = format!("{path}.{k}");
                 match act.get(k) {
                     Some(av) => {
-                        if let Some(m) = json_mismatch(av, ev, &child) {
+                        if let Some(m) = json_mismatch(av, ev, &child, mode) {
                             return Some(m);
                         }
                     }
@@ -712,12 +718,18 @@ fn json_mismatch(actual: &Value, expected: &Value, path: &str) -> Option<String>
             }
             for (i, ev) in exp.iter().enumerate() {
                 let child = format!("{path}[{i}]");
-                if let Some(m) = json_mismatch(&act[i], ev, &child) {
+                if let Some(m) = json_mismatch(&act[i], ev, &child, mode) {
                     return Some(m);
                 }
             }
             None
         }
+        // String leaves may match fuzzily when the spec opts in; every other
+        // scalar (number, bool, null) always compares exactly.
+        Value::String(exp) if mode == MatchMode::Fuzzy => match actual.as_str() {
+            Some(a) if fuzzy_str_match(exp, a, DEFAULT_FUZZY_THRESHOLD) => None,
+            _ => Some(format!("at {path}: expected ~{expected}, got {actual}")),
+        },
         _ => (actual != expected).then(|| format!("at {path}: expected {expected}, got {actual}")),
     }
 }
@@ -1029,11 +1041,13 @@ mod tests {
 
     #[test]
     fn json_mismatch_reports_array_and_type_problems() {
+        use crate::server::engine::MatchMode;
         // Array shorter than expected.
         let short = json_mismatch(
             &serde_json::json!({"xs": [1]}),
             &serde_json::json!({"xs": [1, 2]}),
             "$",
+            MatchMode::Exact,
         );
         assert!(short.unwrap().contains("$.xs"));
         // Expected object, got scalar.
@@ -1041,6 +1055,7 @@ mod tests {
             &serde_json::json!({"u": 5}),
             &serde_json::json!({"u": {"id": 1}}),
             "$",
+            MatchMode::Exact,
         );
         assert!(wrong_type.unwrap().contains("expected an object"));
         // Full deep-contains success returns None.
@@ -1048,10 +1063,44 @@ mod tests {
             json_mismatch(
                 &serde_json::json!({"a": 1, "b": [1, 2, 3]}),
                 &serde_json::json!({"a": 1, "b": [1, 2]}),
-                "$"
+                "$",
+                MatchMode::Exact,
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn fuzzy_match_mode_tolerates_cosmetic_string_leaves_but_not_wrong_values() {
+        use crate::server::engine::MatchMode;
+        let actual = serde_json::json!({"message": "Welcome  Back", "n": 3});
+        // Exact mode: a whitespace/case difference is a mismatch.
+        let exact = json_mismatch(
+            &actual,
+            &serde_json::json!({"message": "welcome back"}),
+            "$",
+            MatchMode::Exact,
+        );
+        assert!(exact.is_some());
+        // Fuzzy mode: the cosmetic difference is tolerated on the string leaf.
+        let fuzzy = json_mismatch(
+            &actual,
+            &serde_json::json!({"message": "welcome back"}),
+            "$",
+            MatchMode::Fuzzy,
+        );
+        assert!(fuzzy.is_none(), "{fuzzy:?}");
+        // But a genuinely wrong value still fails, even in fuzzy mode.
+        let wrong = json_mismatch(
+            &actual,
+            &serde_json::json!({"message": "goodbye forever"}),
+            "$",
+            MatchMode::Fuzzy,
+        );
+        assert!(wrong.is_some());
+        // And a non-string leaf is never fuzzed.
+        let num = json_mismatch(&actual, &serde_json::json!({"n": 4}), "$", MatchMode::Fuzzy);
+        assert!(num.is_some());
     }
 
     #[test]

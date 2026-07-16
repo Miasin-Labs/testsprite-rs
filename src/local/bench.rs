@@ -149,9 +149,19 @@ pub fn detect_drift(
     out
 }
 
+/// Persist a scoreboard as the drift baseline (`bench-baseline.json`).
+pub fn save_baseline(root: &Path, board: &[ModelStats]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(super::ts_dir(root))?;
+    std::fs::write(
+        super::ts_dir(root).join("bench-baseline.json"),
+        serde_json::to_string_pretty(board)?,
+    )?;
+    Ok(())
+}
+
 /// `bench`: print the per-model scoreboard (JSON when `json`). When a baseline
 /// file exists it also reports drift; `--save-baseline` overwrites it.
-pub async fn bench_report(root: &Path, json: bool, save_baseline: bool) -> anyhow::Result<i32> {
+pub async fn bench_report(root: &Path, json: bool, save: bool) -> anyhow::Result<i32> {
     let board = scoreboard(root).await?;
     let baseline_path = super::ts_dir(root).join("bench-baseline.json");
     let baseline: Vec<ModelStats> = std::fs::read_to_string(&baseline_path)
@@ -193,9 +203,8 @@ pub async fn bench_report(root: &Path, json: bool, save_baseline: bool) -> anyho
         }
     }
 
-    if save_baseline {
-        std::fs::create_dir_all(super::ts_dir(root))?;
-        std::fs::write(&baseline_path, serde_json::to_string_pretty(&board)?)?;
+    if save {
+        save_baseline(root, &board)?;
         if !json {
             println!("bench: saved baseline to {}", baseline_path.display());
         }

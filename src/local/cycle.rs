@@ -303,12 +303,16 @@ mod tests {
                 count: 2,
                 test_ids: vec!["b".into(), "d".into()],
                 sample_cause: None,
+                divergence_max: 0.0,
+                divergence_mean: 0.0,
             },
             triage::Cluster {
                 failure_kind: "network".into(),
                 count: 1,
                 test_ids: vec!["c".into()],
                 sample_cause: None,
+                divergence_max: 0.0,
+                divergence_mean: 0.0,
             },
         ];
         let msg = next_action("all", 4, 1, 2, 1, &clusters, &[]);

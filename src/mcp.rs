@@ -78,8 +78,14 @@ fn tool_list() -> Value {
               "description": "Show a conversation's messages and pending actions.",
               "inputSchema": obj_schema(&[("conversation_id","string")]) },
             { "name": "testsprite_triage",
-              "description": "Group the failing tests by root cause (failureKind) into clusters so you fix the few underlying problems instead of N symptoms.",
+              "description": "Group the failing tests by root cause (failureKind) into clusters so you fix the few underlying problems instead of N symptoms. Clusters are ranked most-debuggable-first by a divergence score (sharp \"expected X got Y\" failures above diffuse ones).",
               "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_guidelines",
+              "description": "Distill this project's recurring failures (from run history) into deterministic do/don't guidelines. These are also auto-injected into coverage/changed generation prompts to stop the model repeating past mistakes.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_bench",
+              "description": "Per-model telemetry scoreboard from run history: pass rate, average latency, and token spend per model, plus drift vs a saved baseline. Set save_baseline:true to snapshot the current scoreboard as the drift baseline.",
+              "inputSchema": obj_schema(&[("save_baseline","boolean")]) },
             { "name": "testsprite_flaky",
               "description": "Replay a stored test N times (default 5) and report a stability score; blocked runs (auth/network/infra) are excluded from the denominator, not scored as flaky. Set serve:true to start the target app first — otherwise a backend test with nothing listening scores every run blocked and reports \"inconclusive\".",
               "inputSchema": obj_schema(&[("id","string"),("runs","number"),("model","string"),("serve","boolean")]) },
@@ -507,6 +513,19 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         "testsprite_triage" => Ok(serde_json::json!({
             "clusters": crate::local::triage::triage(&std::env::current_dir()?).await?
         })),
+        "testsprite_guidelines" => Ok(serde_json::json!({
+            "guidelines": crate::local::guidelines::mine(&std::env::current_dir()?, 20).await?
+        })),
+        "testsprite_bench" => {
+            // Never print here — MCP owns stdout for JSON-RPC. Return the
+            // scoreboard; `save_baseline` persists it without any stdout.
+            let root = std::env::current_dir()?;
+            let board = crate::local::bench::scoreboard(&root).await?;
+            if args.get("save_baseline").and_then(|v| v.as_bool()) == Some(true) {
+                crate::local::bench::save_baseline(&root, &board)?;
+            }
+            Ok(serde_json::json!({ "scoreboard": board }))
+        }
         "testsprite_flaky" => {
             let root = std::env::current_dir()?;
             let id = args

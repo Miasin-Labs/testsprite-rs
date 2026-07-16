@@ -606,6 +606,12 @@ enum TestCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Distill recurring failures from run history into do/don't guidelines
+    /// (fed into generation prompts to prevent repeating them).
+    Guidelines {
+        #[arg(long)]
+        json: bool,
+    },
     /// Export all stored test definitions as JSON (for version control).
     Export {
         #[arg(long)]
@@ -1460,6 +1466,10 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         }
         TestCmd::Triage { json } => {
             let code = local::triage::triage_report(&root, json).await?;
+            std::process::exit(code);
+        }
+        TestCmd::Guidelines { json } => {
+            let code = local::guidelines::guidelines_report(&root, json).await?;
             std::process::exit(code);
         }
         TestCmd::Export { out } => {

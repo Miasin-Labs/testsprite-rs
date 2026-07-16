@@ -19,6 +19,7 @@ pub mod fix_context;
 pub mod flaky;
 pub mod gate;
 pub mod generate;
+pub mod guidelines;
 pub mod lint;
 pub mod mutation;
 pub mod project;
