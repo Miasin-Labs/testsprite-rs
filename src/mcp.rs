@@ -34,7 +34,7 @@ fn tool_list() -> Value {
                   "kind": {"type": "string", "enum": ["backend","frontend","mcp","rust","command"]},
                   "description": {"type": "string"},
                   "code": {"type": "string"},
-                  "spec": {"type": "object", "description": "HTTP assertion: {method, path, expect_status?, body?, headers?}. expect_status is an exact code (200) or a band: \"success\" (2xx/3xx, the default), \"accepted\" (2xx/3xx or 400/422, for writes with a synthesized body), or \"any\" (<500)."},
+                  "spec": {"type": "object", "description": "HTTP assertion: {method, path, expect_status?, body?, headers?, expect_json?, expect_body?}. expect_status is an exact code (200) or a band: \"success\" (2xx/3xx, the default), \"accepted\" (2xx/3xx or 400/422, for writes with a synthesized body), or \"any\" (<500). expect_body:{...} additionally requires the response JSON to deep-contain that shape (every key/value must match; extra response fields are fine; arrays positional) — turns \"200 = pass\" into \"200 AND the payload is right = pass\". expect_json:true just requires a parseable JSON body."},
               }}) },
             { "name": "testsprite_list_tests",
               "description": "List every stored test as {id,title,kind}. Use this to map the opaque ids other tools return back to what they actually are — no need to run anything or shell out to the CLI.",

@@ -83,6 +83,16 @@ pub struct EndpointSpec {
     pub expect_status: Expect,
     #[serde(default)]
     pub headers: Option<Value>,
+    /// Require the response body to parse as JSON (catches a 200 that returns an
+    /// HTML error page or a truncated payload). Implied by `expect_body`.
+    #[serde(default)]
+    pub expect_json: Option<bool>,
+    /// A JSON subset the response must deep-contain: every key/value in this
+    /// object (recursively; arrays positional) must be present in the response.
+    /// This is what turns "status 200 = pass" into "200 AND the payload is
+    /// right = pass".
+    #[serde(default)]
+    pub expect_body: Option<Value>,
 }
 
 /// A planned case + its executable spec.
@@ -117,6 +127,8 @@ fn parse_endpoint_spec(v: &Value) -> Option<EndpointSpec> {
             .and_then(|s| serde_json::from_value(s.clone()).ok())
             .unwrap_or_default(),
         headers: v.get("headers").cloned().filter(Value::is_object),
+        expect_json: v.get("expect_json").and_then(Value::as_bool),
+        expect_body: v.get("expect_body").cloned().filter(|b| !b.is_null()),
     })
 }
 

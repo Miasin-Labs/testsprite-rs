@@ -134,15 +134,102 @@ pub async fn execute_spec(
     match req.timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let ok = spec.expect_status.accepts(status);
-            let err = if ok {
-                String::new()
+            // Read the body only when the spec asserts about it — status-only
+            // cases keep their old, cheaper behavior.
+            let body = if response_body_asserted(spec) {
+                resp.text().await.unwrap_or_default()
             } else {
-                format!("expected {}, got {status}", spec.expect_status.describe())
+                String::new()
             };
+            let (ok, err) = check_response(spec, status, &body);
             (ok, err, code)
         }
         Err(e) => (false, format!("request failed: {e}"), code),
+    }
+}
+
+/// Does this spec assert anything about the response body (so it must be read)?
+fn response_body_asserted(spec: &EndpointSpec) -> bool {
+    spec.expect_body.is_some() || spec.expect_json == Some(true)
+}
+
+/// Validate a response against a spec: the status band first, then — when the
+/// spec asks — that the body is valid JSON and deep-contains `expect_body`.
+/// Pure (no I/O) so the whole verdict logic is unit-testable.
+pub(crate) fn check_response(spec: &EndpointSpec, status: u16, body: &str) -> (bool, String) {
+    if !spec.expect_status.accepts(status) {
+        return (
+            false,
+            format!("expected {}, got {status}", spec.expect_status.describe()),
+        );
+    }
+    if !response_body_asserted(spec) {
+        return (true, String::new());
+    }
+    let parsed: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            let preview: String = body.chars().take(120).collect();
+            return (
+                false,
+                format!("status {status} ok but response body is not valid JSON ({e}): {preview}"),
+            );
+        }
+    };
+    if let Some(expected) = &spec.expect_body
+        && let Some(path) = json_mismatch(&parsed, expected, "$")
+    {
+        return (
+            false,
+            format!("status {status} ok but response body {path}"),
+        );
+    }
+    (true, String::new())
+}
+
+/// `None` if `actual` deep-contains `expected`; otherwise the JSON path of the
+/// first mismatch with a reason. Objects match as a subset (every expected key
+/// must be present and match), arrays positionally (actual at least as long,
+/// each expected element contained), scalars by equality.
+fn json_mismatch(actual: &Value, expected: &Value, path: &str) -> Option<String> {
+    match expected {
+        Value::Object(exp) => {
+            let Some(act) = actual.as_object() else {
+                return Some(format!("at {path}: expected an object"));
+            };
+            for (k, ev) in exp {
+                let child = format!("{path}.{k}");
+                match act.get(k) {
+                    Some(av) => {
+                        if let Some(m) = json_mismatch(av, ev, &child) {
+                            return Some(m);
+                        }
+                    }
+                    None => return Some(format!("missing {child}")),
+                }
+            }
+            None
+        }
+        Value::Array(exp) => {
+            let Some(act) = actual.as_array() else {
+                return Some(format!("at {path}: expected an array"));
+            };
+            if act.len() < exp.len() {
+                return Some(format!(
+                    "at {path}: array has {} element(s), expected at least {}",
+                    act.len(),
+                    exp.len()
+                ));
+            }
+            for (i, ev) in exp.iter().enumerate() {
+                let child = format!("{path}[{i}]");
+                if let Some(m) = json_mismatch(&act[i], ev, &child) {
+                    return Some(m);
+                }
+            }
+            None
+        }
+        _ => (actual != expected).then(|| format!("at {path}: expected {expected}, got {actual}")),
     }
 }
 
@@ -239,6 +326,89 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec(json: serde_json::Value) -> EndpointSpec {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn status_only_spec_ignores_the_body() {
+        let s = spec(serde_json::json!({"method": "GET", "path": "/x", "expect_status": 200}));
+        assert!(!response_body_asserted(&s));
+        // A 200 passes regardless of body; a 404 fails on status alone.
+        assert!(check_response(&s, 200, "anything, even not-json").0);
+        assert!(!check_response(&s, 404, "").0);
+    }
+
+    #[test]
+    fn expect_json_requires_a_parseable_body() {
+        let s = spec(serde_json::json!({"method": "GET", "path": "/x", "expect_json": true}));
+        // 200 with a valid JSON body passes…
+        assert!(check_response(&s, 200, r#"{"ok":true}"#).0);
+        // …but a 200 that returns an HTML error page fails (the classic
+        // "green but the payload is broken").
+        let (ok, err) = check_response(&s, 200, "<html>500 oops</html>");
+        assert!(!ok);
+        assert!(err.contains("not valid JSON"), "{err}");
+        // Status is still checked first.
+        assert!(!check_response(&s, 500, r#"{"ok":true}"#).0);
+    }
+
+    #[test]
+    fn expect_body_deep_contains_the_response() {
+        let s = spec(serde_json::json!({
+            "method": "GET", "path": "/user",
+            "expect_body": {"user": {"id": 7, "active": true}, "roles": ["admin"]}
+        }));
+        // Extra fields in the response are fine (subset match).
+        assert!(
+            check_response(
+                &s,
+                200,
+                r#"{"user":{"id":7,"active":true,"name":"Ada"},"roles":["admin","ops"],"extra":1}"#,
+            )
+            .0
+        );
+        // A wrong nested value fails with a precise path.
+        let (ok, err) = check_response(
+            &s,
+            200,
+            r#"{"user":{"id":8,"active":true},"roles":["admin"]}"#,
+        );
+        assert!(!ok);
+        assert!(err.contains("$.user.id"), "{err}");
+        // A missing field fails.
+        let (ok, err) = check_response(&s, 200, r#"{"user":{"id":7},"roles":["admin"]}"#);
+        assert!(!ok);
+        assert!(err.contains("missing $.user.active"), "{err}");
+    }
+
+    #[test]
+    fn json_mismatch_reports_array_and_type_problems() {
+        // Array shorter than expected.
+        let short = json_mismatch(
+            &serde_json::json!({"xs": [1]}),
+            &serde_json::json!({"xs": [1, 2]}),
+            "$",
+        );
+        assert!(short.unwrap().contains("$.xs"));
+        // Expected object, got scalar.
+        let wrong_type = json_mismatch(
+            &serde_json::json!({"u": 5}),
+            &serde_json::json!({"u": {"id": 1}}),
+            "$",
+        );
+        assert!(wrong_type.unwrap().contains("expected an object"));
+        // Full deep-contains success returns None.
+        assert!(
+            json_mismatch(
+                &serde_json::json!({"a": 1, "b": [1, 2, 3]}),
+                &serde_json::json!({"a": 1, "b": [1, 2]}),
+                "$"
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn timestamps_are_real_rfc3339() {
