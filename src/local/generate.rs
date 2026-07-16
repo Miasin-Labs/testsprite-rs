@@ -83,6 +83,37 @@ pub async fn generate(
         });
     }
 
+    // Code summary with `api_endpoints` -> deterministic backend spec cases,
+    // no LLM key needed. This is the local version of TestSprite's
+    // "generate code summary -> generate test plan" path when the summary
+    // already contains a runnable API surface.
+    if let Some(p) = from.filter(|p| p.is_file()) {
+        let summary = read_summary_value(p)?;
+        let planned = crate::server::engine::plan_from_code_summary(&summary);
+        if !planned.is_empty() {
+            let cases: Vec<Value> = planned
+                .into_iter()
+                .map(|case| {
+                    json!({
+                        "id": case.id,
+                        "title": case.title,
+                        "description": case.description,
+                        "kind": "backend",
+                        "spec": case.spec,
+                    })
+                })
+                .collect();
+            let prd = crate::server::engine::prd_from_code_summary(&summary);
+            let source = format!("from:{} (deterministic endpoints)", p.display());
+            let prd_id = persist_prd(root, &source, &prd, &cases, Some(TestKind::Backend)).await?;
+            let test_ids = store_cases(root, cases, Some(TestKind::Backend), Some(&prd_id)).await?;
+            return Ok(GenSummary {
+                prd_id: Some(prd_id),
+                test_ids,
+            });
+        }
+    }
+
     // --from / --instruction -> LLM (needs a key).
     let Some(llm) = LlmClient::from_env(model) else {
         anyhow::bail!(
@@ -90,15 +121,7 @@ pub async fn generate(
         )
     };
     let (summary, source) = if let Some(p) = from.filter(|p| p.is_file()) {
-        let body = std::fs::read_to_string(p)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
-        let value: Value = serde_json::from_str(&body)
-            .or_else(|_| serde_yaml::from_str(&body))
-            .map_err(|e| anyhow::anyhow!("parsing {} as JSON/YAML: {e}", p.display()))?;
-        if !value.is_object() {
-            anyhow::bail!("{} does not contain a JSON object", p.display());
-        }
-        (value, format!("from:{}", p.display()))
+        (read_summary_value(p)?, format!("from:{}", p.display()))
     } else if let Some(instruction) = instruction {
         (
             json!({ "project_name": "local", "description": instruction }),
@@ -123,6 +146,18 @@ pub async fn generate(
         prd_id: Some(prd_id),
         test_ids,
     })
+}
+
+fn read_summary_value(p: &Path) -> anyhow::Result<Value> {
+    let body =
+        std::fs::read_to_string(p).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?;
+    let value: Value = serde_json::from_str(&body)
+        .or_else(|_| serde_yaml::from_str(&body))
+        .map_err(|e| anyhow::anyhow!("parsing {} as JSON/YAML: {e}", p.display()))?;
+    if !value.is_object() {
+        anyhow::bail!("{} does not contain a JSON object", p.display());
+    }
+    Ok(value)
 }
 
 /// Persist the PRD + plan to SQLite and mirror them to the on-disk artifact
@@ -291,4 +326,43 @@ async fn read_doc(dp: &Path) -> anyhow::Result<String> {
         );
     }
     std::fs::read_to_string(dp).map_err(|e| anyhow::anyhow!("reading {}: {e}", dp.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn from_code_summary_with_endpoints_generates_deterministic_specs_without_llm() {
+        let root = crate::local::tmp_root();
+        let summary = root.join("code_summary.yaml");
+        std::fs::write(
+            &summary,
+            r#"
+project_name: demo
+api_endpoints:
+  - method: GET
+    path: /health
+    expect_status: 200
+"#,
+        )
+        .unwrap();
+
+        let out = generate(&root, Some(&summary), None, None, "no-such-model", None)
+            .await
+            .unwrap();
+        assert_eq!(out.test_ids.len(), 1);
+        let case = crate::local::store::get_value(&root, &out.test_ids[0])
+            .await
+            .unwrap();
+        assert_eq!(case["kind"], "backend");
+        assert_eq!(case["spec"]["method"], "GET");
+        assert_eq!(case["spec"]["path"], "/health");
+        assert_eq!(case["spec"]["expect_status"], 200);
+        assert!(case["prdId"].as_str().is_some());
+        let prds = crate::local::store::list_prds(&root).await.unwrap();
+        assert_eq!(prds[0]["cases"], 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
