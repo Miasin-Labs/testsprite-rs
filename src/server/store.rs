@@ -893,9 +893,7 @@ mod tests {
 
     #[test]
     fn interpolation_recurses_through_json_and_env() {
-        unsafe {
-            std::env::set_var("FROM_ENV", "env-value");
-        }
+        let _guard = crate::testutil::env_guard(&[("FROM_ENV", Some("env-value"))]);
         let mut session = HashMap::new();
         session.insert("token".to_string(), "abc123".to_string());
         let value = interpolate_value(
@@ -910,9 +908,6 @@ mod tests {
         assert_eq!(value["nested"][0], "env-value");
         assert_eq!(value["nested"][1]["missing"], "xy");
         assert_eq!(value["n"], 3);
-        unsafe {
-            std::env::remove_var("FROM_ENV");
-        }
     }
 
     #[test]

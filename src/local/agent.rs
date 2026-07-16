@@ -332,53 +332,18 @@ pub async fn history(root: &Path, conversation_id: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
-    /// Serializes + neutralizes `OPENAI_API_KEY` / `HOME` (the two key
-    /// sources `LlmClient::from_env` checks) for the lifetime of the guard,
-    /// so these tests exercise the deterministic no-key path regardless of
-    /// the ambient environment. Restores both on drop.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct NoKeyGuard<'a> {
-        _lock: std::sync::MutexGuard<'a, ()>,
-        key: Option<String>,
-        home: Option<String>,
-    }
-
-    impl<'a> NoKeyGuard<'a> {
-        fn new() -> Self {
-            let _lock = ENV_LOCK.lock().unwrap();
-            let key = std::env::var("OPENAI_API_KEY").ok();
-            let home = std::env::var("HOME").ok();
-            unsafe {
-                std::env::remove_var("OPENAI_API_KEY");
-                std::env::remove_var("HOME");
-            }
-            Self { _lock, key, home }
-        }
-    }
-
-    impl Drop for NoKeyGuard<'_> {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.key {
-                    Some(k) => std::env::set_var("OPENAI_API_KEY", k),
-                    None => std::env::remove_var("OPENAI_API_KEY"),
-                }
-                match &self.home {
-                    Some(h) => std::env::set_var("HOME", h),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
+    /// Neutralizes `OPENAI_API_KEY` / `HOME` (the two key sources
+    /// `LlmClient::from_env` checks) so these tests exercise the
+    /// deterministic no-key path regardless of the ambient environment.
+    fn no_key_guard() -> crate::testutil::EnvGuard {
+        crate::testutil::env_guard(&[("OPENAI_API_KEY", None), ("HOME", None)])
     }
 
     #[tokio::test]
     async fn message_with_no_key_proposes_a_run_action() {
-        let _guard = NoKeyGuard::new();
+        let _guard = no_key_guard();
         let root = super::super::tmp_root();
         let out = message(&root, None, "run the tests", "gpt-4o-mini", false)
             .await
@@ -406,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_approve_executes_without_a_pending_action() {
-        let _guard = NoKeyGuard::new();
+        let _guard = no_key_guard();
         let root = super::super::tmp_root();
         let out = message(&root, None, "run the tests", "gpt-4o-mini", true)
             .await
@@ -420,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_reject_then_second_resolve_errors() {
-        let _guard = NoKeyGuard::new();
+        let _guard = no_key_guard();
         let root = super::super::tmp_root();
         let out = message(&root, None, "run the tests", "gpt-4o-mini", false)
             .await

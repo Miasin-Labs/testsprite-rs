@@ -16,6 +16,8 @@ mod net;
 mod paths;
 mod report;
 mod server;
+#[cfg(test)]
+mod testutil;
 mod tools;
 mod tunnel;
 mod types;

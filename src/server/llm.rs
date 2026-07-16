@@ -37,6 +37,16 @@ fn dirs_credentials() -> Option<std::path::PathBuf> {
     Some(std::path::Path::new(&home).join(".config/jfc/credentials.toml"))
 }
 
+/// OpenAI-compatible API base. `OPENAI_BASE_URL` overrides it (a proxy, a
+/// local stand-in, or a compatible provider); default is the real endpoint.
+fn api_base() -> String {
+    std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| "https://api.openai.com".to_string())
+}
+
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
@@ -109,7 +119,7 @@ impl LlmClient {
         }
         let resp = self
             .http
-            .post("https://api.openai.com/v1/chat/completions")
+            .post(format!("{}/v1/chat/completions", api_base()))
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
@@ -143,7 +153,7 @@ impl LlmClient {
         }
         let resp = self
             .http
-            .post("https://api.openai.com/v1/responses")
+            .post(format!("{}/v1/responses", api_base()))
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

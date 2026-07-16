@@ -299,21 +299,30 @@ pub async fn code_summary_to_json(yaml_path: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[tokio::test]
+    async fn account_info_round_trips_through_the_local_backend_router() {
+        let state =
+            crate::server::api::AppState::new(None, crate::server::executors::TestKind::Backend);
+        let (base, server) = crate::testutil::serve_router(crate::server::api::router(state)).await;
+        let client = {
+            let _guard = crate::testutil::env_guard(&[("API_URL", Some(base.as_str()))]);
+            BackendClient::new("test-key")
+        };
+        let info = client.get_account_info().await.unwrap();
+        assert_eq!(info.user.as_deref(), Some("local@localhost"));
+        assert_eq!(info.sub_plan.as_deref(), Some("Local"));
+        assert_eq!(info.credits, Some(999999));
+        server.abort();
+    }
 
     #[test]
     fn dashboard_url_uses_testsprite_base() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("TESTSPRITE_URL", "https://dash.example");
-        }
+        let _guard =
+            crate::testutil::env_guard(&[("TESTSPRITE_URL", Some("https://dash.example"))]);
         assert_eq!(
             dashboard_url("p1", "t1"),
             "https://dash.example/dashboard/mcp/tests/p1/t1"
         );
-        unsafe {
-            std::env::remove_var("TESTSPRITE_URL");
-        }
     }
 
     #[tokio::test]

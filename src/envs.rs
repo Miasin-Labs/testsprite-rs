@@ -112,87 +112,73 @@ pub mod tunnel {
 
 #[cfg(test)]
 mod tests {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::testutil::env_guard;
 
     #[test]
     fn numeric_envs_fall_back_on_garbage() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("TESTSPRITE_RUN_HISTORY_KEEP", "nope");
-            std::env::set_var("TESTSPRITE_SERVE_READY_SECS", "bad");
-            std::env::set_var("TESTSPRITE_TEST_TIMEOUT_SECS", "wat");
-        }
+        let _guard = env_guard(&[
+            ("TESTSPRITE_RUN_HISTORY_KEEP", Some("nope")),
+            ("TESTSPRITE_SERVE_READY_SECS", Some("bad")),
+            ("TESTSPRITE_TEST_TIMEOUT_SECS", Some("wat")),
+        ]);
         assert_eq!(super::run_history_keep(), 200);
         assert_eq!(super::serve_ready_secs(), 30);
         assert_eq!(super::test_timeout_secs(), 300);
-        unsafe {
-            std::env::remove_var("TESTSPRITE_RUN_HISTORY_KEEP");
-            std::env::remove_var("TESTSPRITE_SERVE_READY_SECS");
-            std::env::remove_var("TESTSPRITE_TEST_TIMEOUT_SECS");
-        }
     }
 
     #[test]
     fn tunnel_data_address_prefers_full_override_else_host_port() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("TSEMCP_TUNNEL_DATA_ADDRESS", "full.example:1");
+        {
+            let _guard = env_guard(&[("TSEMCP_TUNNEL_DATA_ADDRESS", Some("full.example:1"))]);
+            assert_eq!(super::tunnel::data_address(), "full.example:1");
         }
-        assert_eq!(super::tunnel::data_address(), "full.example:1");
-        unsafe {
-            std::env::remove_var("TSEMCP_TUNNEL_DATA_ADDRESS");
-            std::env::set_var("TSEMCP_TUNNEL_DATA_HOST", "host.example");
-            std::env::set_var("TSEMCP_TUNNEL_DATA_PORT", "1234");
-        }
+        let _guard = env_guard(&[
+            ("TSEMCP_TUNNEL_DATA_ADDRESS", None),
+            ("TSEMCP_TUNNEL_DATA_HOST", Some("host.example")),
+            ("TSEMCP_TUNNEL_DATA_PORT", Some("1234")),
+        ]);
         assert_eq!(super::tunnel::data_address(), "host.example:1234");
-        unsafe {
-            std::env::remove_var("TSEMCP_TUNNEL_DATA_HOST");
-            std::env::remove_var("TSEMCP_TUNNEL_DATA_PORT");
-        }
     }
 
     #[test]
     fn string_env_defaults_and_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        for k in [
-            "TESTSPRITE_MODEL",
-            "TESTSPRITE_DEFAULT_MODEL",
-            "API_URL",
-            "TESTSPRITE_URL",
-            "TESTSPRITE_PLAYWRIGHT_IMAGE",
-            "TSMCP_API_KEY",
-            "API_KEY",
-            "TSEMCP_TUNNEL_CONTROL_URL",
-            "TSEMCP_TUNNEL_PROXY_URL",
-        ] {
-            unsafe {
-                std::env::remove_var(k);
-            }
+        {
+            let _guard = env_guard(&[
+                ("TESTSPRITE_MODEL", None),
+                ("TESTSPRITE_DEFAULT_MODEL", None),
+                ("API_URL", None),
+                ("TESTSPRITE_URL", None),
+                ("TESTSPRITE_PLAYWRIGHT_IMAGE", None),
+                ("TSMCP_API_KEY", None),
+                ("API_KEY", None),
+                ("TSEMCP_TUNNEL_CONTROL_URL", None),
+                ("TSEMCP_TUNNEL_PROXY_URL", None),
+            ]);
+            assert_eq!(super::default_model(), "gpt-5.3-codex");
+            assert_eq!(super::api_url(), "https://api.testsprite.com");
+            assert_eq!(super::testsprite_url(), "https://www.testsprite.com");
+            assert_eq!(super::playwright_image(), "testsprite-rs-playwright:1.60.0");
+            assert_eq!(super::api_key(), None);
+            assert_eq!(
+                super::tunnel::control_url(),
+                "wss://control.tun.testsprite.com/ws"
+            );
+            assert_eq!(
+                super::tunnel::proxy_url(),
+                "http://proxy.tun.testsprite.com:9090"
+            );
         }
-        assert_eq!(super::default_model(), "gpt-5.3-codex");
-        assert_eq!(super::api_url(), "https://api.testsprite.com");
-        assert_eq!(super::testsprite_url(), "https://www.testsprite.com");
-        assert_eq!(super::playwright_image(), "testsprite-rs-playwright:1.60.0");
-        assert_eq!(super::api_key(), None);
-        assert_eq!(
-            super::tunnel::control_url(),
-            "wss://control.tun.testsprite.com/ws"
-        );
-        assert_eq!(
-            super::tunnel::proxy_url(),
-            "http://proxy.tun.testsprite.com:9090"
-        );
-        unsafe {
-            std::env::set_var("TESTSPRITE_DEFAULT_MODEL", "m1");
-            std::env::set_var("TESTSPRITE_MODEL", "m2");
-            std::env::set_var("API_URL", "http://api");
-            std::env::set_var("TESTSPRITE_URL", "http://ui");
-            std::env::set_var("TESTSPRITE_PLAYWRIGHT_IMAGE", "pw:local");
-            std::env::set_var("API_KEY", "key1");
-            std::env::set_var("TSMCP_API_KEY", "key2");
-            std::env::set_var("TSEMCP_TUNNEL_CONTROL_URL", "ws://control");
-            std::env::set_var("TSEMCP_TUNNEL_PROXY_URL", "http://proxy");
-        }
+        let _guard = env_guard(&[
+            ("TESTSPRITE_DEFAULT_MODEL", Some("m1")),
+            ("TESTSPRITE_MODEL", Some("m2")),
+            ("API_URL", Some("http://api")),
+            ("TESTSPRITE_URL", Some("http://ui")),
+            ("TESTSPRITE_PLAYWRIGHT_IMAGE", Some("pw:local")),
+            ("API_KEY", Some("key1")),
+            ("TSMCP_API_KEY", Some("key2")),
+            ("TSEMCP_TUNNEL_CONTROL_URL", Some("ws://control")),
+            ("TSEMCP_TUNNEL_PROXY_URL", Some("http://proxy")),
+        ]);
         assert_eq!(super::default_model(), "m2");
         assert_eq!(super::api_url(), "http://api");
         assert_eq!(super::testsprite_url(), "http://ui");
@@ -200,20 +186,5 @@ mod tests {
         assert_eq!(super::api_key().as_deref(), Some("key2"));
         assert_eq!(super::tunnel::control_url(), "ws://control");
         assert_eq!(super::tunnel::proxy_url(), "http://proxy");
-        for k in [
-            "TESTSPRITE_MODEL",
-            "TESTSPRITE_DEFAULT_MODEL",
-            "API_URL",
-            "TESTSPRITE_URL",
-            "TESTSPRITE_PLAYWRIGHT_IMAGE",
-            "TSMCP_API_KEY",
-            "API_KEY",
-            "TSEMCP_TUNNEL_CONTROL_URL",
-            "TSEMCP_TUNNEL_PROXY_URL",
-        ] {
-            unsafe {
-                std::env::remove_var(k);
-            }
-        }
     }
 }

@@ -609,8 +609,7 @@ mod tests {
     use serde_json::json;
 
     use super::{plan_steps_body, resolve_node_path, use_docker, wrap_script};
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::testutil::env_guard;
 
     #[test]
     fn wrap_script_always_screenshots_when_a_path_is_given() {
@@ -717,39 +716,32 @@ mod tests {
 
     #[test]
     fn docker_routing_defaults_to_webkit_and_honors_force_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TESTSPRITE_BROWSER_DOCKER");
+        {
+            let _guard = env_guard(&[("TESTSPRITE_BROWSER_DOCKER", None)]);
+            assert!(use_docker("webkit"));
+            assert!(!use_docker("chromium"));
         }
-        assert!(use_docker("webkit"));
-        assert!(!use_docker("chromium"));
-        unsafe {
-            std::env::set_var("TESTSPRITE_BROWSER_DOCKER", "yes");
+        {
+            let _guard = env_guard(&[("TESTSPRITE_BROWSER_DOCKER", Some("yes"))]);
+            assert!(use_docker("chromium"));
         }
-        assert!(use_docker("chromium"));
-        unsafe {
-            std::env::set_var("TESTSPRITE_BROWSER_DOCKER", "no");
-        }
+        let _guard = env_guard(&[("TESTSPRITE_BROWSER_DOCKER", Some("no"))]);
         assert!(!use_docker("webkit"));
-        unsafe {
-            std::env::remove_var("TESTSPRITE_BROWSER_DOCKER");
-        }
     }
 
     #[test]
     fn node_path_prefers_explicit_envs() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("PLAYWRIGHT_NODE_PATH", "/tmp/pw");
-            std::env::set_var("NODE_PATH", "/tmp/node");
+        {
+            let _guard = env_guard(&[
+                ("PLAYWRIGHT_NODE_PATH", Some("/tmp/pw")),
+                ("NODE_PATH", Some("/tmp/node")),
+            ]);
+            assert_eq!(resolve_node_path().as_deref(), Some("/tmp/pw"));
         }
-        assert_eq!(resolve_node_path().as_deref(), Some("/tmp/pw"));
-        unsafe {
-            std::env::remove_var("PLAYWRIGHT_NODE_PATH");
-        }
+        let _guard = env_guard(&[
+            ("PLAYWRIGHT_NODE_PATH", None),
+            ("NODE_PATH", Some("/tmp/node")),
+        ]);
         assert_eq!(resolve_node_path().as_deref(), Some("/tmp/node"));
-        unsafe {
-            std::env::remove_var("NODE_PATH");
-        }
     }
 }
