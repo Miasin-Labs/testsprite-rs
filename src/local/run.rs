@@ -96,6 +96,17 @@ pub async fn run(
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
+/// Stored tests eligible for a whole-suite run: everything except cases the
+/// acceptance gate quarantined. Shared by the gate's smoke tier and any other
+/// caller that needs "the suite as it would actually run".
+pub async fn runnable_tests(root: &Path) -> anyhow::Result<Vec<LocalTest>> {
+    Ok(store::list(root)
+        .await?
+        .into_iter()
+        .filter(|t| !crate::local::accept::is_quarantined_test(t))
+        .collect())
+}
+
 /// Run the given test ids (all tests if `ids` is empty), executing each case,
 /// running LLM failure analysis on failures, optionally proposing a fix, and
 /// writing the result to disk — without printing or exiting. Returns one JSON

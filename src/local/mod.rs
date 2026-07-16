@@ -19,6 +19,7 @@ pub mod flaky;
 pub mod gate;
 pub mod generate;
 pub mod lint;
+pub mod mutation;
 pub mod project;
 pub mod rerun;
 pub mod retrieval;

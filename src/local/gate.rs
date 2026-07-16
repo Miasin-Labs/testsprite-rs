@@ -8,13 +8,55 @@ use serde_json::Value;
 
 use super::ts_dir;
 
+/// Knobs for one gate run.
+pub struct GateOpts<'a> {
+    pub url: Option<&'a str>,
+    pub model: &'a str,
+    /// Run a representative subset first; only escalate to the full suite if it
+    /// passes.
+    pub smoke: bool,
+    /// Fail the gate below this mutation kill percent (0-100).
+    pub min_mutation: Option<f64>,
+}
+
 /// Run every stored test, write `testsprite_tests/junit.xml` and
 /// `testsprite_tests/gate-summary.json`, best-effort comment on the current
 /// PR (via `gh`), and return `0` if every test passed, `1` otherwise. The
-/// exit code depends only on test results — `gh` failures never propagate.
-pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyhow::Result<i32> {
+/// exit code depends only on test results and the optional mutation floor —
+/// `gh` failures never propagate.
+pub async fn gate(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<i32> {
+    // Fast pre-gate: a representative case per group / failure cluster. A cheap
+    // red here short-circuits the full run — the inner CI loop stays sub-suite
+    // fast when something obvious broke.
+    if opts.smoke {
+        let smoke_ids = smoke_subset(root).await?;
+        if !smoke_ids.is_empty() {
+            let smoke = crate::local::run::run_collect(
+                root, &smoke_ids, opts.url, opts.model, false, None, 1, false,
+            )
+            .await?;
+            let smoke_failed = smoke
+                .iter()
+                .filter(|r| !r.get("passed").and_then(Value::as_bool).unwrap_or(false))
+                .count();
+            if smoke_failed > 0 {
+                println!(
+                    "gate --smoke: {smoke_failed}/{} representative case(s) failed — \
+                     skipping the full suite",
+                    smoke.len()
+                );
+                write_artifacts(root, &smoke)?;
+                return Ok(1);
+            }
+            println!(
+                "gate --smoke: {} representative case(s) passed — running the full suite",
+                smoke.len()
+            );
+        }
+    }
+
     let results =
-        crate::local::run::run_collect(root, &[], url_override, model, false, None, 1, false)
+        crate::local::run::run_collect(root, &[], opts.url, opts.model, false, None, 1, false)
             .await?;
 
     let total = results.len();
@@ -24,22 +66,7 @@ pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyho
         .count();
     let passed = total - failed;
 
-    let dir = ts_dir(root);
-    std::fs::create_dir_all(&dir)?;
-
-    let junit = render_junit(&results, total, failed);
-    std::fs::write(dir.join("junit.xml"), junit)?;
-
-    let summary = serde_json::json!({
-        "total": total,
-        "passed": passed,
-        "failed": failed,
-        "results": results,
-    });
-    std::fs::write(
-        dir.join("gate-summary.json"),
-        serde_json::to_string_pretty(&summary)?,
-    )?;
+    write_artifacts(root, &results)?;
 
     println!(
         "gate: {passed}/{total} passed ({failed} failed) — junit.xml + gate-summary.json written"
@@ -48,7 +75,80 @@ pub async fn gate(root: &Path, url_override: Option<&str>, model: &str) -> anyho
     let body = comment_body(&results, total, passed, failed);
     try_gh_comment(root, &body);
 
-    Ok(if failed == 0 { 0 } else { 1 })
+    // Oracle-strength floor: a green, high-coverage suite can still catch zero
+    // bugs, so `--min-mutation` fails the gate on weak assertions, not just on
+    // failing tests.
+    let mut exit = if failed == 0 { 0 } else { 1 };
+    if let Some(floor) = opts.min_mutation {
+        let scan = root.to_path_buf();
+        let report =
+            tokio::task::spawn_blocking(move || crate::local::mutation::run_rust(&scan, 300))
+                .await?;
+        match report.kill_score {
+            Some(score) if score < floor => {
+                println!(
+                    "gate --min-mutation: kill score {score:.1}% is below the {floor:.1}% floor \
+                     ({} mutant(s) survived)",
+                    report.missed
+                );
+                exit = 1;
+            }
+            Some(score) => {
+                println!("gate --min-mutation: kill score {score:.1}% meets the {floor:.1}% floor");
+            }
+            None => {
+                println!(
+                    "gate --min-mutation: no mutation measurement available ({}), floor not enforced",
+                    report.unavailable.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
+    }
+
+    Ok(exit)
+}
+
+/// One representative stored test per group (falling back to per-modality) —
+/// the smoke tier. Deterministic: the first case (by id) in each bucket.
+async fn smoke_subset(root: &Path) -> anyhow::Result<Vec<String>> {
+    let mut tests = crate::local::run::runnable_tests(root).await?;
+    tests.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ids = Vec::new();
+    for t in &tests {
+        // Bucket by group when present, else by modality — one case each.
+        let bucket = t
+            .group()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("kind:{:?}", t.kind.unwrap_or_default()));
+        if seen.insert(bucket) {
+            ids.push(t.id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+/// Write the JUnit XML + JSON summary artifacts for a result set.
+fn write_artifacts(root: &Path, results: &[Value]) -> anyhow::Result<()> {
+    let total = results.len();
+    let failed = results
+        .iter()
+        .filter(|r| !r.get("passed").and_then(Value::as_bool).unwrap_or(false))
+        .count();
+    let dir = ts_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("junit.xml"), render_junit(results, total, failed))?;
+    let summary = serde_json::json!({
+        "total": total,
+        "passed": total - failed,
+        "failed": failed,
+        "results": results,
+    });
+    std::fs::write(
+        dir.join("gate-summary.json"),
+        serde_json::to_string_pretty(&summary)?,
+    )?;
+    Ok(())
 }
 
 /// Render a minimal but valid JUnit XML document for `results`.
@@ -172,6 +272,40 @@ mod tests {
         assert!(xml.contains("name=\"bad &lt;test&gt;\""));
         assert!(xml.contains("<failure message=\"boom &amp; bust\">boom &amp; bust</failure>"));
         assert_eq!(xml.matches("<failure").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn smoke_subset_picks_one_representative_per_group() {
+        let root = crate::local::tmp_root();
+        let add = |v: serde_json::Value| {
+            let root = root.clone();
+            async move { crate::local::store::add_value(&root, v).await.unwrap() }
+        };
+        // Two cases in group "a", one in group "b" → 2 buckets → 2 smoke ids.
+        add(serde_json::json!({"id":"a1","title":"a one","kind":"command","code":"true","group":"a"}))
+            .await;
+        add(serde_json::json!({"id":"a2","title":"a two","kind":"command","code":"true","group":"a"}))
+            .await;
+        add(serde_json::json!({"id":"b1","title":"b one","kind":"command","code":"true","group":"b"}))
+            .await;
+
+        let ids = smoke_subset(&root).await.unwrap();
+        assert_eq!(ids.len(), 2, "one representative per group: {ids:?}");
+        // Deterministic: the lowest-id case in each bucket.
+        assert!(ids.contains(&"a1".to_string()));
+        assert!(ids.contains(&"b1".to_string()));
+
+        // Quarantined cases never enter the smoke tier.
+        crate::local::store::set_quarantine(&root, "b1", Some("suspect_oracle"))
+            .await
+            .unwrap();
+        let ids = smoke_subset(&root).await.unwrap();
+        assert!(
+            !ids.contains(&"b1".to_string()),
+            "quarantined excluded: {ids:?}"
+        );
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

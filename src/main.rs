@@ -95,6 +95,11 @@ enum Command {
         /// measurement. Don't chase it to zero.
         #[arg(long)]
         gaps: bool,
+        /// Measure ORACLE STRENGTH via mutation testing (cargo-mutants for Rust
+        /// crates): seed faults and report the kill rate. Coverage says a line
+        /// ran; this says a test would catch a bug in it.
+        #[arg(long)]
+        mutation: bool,
     },
     /// Run the suite as a CI gate: JUnit + JSON + best-effort gh PR comment; exit 1 on any failure.
     Gate {
@@ -104,6 +109,14 @@ enum Command {
         /// OpenAI model for spec-less LLM execution and failure analysis.
         #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
+        /// Fast pre-gate: run one representative case per group/failure-cluster
+        /// first; only escalate to the full suite if the smoke tier passes.
+        #[arg(long)]
+        smoke: bool,
+        /// Fail the gate if the mutation kill score is below this percent
+        /// (0-100). Off by default; requires cargo-mutants for a Rust target.
+        #[arg(long)]
+        min_mutation: Option<f64>,
     },
     /// The regression loop in one call: (optionally) generate tests for changed
     /// functions, run the suite, triage the failures, and surface one actionable
@@ -682,9 +695,22 @@ async fn main() -> Result<()> {
             server::serve(port, &model, server::executors::TestKind::parse(&kind)).await
         }
         Command::Project { cmd } => run_project(cmd).await,
-        Command::Coverage { path, json, gaps } => {
+        Command::Coverage {
+            path,
+            json,
+            gaps,
+            mutation,
+        } => {
             let scan = path.unwrap_or(std::env::current_dir()?);
-            let code = if gaps {
+            let code = if mutation {
+                // Mutation shells out to cargo-mutants (blocking); keep it off
+                // the async reactor.
+                let scan = scan.clone();
+                tokio::task::spawn_blocking(move || {
+                    local::mutation::mutation_report(&scan, json, 300)
+                })
+                .await??
+            } else if gaps {
                 let root = std::env::current_dir()?;
                 local::coverage::gaps_report(&root, &scan, json).await?
             } else {
@@ -692,9 +718,20 @@ async fn main() -> Result<()> {
             };
             std::process::exit(code);
         }
-        Command::Gate { url, model } => {
+        Command::Gate {
+            url,
+            model,
+            smoke,
+            min_mutation,
+        } => {
             let root = std::env::current_dir()?;
-            let code = local::gate::gate(&root, url.as_deref(), &model).await?;
+            let opts = local::gate::GateOpts {
+                url: url.as_deref(),
+                model: &model,
+                smoke,
+                min_mutation,
+            };
+            let code = local::gate::gate(&root, opts).await?;
             std::process::exit(code);
         }
         Command::Loop {
@@ -1587,7 +1624,9 @@ mod cli_unit_tests {
         let cli = Cli::try_parse_from(["testsprite-rs", "coverage", "--gaps"])
             .expect("`coverage --gaps` parses");
         match cli.command {
-            Some(Command::Coverage { path, json, gaps }) => {
+            Some(Command::Coverage {
+                path, json, gaps, ..
+            }) => {
                 assert!(gaps, "--gaps sets gaps=true");
                 assert!(!json, "json defaults false");
                 assert!(path.is_none(), "path defaults None");
