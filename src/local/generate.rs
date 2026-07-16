@@ -450,12 +450,18 @@ pub async fn adversarial(
         }
         spent += llm.usage().total_tokens();
     }
+    // Merge with consensus votes across models, then drop cases already
+    // covered by the stored suite (novelty guard).
     cases = dedupe_cases(cases);
     if cases.is_empty() && !errors.is_empty() {
         anyhow::bail!("adversarial planning failed: {}", errors.join("; "));
     }
     let test_ids = if store {
-        let ids = store_cases(root, cases.clone(), None, None).await?;
+        let (fresh, dropped) = drop_known_duplicates(root, cases.clone()).await;
+        if dropped > 0 {
+            eprintln!("audit: dropped {dropped} case(s) duplicating existing stored tests");
+        }
+        let ids = store_cases(root, fresh, None, None).await?;
         let first_model = model_list(model)
             .into_iter()
             .next()
@@ -477,20 +483,123 @@ fn model_list(model: &str) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
+/// Merge cases proposed by (possibly) several models, keeping the first of
+/// each title but recording a CONSENSUS signal: how many distinct models
+/// proposed it, stamped as `modelVotes` (+ `consensus: true` at >= 2). When
+/// independent models converge on the same adversarial case it is far more
+/// likely a real defect vector than a single model's guess — the vote lets the
+/// caller (and a reviewer) rank by agreement. Single-model runs are unaffected
+/// (every case gets `modelVotes: 1`).
 fn dedupe_cases(cases: Vec<Value>) -> Vec<Value> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
+    use std::collections::BTreeMap;
+    // Preserve first-seen order while tallying distinct model sources per key.
+    let mut order: Vec<String> = Vec::new();
+    let mut first: BTreeMap<String, Value> = BTreeMap::new();
+    let mut voters: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     for case in cases {
         let key = case
             .get("title")
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| case.to_string());
-        if seen.insert(key) {
-            out.push(case);
+        let model = case
+            .get("modelSource")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !first.contains_key(&key) {
+            order.push(key.clone());
+            first.insert(key.clone(), case);
         }
+        voters.entry(key).or_default().insert(model);
     }
-    out
+    order
+        .into_iter()
+        .map(|key| {
+            let mut case = first.remove(&key).unwrap();
+            let votes = voters.get(&key).map(|v| v.len()).unwrap_or(1);
+            if case.is_object() {
+                case["modelVotes"] = json!(votes);
+                if votes >= 2 {
+                    case["consensus"] = json!(true);
+                }
+            }
+            case
+        })
+        .collect()
+}
+
+/// Drop generated cases that merely reproduce an EXISTING stored test —
+/// exact content-hash match, or a normalized-title near-duplicate above a
+/// similarity threshold. Only ~10% of generated tests uniquely contribute, so
+/// admitting regurgitated/memorized ones bloats the suite with redundant
+/// low-value cases. Returns `(kept, dropped_count)`.
+async fn drop_known_duplicates(root: &Path, cases: Vec<Value>) -> (Vec<Value>, usize) {
+    let existing = store::export_all(root).await.unwrap_or_default();
+    let existing_hashes: std::collections::BTreeSet<String> = existing
+        .iter()
+        .filter_map(|t| serde_json::to_string(t).ok())
+        .map(|s| store::content_hash(&s))
+        .collect();
+    let existing_titles: Vec<String> = existing
+        .iter()
+        .filter_map(|t| t.get("title").and_then(Value::as_str))
+        .map(normalize_title)
+        .collect();
+
+    let before = cases.len();
+    let kept: Vec<Value> = cases
+        .into_iter()
+        .filter(|c| {
+            if let Ok(s) = serde_json::to_string(c)
+                && existing_hashes.contains(&store::content_hash(&s))
+            {
+                return false;
+            }
+            let title = c
+                .get("title")
+                .and_then(Value::as_str)
+                .map(normalize_title)
+                .unwrap_or_default();
+            if title.is_empty() {
+                return true;
+            }
+            // A title >85% similar to an existing test's is a near-duplicate.
+            !existing_titles
+                .iter()
+                .any(|e| title_similarity(&title, e) > 0.85)
+        })
+        .collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
+fn normalize_title(t: &str) -> String {
+    // Lowercase and split on any non-alphanumeric run, so punctuation and path
+    // slashes don't make "GET /todos responds" and "get todos responds" look
+    // like different tests.
+    t.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Token-set Jaccard over two normalized titles — a cheap near-duplicate
+/// signal that ignores word order and punctuation.
+fn title_similarity(a: &str, b: &str) -> f64 {
+    let sa: std::collections::BTreeSet<&str> = a.split_whitespace().collect();
+    let sb: std::collections::BTreeSet<&str> = b.split_whitespace().collect();
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    let inter = sa.intersection(&sb).count();
+    let union = sa.union(&sb).count();
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
 }
 
 /// Shared: ask the LLM for one case per unit (capped at 40) per configured
@@ -585,6 +694,10 @@ async fn generate_for_units(
         );
     }
     let cases = clear_duplicate_ids(dedupe_cases(cases));
+    let (cases, dropped) = drop_known_duplicates(root, cases).await;
+    if dropped > 0 {
+        eprintln!("{what}: dropped {dropped} case(s) duplicating existing stored tests");
+    }
     let test_ids = store_cases(root, cases, None, None).await?;
     let quarantined = screen_if(opts, root, &test_ids, model).await?;
     Ok(GenSummary {
@@ -737,14 +850,55 @@ api_endpoints:
     }
 
     #[test]
-    fn audit_dedupe_cases_by_title() {
+    fn audit_dedupe_cases_by_title_records_consensus_votes() {
         let cases = vec![
             json!({"title":"same","modelSource":"a"}),
             json!({"title":"same","modelSource":"b"}),
-            json!({"title":"other"}),
+            json!({"title":"other","modelSource":"a"}),
         ];
         let out = dedupe_cases(cases);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["modelSource"], "a");
+        // Two distinct models proposed "same" → consensus with 2 votes.
+        assert_eq!(out[0]["modelVotes"], 2);
+        assert_eq!(out[0]["consensus"], true);
+        // A single-model case gets 1 vote and no consensus flag.
+        assert_eq!(out[1]["modelVotes"], 1);
+        assert!(out[1].get("consensus").is_none());
+    }
+
+    #[test]
+    fn title_similarity_is_order_insensitive_jaccard() {
+        assert_eq!(
+            title_similarity("get todos responds", "get todos responds"),
+            1.0
+        );
+        assert!(title_similarity("get todos responds", "todos get responds") > 0.99);
+        assert!(title_similarity("get todos", "delete users") < 0.2);
+    }
+
+    #[tokio::test]
+    async fn novelty_guard_drops_cases_duplicating_stored_tests() {
+        let root = crate::local::tmp_root();
+        crate::local::store::add_value(
+            &root,
+            json!({"id":"e1","title":"GET /todos responds","kind":"backend",
+                   "spec":{"method":"GET","path":"/todos"}}),
+        )
+        .await
+        .unwrap();
+
+        let cases = vec![
+            // Near-duplicate title of the stored test → dropped.
+            json!({"title":"get todos responds","kind":"backend"}),
+            // Genuinely new → kept.
+            json!({"title":"DELETE /users/{id} rejects unknown","kind":"backend"}),
+        ];
+        let (kept, dropped) = drop_known_duplicates(&root, cases).await;
+        assert_eq!(dropped, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["title"], "DELETE /users/{id} rejects unknown");
+
+        std::fs::remove_dir_all(root).ok();
     }
 }

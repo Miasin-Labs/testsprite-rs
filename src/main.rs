@@ -194,6 +194,16 @@ enum Command {
         #[command(subcommand)]
         cmd: ScheduleCmd,
     },
+    /// Per-model telemetry scoreboard (pass rate, latency, tokens) from run
+    /// history, with drift detection against a saved baseline.
+    Bench {
+        /// Print a single JSON object instead of human lines.
+        #[arg(long)]
+        json: bool,
+        /// Overwrite the drift baseline with the current scoreboard.
+        #[arg(long)]
+        save_baseline: bool,
+    },
     /// Run the Discord bot front-end for the agent (build with `--features discord`).
     #[cfg(feature = "discord")]
     Discord {
@@ -789,6 +799,14 @@ async fn main() -> Result<()> {
         }
         Command::Agent { cmd } => run_agent(cmd).await,
         Command::Schedule { cmd } => run_schedule(cmd).await,
+        Command::Bench {
+            json,
+            save_baseline,
+        } => {
+            let root = std::env::current_dir()?;
+            let code = local::bench::bench_report(&root, json, save_baseline).await?;
+            std::process::exit(code);
+        }
         Command::Completions { shell } => {
             let mut cmd = <Cli as CommandFactory>::command();
             clap_complete::generate(shell, &mut cmd, "testsprite-rs", &mut std::io::stdout());

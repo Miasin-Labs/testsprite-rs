@@ -6,6 +6,7 @@ pub mod accept;
 pub mod agent;
 pub mod apidoc;
 pub mod artifact;
+pub mod bench;
 pub mod changed;
 pub mod ci;
 pub mod coverage;
