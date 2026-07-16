@@ -314,8 +314,13 @@ fn llvm_cov_export(root: &Path) -> Option<serde_json::Value> {
     if !root.join("Cargo.toml").exists() {
         return None;
     }
+    let out_path = std::env::temp_dir().join(format!(
+        "testsprite-rs-llvm-cov-{}.json",
+        std::process::id()
+    ));
     let output = std::process::Command::new("cargo")
-        .args(["llvm-cov", "--json"])
+        .args(["llvm-cov", "--json", "--output-path"])
+        .arg(&out_path)
         .current_dir(root)
         .output()
         .ok()?;
@@ -329,7 +334,10 @@ fn llvm_cov_export(root: &Path) -> Option<serde_json::Value> {
         );
         return None;
     }
-    let text = String::from_utf8(output.stdout).ok()?;
+    let text = std::fs::read_to_string(&out_path)
+        .or_else(|_| String::from_utf8(output.stdout).map_err(std::io::Error::other))
+        .ok()?;
+    let _ = std::fs::remove_file(out_path);
     serde_json::from_str::<serde_json::Value>(&text).ok()
 }
 
@@ -343,6 +351,42 @@ fn bare_symbol_name(symbol: &str) -> &str {
         .next()
         .unwrap_or(no_generics)
         .trim()
+}
+
+fn symbol_identifiers(symbol: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = symbol.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut len = 0usize;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            len = len
+                .saturating_mul(10)
+                .saturating_add((bytes[i] - b'0') as usize);
+            i += 1;
+        }
+        if len == 0 || i + len > bytes.len() {
+            i = start + 1;
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(&bytes[i..i + len])
+            && s.chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        {
+            out.push(s.to_string());
+        }
+        i = start + 1;
+    }
+    if out.is_empty() {
+        out.push(bare_symbol_name(symbol).to_string());
+    }
+    out
 }
 
 /// Names of functions a coverage run observed EXECUTING at least once.
@@ -367,7 +411,7 @@ pub fn rust_executed_functions(root: &Path) -> Option<std::collections::HashSet<
             continue;
         }
         if let Some(name) = f.get("name").and_then(serde_json::Value::as_str) {
-            executed.insert(bare_symbol_name(name).to_string());
+            executed.extend(symbol_identifiers(name));
         }
     }
     Some(executed)
@@ -901,6 +945,19 @@ mod tests {
             "call_once"
         );
         assert_eq!(bare_symbol_name("plain"), "plain");
+    }
+
+    #[test]
+    fn rust_v0_mangled_symbol_exposes_function_identifiers() {
+        let ids = symbol_identifiers(
+            "_RNCNvNtNtNtCsynWAeEb10j_13testsprite_rs5local8coverage5testss_35finds_functions_and_counts_branches0B9_",
+        );
+        assert!(ids.contains(&"testsprite_rs".to_string()), "{ids:?}");
+        assert!(ids.contains(&"coverage".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"finds_functions_and_counts_branches".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]

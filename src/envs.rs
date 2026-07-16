@@ -109,3 +109,45 @@ pub mod tunnel {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn numeric_envs_fall_back_on_garbage() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TESTSPRITE_RUN_HISTORY_KEEP", "nope");
+            std::env::set_var("TESTSPRITE_SERVE_READY_SECS", "bad");
+            std::env::set_var("TESTSPRITE_TEST_TIMEOUT_SECS", "wat");
+        }
+        assert_eq!(super::run_history_keep(), 200);
+        assert_eq!(super::serve_ready_secs(), 30);
+        assert_eq!(super::test_timeout_secs(), 300);
+        unsafe {
+            std::env::remove_var("TESTSPRITE_RUN_HISTORY_KEEP");
+            std::env::remove_var("TESTSPRITE_SERVE_READY_SECS");
+            std::env::remove_var("TESTSPRITE_TEST_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    fn tunnel_data_address_prefers_full_override_else_host_port() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TSEMCP_TUNNEL_DATA_ADDRESS", "full.example:1");
+        }
+        assert_eq!(super::tunnel::data_address(), "full.example:1");
+        unsafe {
+            std::env::remove_var("TSEMCP_TUNNEL_DATA_ADDRESS");
+            std::env::set_var("TSEMCP_TUNNEL_DATA_HOST", "host.example");
+            std::env::set_var("TSEMCP_TUNNEL_DATA_PORT", "1234");
+        }
+        assert_eq!(super::tunnel::data_address(), "host.example:1234");
+        unsafe {
+            std::env::remove_var("TSEMCP_TUNNEL_DATA_HOST");
+            std::env::remove_var("TSEMCP_TUNNEL_DATA_PORT");
+        }
+    }
+}

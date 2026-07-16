@@ -68,3 +68,28 @@ impl Paths {
 
 /// The gitignore entry the original plugin auto-appends (the config holds creds).
 pub const GITIGNORE_ENTRY: &str = "testsprite_tests/tmp/config.json";
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn paths_match_testsprite_layout() {
+        let p = super::Paths::new("/repo");
+        assert_eq!(p.dir(), std::path::PathBuf::from("/repo/testsprite_tests"));
+        assert_eq!(
+            p.code_summary(),
+            std::path::PathBuf::from("/repo/testsprite_tests/tmp/code_summary.yaml")
+        );
+        assert_eq!(
+            p.standard_prd(),
+            std::path::PathBuf::from("/repo/testsprite_tests/standard_prd.json")
+        );
+        assert_eq!(
+            p.frontend_test_plan(),
+            std::path::PathBuf::from("/repo/testsprite_tests/testsprite_frontend_test_plan.json")
+        );
+        assert_eq!(
+            p.test_report(),
+            std::path::PathBuf::from("/repo/testsprite_tests/testsprite-mcp-test-report.md")
+        );
+    }
+}
