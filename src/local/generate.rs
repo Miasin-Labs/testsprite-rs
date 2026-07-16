@@ -154,6 +154,58 @@ pub async fn generate(
                 quarantined: Vec::new(),
             });
         }
+
+        // Not a runnable code summary — try the tolerant PRD ingester. A loose
+        // third-party `standard_prd.json` gets normalized, endpoints recovered
+        // from wherever they hide, and `testCredentials` / `test_environment`
+        // seeded into variables. `ingest` returns None for a real code summary
+        // (top-level `api_endpoints`), so the path above stays authoritative.
+        if let Some(ingested) = crate::local::prd_ingest::ingest(&summary) {
+            let seeded = seed_ingested_vars(root, &ingested);
+            let mut planned = crate::server::engine::plan_from_code_summary(&ingested.summary);
+            if !planned.is_empty() {
+                if opts.views.contains(&Perspective::Boundary) {
+                    planned.extend(crate::server::engine::boundary_cases(&ingested.summary));
+                }
+                let cases: Vec<Value> = planned
+                    .into_iter()
+                    .map(|case| {
+                        json!({
+                            "id": case.id,
+                            "title": case.title,
+                            "description": case.description,
+                            "kind": "backend",
+                            "spec": case.spec,
+                        })
+                    })
+                    .collect();
+                let source = format!("from:{} (ingested PRD, recovered endpoints)", p.display());
+                let prd_id = persist_prd(
+                    root,
+                    &source,
+                    &ingested.prd,
+                    &cases,
+                    Some(TestKind::Backend),
+                )
+                .await?;
+                let test_ids =
+                    store_cases(root, cases, Some(TestKind::Backend), Some(&prd_id)).await?;
+                if seeded > 0 {
+                    eprintln!("generate: seeded {seeded} PRD variable(s) into variables.json");
+                }
+                return Ok(GenSummary {
+                    prd_id: Some(prd_id),
+                    test_ids,
+                    quarantined: Vec::new(),
+                });
+            }
+            // No endpoints to run deterministically: fall through to the LLM
+            // path below, which plans from the same PRD. Credentials are
+            // already seeded so generated frontend flows can reference them.
+            if seeded > 0 {
+                eprintln!("generate: seeded {seeded} PRD variable(s) into variables.json");
+            }
+        }
     }
 
     // --from / --instruction -> LLM (needs a key).
@@ -206,6 +258,108 @@ async fn screen_if(
     Ok(crate::local::accept::screen(root, ids, model)
         .await?
         .quarantined)
+}
+
+/// What an explicit `project ingest-prd` run found + did.
+pub struct IngestReport {
+    pub endpoints: usize,
+    pub requirements: usize,
+    pub credentials: usize,
+    pub timing_rules: usize,
+    pub has_test_data_strategy: bool,
+    pub seeded_vars: usize,
+    pub prd_id: Option<String>,
+    pub plan_ids: Vec<String>,
+}
+
+/// Explicit entry point for `project ingest-prd <file>`: normalize a loose
+/// PRD, recover endpoints, seed `testCredentials` / `test_environment` into
+/// variables (non-clobbering), and — when `persist` — store the normalized PRD
+/// plus the recovered deterministic plan so `test run` / `test report` work
+/// against it immediately.
+pub async fn ingest_prd_file(
+    root: &Path,
+    file: &Path,
+    persist: bool,
+) -> anyhow::Result<IngestReport> {
+    let value = read_summary_value(file)?;
+    let Some(ingested) = crate::local::prd_ingest::ingest(&value) else {
+        anyhow::bail!(
+            "{} looks like a runnable code summary (top-level api_endpoints) — use \
+             `test generate --from {}` instead",
+            file.display(),
+            file.display()
+        )
+    };
+    let seeded_vars = seed_ingested_vars(root, &ingested);
+    let endpoints = ingested
+        .summary
+        .get("api_endpoints")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+
+    let (prd_id, plan_ids) = if persist {
+        let mut planned = crate::server::engine::plan_from_code_summary(&ingested.summary);
+        if opts_boundary_default() {
+            planned.extend(crate::server::engine::boundary_cases(&ingested.summary));
+        }
+        let cases: Vec<Value> = planned
+            .into_iter()
+            .map(|case| {
+                json!({
+                    "id": case.id,
+                    "title": case.title,
+                    "description": case.description,
+                    "kind": "backend",
+                    "spec": case.spec,
+                })
+            })
+            .collect();
+        let source = format!("ingest-prd:{}", file.display());
+        let id = persist_prd(
+            root,
+            &source,
+            &ingested.prd,
+            &cases,
+            Some(TestKind::Backend),
+        )
+        .await?;
+        let ids = store_cases(root, cases, Some(TestKind::Backend), Some(&id)).await?;
+        (Some(id), ids)
+    } else {
+        (None, Vec::new())
+    };
+
+    Ok(IngestReport {
+        endpoints,
+        requirements: ingested.requirements.len(),
+        credentials: ingested.credentials.len(),
+        timing_rules: ingested.timing_rules.len(),
+        has_test_data_strategy: ingested.test_data_strategy.is_some(),
+        seeded_vars,
+        prd_id,
+        plan_ids,
+    })
+}
+
+/// Whether the default perspective set includes boundary probes (it does).
+fn opts_boundary_default() -> bool {
+    GenOpts::default().views.contains(&Perspective::Boundary)
+}
+
+/// Seed an ingested PRD's `testCredentials` / `test_environment` into
+/// `variables.json` without clobbering the user's existing values. Returns the
+/// number of keys written. Best-effort — a seeding failure never fails
+/// generation.
+fn seed_ingested_vars(root: &Path, ingested: &crate::local::prd_ingest::IngestedPrd) -> usize {
+    let seeds = ingested.variable_seeds();
+    if seeds.is_empty() {
+        return 0;
+    }
+    crate::local::project::seed_variables_missing(root, &seeds)
+        .map(|w| w.len())
+        .unwrap_or(0)
 }
 
 fn read_summary_value(p: &Path) -> anyhow::Result<Value> {
@@ -834,6 +988,64 @@ api_endpoints:
         assert!(case["prdId"].as_str().is_some());
         let prds = crate::local::store::list_prds(&root).await.unwrap();
         assert_eq!(prds[0]["cases"], 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn ingests_loose_prd_recovers_endpoints_and_seeds_credentials() {
+        let root = crate::local::tmp_root();
+        let prd = root.join("standard_prd.json");
+        // A real-shape frontend PRD: no top-level api_endpoints; endpoints hide
+        // in code_summary.features, credentials + env present.
+        std::fs::write(
+            &prd,
+            r#"{
+              "projectName": "Demo",
+              "description": "demo app",
+              "code_summary": { "features": [
+                { "name": "Attack", "endpoints": ["POST /api/attack/fire", "GET /health"] }
+              ]},
+              "testCredentials": {
+                "adminUser": {"username":"admin","password":"admin123","role":"admin"}
+              },
+              "test_environment": {"frontend_url":"http://localhost:3000"}
+            }"#,
+        )
+        .unwrap();
+
+        let out = generate(
+            &root,
+            Some(&prd),
+            None,
+            None,
+            "no-such-model",
+            None,
+            &GenOpts::default(),
+        )
+        .await
+        .unwrap();
+
+        // Endpoints were recovered and turned into deterministic backend cases.
+        assert!(!out.test_ids.is_empty());
+        assert!(out.prd_id.is_some());
+        // Credentials + env seeded into variables.json (non-clobbering).
+        let vars = crate::local::project::load_variables(&root);
+        assert_eq!(
+            vars.get("adminUser_username").map(String::as_str),
+            Some("admin")
+        );
+        assert_eq!(
+            vars.get("adminUser_role").map(String::as_str),
+            Some("admin")
+        );
+        assert_eq!(
+            vars.get("frontend_url").map(String::as_str),
+            Some("http://localhost:3000")
+        );
+        // The persisted PRD is the normalized canonical shape.
+        let prds = crate::local::store::list_prds(&root).await.unwrap();
+        assert!(prds[0]["source"].as_str().unwrap().contains("ingested PRD"));
 
         std::fs::remove_dir_all(&root).ok();
     }

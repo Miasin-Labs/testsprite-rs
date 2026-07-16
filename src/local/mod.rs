@@ -23,6 +23,7 @@ pub mod guidelines;
 pub mod lint;
 pub mod lock;
 pub mod mutation;
+pub mod prd_ingest;
 pub mod project;
 pub mod rerun;
 pub mod retrieval;

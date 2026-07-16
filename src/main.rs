@@ -324,6 +324,16 @@ enum ProjectCmd {
         /// Shell command that starts the app on the project's target URL.
         command: String,
     },
+    /// Ingest a loose `standard_prd.json` (any real TestSprite shape): normalize
+    /// it, recover endpoints, and seed `testCredentials` / `test_environment`
+    /// into variables.json (existing values are never overwritten).
+    IngestPrd {
+        /// Path to a standard_prd.json (or any PRD-shaped JSON).
+        file: PathBuf,
+        /// Persist the normalized PRD + recovered plan (like `test generate`).
+        #[arg(long)]
+        persist: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1008,6 +1018,39 @@ async fn run_project(cmd: ProjectCmd) -> Result<()> {
         ProjectCmd::SetStart { command } => {
             local::project::set_start(&root, &command).await?;
             println!("start command set — `testsprite-rs test run --serve` will use it");
+            Ok(())
+        }
+        ProjectCmd::IngestPrd { file, persist } => {
+            let r = local::generate::ingest_prd_file(&root, &file, persist).await?;
+            println!(
+                "ingested {}: {} endpoint(s), {} requirement(s), {} credential role(s){}",
+                file.display(),
+                r.endpoints,
+                r.requirements,
+                r.credentials,
+                if r.timing_rules > 0 {
+                    format!(", {} timing rule(s)", r.timing_rules)
+                } else {
+                    String::new()
+                }
+            );
+            if r.has_test_data_strategy {
+                println!("  test_data_strategy carried into the PRD (seeds per-case at run time)");
+            }
+            if r.seeded_vars > 0 {
+                println!(
+                    "  seeded {} variable(s) into variables.json (existing values untouched)",
+                    r.seeded_vars
+                );
+            }
+            if let Some(id) = &r.prd_id {
+                println!(
+                    "  persisted PRD {id} + {} recovered test case(s)",
+                    r.plan_ids.len()
+                );
+            } else {
+                println!("  (dry run — pass --persist to store the normalized PRD + plan)");
+            }
             Ok(())
         }
     }

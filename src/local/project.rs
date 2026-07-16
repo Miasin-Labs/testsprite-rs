@@ -160,6 +160,38 @@ pub fn set_variable(
     Ok(vars)
 }
 
+/// Seed several `key=value` pairs into `variables.json` at once, WITHOUT
+/// overwriting keys the user already set (in either `.testsprite.env` or
+/// `variables.json`). Returns the keys actually written. Used to seed PRD
+/// `testCredentials` / `test_environment` so a user's local overrides always
+/// win. Serialization matches [`set_variable`] exactly (one shared writer).
+pub fn seed_variables_missing(
+    root: &Path,
+    pairs: &[(String, String)],
+) -> anyhow::Result<Vec<String>> {
+    let existing = load_variables(root);
+    let mut vars = existing.clone();
+    let mut written = Vec::new();
+    for (k, v) in pairs {
+        if existing.contains_key(k) || v.is_empty() {
+            continue;
+        }
+        vars.insert(k.clone(), v.clone());
+        written.push(k.clone());
+    }
+    if written.is_empty() {
+        return Ok(written);
+    }
+    let dir = super::ts_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    let ordered: std::collections::BTreeMap<&String, &String> = vars.iter().collect();
+    std::fs::write(
+        dir.join("variables.json"),
+        serde_json::to_string_pretty(&ordered)? + "\n",
+    )?;
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +257,36 @@ mod tests {
         assert_eq!(vars["TOKEN"], "secret token");
         assert_eq!(vars["id"], "from-json");
         assert_eq!(vars["n"], "7");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn seed_variables_missing_never_clobbers_user_values() {
+        let root = crate::local::tmp_root();
+        // User already set adminUser_password in variables.json.
+        set_variable(&root, "adminUser_password", "user-secret").unwrap();
+
+        let written = seed_variables_missing(
+            &root,
+            &[
+                ("adminUser_username".to_string(), "admin".to_string()),
+                (
+                    "adminUser_password".to_string(),
+                    "seeded-should-lose".to_string(),
+                ),
+                ("empty_skipped".to_string(), String::new()),
+            ],
+        )
+        .unwrap();
+
+        // Only the genuinely-new, non-empty key is written.
+        assert_eq!(written, vec!["adminUser_username".to_string()]);
+        let vars = load_variables(&root);
+        assert_eq!(vars["adminUser_username"], "admin");
+        // The user's pre-existing value survives; the seed did not overwrite it.
+        assert_eq!(vars["adminUser_password"], "user-secret");
+        assert!(!vars.contains_key("empty_skipped"));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

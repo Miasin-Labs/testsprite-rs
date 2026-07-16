@@ -104,64 +104,138 @@ fn interesting_file(path: &Path) -> bool {
     )
 }
 
-fn detect_stack(root: &Path, files: &[PathBuf]) -> Vec<Value> {
-    let mut stack = BTreeSet::new();
+/// Detect the tech stack as flat, human-readable strings — the shape real
+/// TestSprite emits (`["TypeScript", "Next.js 14", "Tailwind CSS 4"]`). Base
+/// languages come from file extensions; framework entries carry the declared
+/// version pulled from `package.json` / `Cargo.toml` when available.
+fn detect_stack(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut stack: BTreeSet<String> = BTreeSet::new();
     for f in files {
-        match f.to_string_lossy().as_ref() {
-            "Cargo.toml" => {
-                stack.insert("rust");
-                if file_contains(root.join(f), "axum") {
-                    stack.insert("axum");
-                }
-                if file_contains(root.join(f), "sqlx") {
-                    stack.insert("sqlx");
-                }
-                if file_contains(root.join(f), "tokio") {
-                    stack.insert("tokio");
-                }
+        match f.extension().and_then(|e| e.to_str()) {
+            Some("rs") => {
+                stack.insert("Rust".into());
             }
-            "package.json" => {
-                stack.insert("node");
-                if file_contains(root.join(f), "react") {
-                    stack.insert("react");
-                }
-                if file_contains(root.join(f), "next") {
-                    stack.insert("nextjs");
-                }
-                if file_contains(root.join(f), "playwright") {
-                    stack.insert("playwright");
-                }
+            Some("ts" | "tsx") => {
+                stack.insert("TypeScript".into());
             }
-            "pyproject.toml" => {
-                stack.insert("python");
+            Some("js" | "jsx") => {
+                stack.insert("JavaScript".into());
             }
-            "go.mod" => {
-                stack.insert("go");
+            Some("py") => {
+                stack.insert("Python".into());
             }
-            _ => match f.extension().and_then(|e| e.to_str()) {
-                Some("rs") => {
-                    stack.insert("rust");
-                }
-                Some("ts" | "tsx") => {
-                    stack.insert("typescript");
-                }
-                Some("js" | "jsx") => {
-                    stack.insert("javascript");
-                }
-                Some("py") => {
-                    stack.insert("python");
-                }
-                Some("go") => {
-                    stack.insert("go");
-                }
-                _ => {}
-            },
+            Some("go") => {
+                stack.insert("Go".into());
+            }
+            _ => {}
         }
     }
-    stack
-        .into_iter()
-        .map(|name| json!({"name": name}))
-        .collect()
+    for f in files {
+        match f.to_string_lossy().as_ref() {
+            "package.json" => collect_node_stack(&root.join(f), &mut stack),
+            "Cargo.toml" => collect_cargo_stack(&root.join(f), &mut stack),
+            "pyproject.toml" => {
+                stack.insert("Python".into());
+            }
+            "go.mod" => {
+                stack.insert("Go".into());
+            }
+            _ => {}
+        }
+    }
+    stack.into_iter().collect()
+}
+
+/// npm dependency name -> display label. Only frameworks worth surfacing in a
+/// stack summary; utility packages are ignored.
+const NODE_FRAMEWORKS: &[(&str, &str)] = &[
+    ("next", "Next.js"),
+    ("react", "React"),
+    ("vue", "Vue"),
+    ("svelte", "Svelte"),
+    ("@angular/core", "Angular"),
+    ("express", "Express"),
+    ("@nestjs/core", "NestJS"),
+    ("tailwindcss", "Tailwind CSS"),
+    ("three", "Three.js"),
+    ("vite", "Vite"),
+    ("@playwright/test", "Playwright"),
+    ("playwright", "Playwright"),
+    ("typescript", "TypeScript"),
+];
+
+fn collect_node_stack(path: &Path, stack: &mut BTreeSet<String>) {
+    stack.insert("Node.js".into());
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(pkg) = serde_json::from_str::<Value>(&body) else {
+        return;
+    };
+    for section in ["dependencies", "devDependencies"] {
+        let Some(deps) = pkg.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, label) in NODE_FRAMEWORKS {
+            if let Some(ver) = deps.get(*name).and_then(Value::as_str) {
+                stack.insert(with_version(label, ver));
+            }
+        }
+    }
+}
+
+/// Cargo crate name -> display label.
+const CARGO_CRATES: &[(&str, &str)] = &[
+    ("axum", "Axum"),
+    ("actix-web", "Actix Web"),
+    ("rocket", "Rocket"),
+    ("warp", "Warp"),
+    ("tokio", "Tokio"),
+    ("sqlx", "SQLx"),
+    ("diesel", "Diesel"),
+    ("serde", "Serde"),
+    ("reqwest", "reqwest"),
+];
+
+fn collect_cargo_stack(path: &Path, stack: &mut BTreeSet<String>) {
+    stack.insert("Rust".into());
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(manifest) = toml::from_str::<toml::Value>(&body) else {
+        return;
+    };
+    let Some(deps) = manifest.get("dependencies").and_then(|v| v.as_table()) else {
+        return;
+    };
+    for (name, label) in CARGO_CRATES {
+        let Some(dep) = deps.get(*name) else { continue };
+        // A dependency value is either a version string or a table with a
+        // `version` field (`{ version = "1", features = [...] }`).
+        let ver = dep
+            .as_str()
+            .or_else(|| dep.get("version").and_then(|v| v.as_str()));
+        match ver {
+            Some(v) => stack.insert(with_version(label, v)),
+            None => stack.insert((*label).to_string()),
+        };
+    }
+}
+
+/// Format `"Label major"` from a semver-ish requirement, dropping range
+/// operators and pre-release/patch noise (`"^14.2.1"` -> `"Next.js 14"`). A
+/// version we can't parse a leading number from yields just the label.
+fn with_version(label: &str, req: &str) -> String {
+    let digits: String = req
+        .trim_start_matches(['^', '~', '>', '=', '<', ' ', 'v'])
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} {digits}")
+    }
 }
 
 fn group_features(files: &[PathBuf]) -> Vec<Value> {
@@ -173,8 +247,23 @@ fn group_features(files: &[PathBuf]) -> Vec<Value> {
     }
     groups
         .into_iter()
-        .map(|(name, files)| json!({"name": name, "files": files}))
+        .map(|(name, files)| {
+            json!({
+                "name": name,
+                "description": feature_description(&name, &files),
+                "files": files,
+            })
+        })
         .collect()
+}
+
+/// A short, honest description for a deterministically-grouped feature: what it
+/// is and how big. Matches real code_summary's `{name, description, files}`
+/// shape without pretending to semantic knowledge we don't have.
+fn feature_description(name: &str, files: &[String]) -> String {
+    let n = files.len();
+    let unit = if n == 1 { "file" } else { "files" };
+    format!("{name} module spanning {n} {unit}.")
 }
 
 fn feature_name(rel: &str) -> String {
@@ -349,10 +438,6 @@ fn file_kind(path: &Path) -> &'static str {
     }
 }
 
-fn file_contains(path: PathBuf, needle: &str) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|s| s.contains(needle))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,7 +447,7 @@ mod tests {
         let root = crate::local::tmp_root();
         std::fs::write(
             root.join("Cargo.toml"),
-            "[dependencies]\naxum=\"1\"\ntokio=\"1\"",
+            "[dependencies]\naxum=\"1.2\"\ntokio={version=\"1\",features=[\"full\"]}",
         )
         .unwrap();
         std::fs::create_dir_all(root.join("src/routes")).unwrap();
@@ -373,13 +458,54 @@ mod tests {
         .unwrap();
 
         let summary = generate(&root).unwrap();
-        assert!(summary["tech_stack"].to_string().contains("rust"));
-        assert!(summary["tech_stack"].to_string().contains("axum"));
+        // Flat, versioned tech strings — the real code_summary shape. Versions
+        // are pulled from Cargo.toml, including the `{version=...}` table form.
+        let stack = summary["tech_stack"].as_array().unwrap();
+        let stack: Vec<&str> = stack.iter().filter_map(Value::as_str).collect();
+        assert!(stack.contains(&"Rust"));
+        assert!(stack.contains(&"Axum 1"));
+        assert!(stack.contains(&"Tokio 1"));
+        // Features carry a name + description + files.
         assert!(summary["features"].to_string().contains("users"));
+        assert!(summary["features"][0].get("description").is_some());
         assert!(summary["api_endpoints"].to_string().contains("/users"));
         assert!(summary["api_endpoints"].to_string().contains("POST"));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn node_stack_pulls_framework_versions_from_package_json() {
+        let root = crate::local::tmp_root();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"next":"^14.2.1","react":"18.2.0","tailwindcss":"~4.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("app.tsx"), "export const x = 1;").unwrap();
+
+        let summary = generate(&root).unwrap();
+        let stack: Vec<String> = summary["tech_stack"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(stack.contains(&"TypeScript".to_string()));
+        assert!(stack.contains(&"Node.js".to_string()));
+        assert!(stack.contains(&"Next.js 14".to_string()));
+        assert!(stack.contains(&"React 18".to_string()));
+        assert!(stack.contains(&"Tailwind CSS 4".to_string()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn with_version_strips_range_operators() {
+        assert_eq!(with_version("Next.js", "^14.2.1"), "Next.js 14");
+        assert_eq!(with_version("React", "18.2.0"), "React 18");
+        assert_eq!(with_version("Tailwind CSS", "~4.0"), "Tailwind CSS 4");
+        assert_eq!(with_version("Vite", "latest"), "Vite");
     }
 
     #[test]
