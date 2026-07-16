@@ -7,6 +7,18 @@
 
 use std::env;
 
+/// Default model for local LLM-backed planning/analysis.
+///
+/// User/account-specific model names are allowed; override with
+/// `TESTSPRITE_MODEL` (or `TESTSPRITE_DEFAULT_MODEL`). The fallback follows the
+/// repo owner's preferred Codex model; if unavailable in another account,
+/// callers can pass `--model` explicitly.
+pub fn default_model() -> String {
+    env::var("TESTSPRITE_MODEL")
+        .or_else(|_| env::var("TESTSPRITE_DEFAULT_MODEL"))
+        .unwrap_or_else(|_| "gpt-5.3-codex".to_string())
+}
+
 /// Main REST API base. Auth via `Authorization: Bearer <API_KEY>`.
 pub fn api_url() -> String {
     env::var("API_URL").unwrap_or_else(|_| "https://api.testsprite.com".to_string())

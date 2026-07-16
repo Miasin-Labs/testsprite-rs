@@ -221,7 +221,7 @@ pub async fn adversarial(
     model: &str,
     store: bool,
 ) -> anyhow::Result<AuditSummary> {
-    let Some(llm) = LlmClient::from_env(model) else {
+    if crate::server::llm::resolve_key().is_none() {
         anyhow::bail!(
             "test audit needs an OpenAI key — set OPENAI_API_KEY or ~/.config/jfc/credentials.toml [openai].api_key"
         )
@@ -240,13 +240,59 @@ pub async fn adversarial(
         "latest_results": latest_results,
         "coverage_gaps": coverage,
     });
-    let cases = llm.generate_adversarial_tests(&context).await?;
+    let mut cases = Vec::new();
+    let mut errors = Vec::new();
+    for model in model_list(model) {
+        let Some(llm) = LlmClient::from_env(&model) else {
+            continue;
+        };
+        match llm.generate_adversarial_tests(&context).await {
+            Ok(mut proposed) => {
+                for c in &mut proposed {
+                    if c.is_object() {
+                        c["modelSource"] = json!(model);
+                    }
+                }
+                cases.extend(proposed);
+            }
+            Err(e) => errors.push(format!("{model}: {e}")),
+        }
+    }
+    cases = dedupe_cases(cases);
+    if cases.is_empty() && !errors.is_empty() {
+        anyhow::bail!("adversarial planning failed: {}", errors.join("; "));
+    }
     let test_ids = if store {
         store_cases(root, cases.clone(), None, None).await?
     } else {
         Vec::new()
     };
     Ok(AuditSummary { cases, test_ids })
+}
+
+fn model_list(model: &str) -> Vec<String> {
+    model
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+}
+
+fn dedupe_cases(cases: Vec<Value>) -> Vec<Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for case in cases {
+        let key = case
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| case.to_string());
+        if seen.insert(key) {
+            out.push(case);
+        }
+    }
+    out
 }
 
 /// Shared: ask the LLM for one case per unit (capped at 40) and store them.
@@ -364,5 +410,25 @@ api_endpoints:
         assert_eq!(prds[0]["cases"], 1);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn audit_model_list_splits_comma_separated_models() {
+        assert_eq!(
+            model_list("gpt-5.3-codex, gpt-5.5"),
+            vec!["gpt-5.3-codex".to_string(), "gpt-5.5".to_string()]
+        );
+    }
+
+    #[test]
+    fn audit_dedupe_cases_by_title() {
+        let cases = vec![
+            json!({"title":"same","modelSource":"a"}),
+            json!({"title":"same","modelSource":"b"}),
+            json!({"title":"other"}),
+        ];
+        let out = dedupe_cases(cases);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["modelSource"], "a");
     }
 }

@@ -28,7 +28,7 @@ fn tool_list() -> Value {
               "description": "Autonomous exploratory frontend QA: open a live page with Playwright, inventory visible inputs/buttons/links/headings, and generate deterministic frontend planSteps candidates. Set store=true to add them to the local test DB. interactions=true also clicks visible controls on fresh pages and generates action+assertion candidates (opt-in because clicks can mutate state).",
               "inputSchema": obj_schema(&[("url","string"),("store","boolean"),("depth","number"),("limit","number"),("interactions","boolean")]) },
             { "name": "testsprite_audit",
-              "description": "Use TestSprite's LLM to adversarially propose high-signal QA tests from code summary, stored tests, latest results, and coverage gaps. Set store=true to persist proposed cases.",
+              "description": "Use TestSprite's LLM to adversarially propose high-signal QA tests from code summary, stored tests, latest results, and coverage gaps. Set store=true to persist proposed cases. `model` may be comma-separated (e.g. gpt-5.3-codex,gpt-5.5) to run side-by-side and merge.",
               "inputSchema": obj_schema(&[("path","string"),("model","string"),("store","boolean")]) },
             { "name": "testsprite_run",
               "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",
@@ -116,6 +116,13 @@ fn obj_schema(fields: &[(&str, &str)]) -> Value {
     json!({ "type": "object", "properties": props })
 }
 
+fn arg_model(args: &Value) -> std::borrow::Cow<'_, str> {
+    args.get("model")
+        .and_then(|v| v.as_str())
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| std::borrow::Cow::Owned(crate::envs::default_model()))
+}
+
 /// Dispatch a `tools/call` to the matching implementation.
 async fn call_tool(name: &str, args: &Value) -> Result<Value> {
     let project_path = args
@@ -156,14 +163,11 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "testsprite_bootstrap" => bootstrap(&project_path, args).await,
         "testsprite_generate" => {
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let root = std::env::current_dir()?;
             let out = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
-                crate::local::generate::generate_changed(&root, since, model).await?
+                crate::local::generate::generate_changed(&root, since, model.as_ref()).await?
             } else {
                 let kind = args
                     .get("type")
@@ -178,7 +182,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                     args.get("doc")
                         .and_then(|v| v.as_str())
                         .map(std::path::Path::new),
-                    model,
+                    model.as_ref(),
                     kind,
                 )
                 .await?
@@ -211,10 +215,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "testsprite_audit" => {
             let root = std::env::current_dir()?;
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let scan = args
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -223,17 +224,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             let out = crate::local::generate::adversarial(
                 &root,
                 &scan,
-                model,
+                model.as_ref(),
                 args.get("store").and_then(|v| v.as_bool()).unwrap_or(false),
             )
             .await?;
             Ok(json!({ "proposed": out.cases.len(), "cases": out.cases, "stored": out.test_ids }))
         }
         "testsprite_run" => {
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let fix = args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
             let root = std::env::current_dir()?;
             let changed_mode = args.get("changed").and_then(|v| v.as_bool()) == Some(true);
@@ -281,9 +279,17 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             {
                 crate::local::store::assert_prds_approved(&root, &ids).await?;
             }
-            let results =
-                crate::local::run::run_collect(&root, &ids, None, model, fix, None, 1, serve)
-                    .await?;
+            let results = crate::local::run::run_collect(
+                &root,
+                &ids,
+                None,
+                model.as_ref(),
+                fix,
+                None,
+                1,
+                serve,
+            )
+            .await?;
             match selection_note {
                 Some(mut note) => {
                     note["results"] = json!(results);
@@ -294,10 +300,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "testsprite_loop" => {
             let root = std::env::current_dir()?;
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let opts = crate::local::cycle::CycleOpts {
                 changed: args
                     .get("changed")
@@ -308,7 +311,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                     .get("generate")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                model,
+                model: model.as_ref(),
                 fix: args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false),
                 serve: args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false),
                 require_approved_prd: args
@@ -401,10 +404,7 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             Ok(json!({ "id": id, "title": title, "renamed": true }))
         }
         "testsprite_agent_message" => {
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let root = std::env::current_dir()?;
             let message = args
                 .get("message")
@@ -415,13 +415,17 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .get("auto_approve")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            crate::local::agent::message(&root, conversation_id, message, model, auto_approve).await
+            crate::local::agent::message(
+                &root,
+                conversation_id,
+                message,
+                model.as_ref(),
+                auto_approve,
+            )
+            .await
         }
         "testsprite_agent_approve" => {
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let root = std::env::current_dir()?;
             let conversation_id = args
                 .get("conversation_id")
@@ -435,7 +439,8 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .get("approve")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            crate::local::agent::resolve(&root, conversation_id, action_id, approve, model).await
+            crate::local::agent::resolve(&root, conversation_id, action_id, approve, model.as_ref())
+                .await
         }
         "testsprite_agent_history" => {
             let root = std::env::current_dir()?;
@@ -455,13 +460,10 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
             let runs = args.get("runs").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            let model = args
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini");
+            let model = arg_model(args);
             let serve = args.get("serve").and_then(|v| v.as_bool()).unwrap_or(false);
             Ok(serde_json::to_value(
-                crate::local::flaky::flaky(&root, id, runs, model, serve).await?,
+                crate::local::flaky::flaky(&root, id, runs, model.as_ref(), serve).await?,
             )?)
         }
         "testsprite_run_history" => {

@@ -72,7 +72,7 @@ enum Command {
         #[arg(long, default_value_t = 8787)]
         port: u16,
         /// OpenAI model for PRD/plan/test-code generation.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Testing modality: backend | frontend | mcp | rust.
         #[arg(long, default_value = "backend")]
@@ -100,7 +100,7 @@ enum Command {
         #[arg(long)]
         url: Option<String>,
         /// OpenAI model for spec-less LLM execution and failure analysis.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
     },
     /// The regression loop in one call: (optionally) generate tests for changed
@@ -120,7 +120,7 @@ enum Command {
         #[arg(long)]
         generate: bool,
         /// OpenAI model for generation, spec-less execution, and failure analysis.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// On failure, also write a fix recommendation to testsprite_tests/fixes/.
         #[arg(long)]
@@ -227,7 +227,7 @@ enum AgentCmd {
         #[arg(long)]
         conversation: Option<String>,
         /// OpenAI model for the conversational planner.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Auto-execute the proposed action immediately (no separate approve step).
         #[arg(long)]
@@ -246,7 +246,7 @@ enum AgentCmd {
         #[arg(long)]
         reject: bool,
         /// OpenAI model used when the action executes.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
     },
     /// Show a conversation's messages and pending actions.
@@ -329,7 +329,7 @@ enum TestCmd {
         #[arg(long)]
         url: Option<String>,
         /// OpenAI model for spec-less LLM execution and failure analysis.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Print a single JSON array of results instead of PASS/FAIL lines.
         #[arg(long)]
@@ -369,7 +369,7 @@ enum TestCmd {
         #[arg(long)]
         url: Option<String>,
         /// OpenAI model for failure analysis and healing.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Regenerate and re-run cases whose failure is diagnosed as fragility.
         #[arg(long)]
@@ -393,7 +393,7 @@ enum TestCmd {
         #[arg(long = "type")]
         kind: Option<String>,
         /// OpenAI model for PRD/plan generation.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// --cover: generate a test per function under --path (default cwd).
         #[arg(long)]
@@ -436,8 +436,8 @@ enum TestCmd {
         /// Path to scan for coverage gaps (default cwd).
         #[arg(long)]
         path: Option<PathBuf>,
-        /// OpenAI model for adversarial planning.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        /// OpenAI model(s) for adversarial planning. Comma-separate to run side-by-side and merge.
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Store proposed cases in the local DB.
         #[arg(long)]
@@ -553,7 +553,7 @@ enum TestCmd {
         id: String,
         #[arg(long, default_value_t = 5)]
         runs: usize,
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = crate::envs::default_model())]
         model: String,
         /// Start the target app before each replay; without it a backend test
         /// with nothing listening scores every run blocked ("inconclusive").
@@ -793,17 +793,9 @@ async fn run_schedule(cmd: ScheduleCmd) -> Result<()> {
                 println!("schedule '{name}': no tests in group '{}'", s.group);
                 return Ok(());
             }
+            let model = crate::envs::default_model();
             let code = local::run::run(
-                &root,
-                &ids,
-                None,
-                "gpt-4o-mini",
-                false,
-                false,
-                None,
-                1,
-                false,
-                false,
+                &root, &ids, None, &model, false, false, None, 1, false, false,
             )
             .await?;
             std::process::exit(code);

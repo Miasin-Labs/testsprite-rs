@@ -33,7 +33,7 @@ Run modes:
 testsprite-rs serve                    # stdio MCP server (default subcommand)
 testsprite-rs account | check          # verify API key / show account
 testsprite-rs generate-code-and-execute# console: tunnel → dispatch → poll → report
-testsprite-rs backend --port 8787 --model gpt-4o-mini --kind backend
+testsprite-rs backend --port 8787 --model "$TESTSPRITE_MODEL" --kind backend
 #   --kind ∈ { backend | frontend | mcp | rust }
 ```
 
@@ -79,6 +79,7 @@ deterministic). Code: `src/local/{project,store,run,generate}.rs`.
 | `TSEMCP_TUNNEL_PROXY_URL` | proxy handed to the cloud runner | `http://proxy.tun.testsprite.com:9090` |
 | `TSEMCP_TUNNEL_VERSION` | force tunnel version (0=ask, 1, 2) | `0` |
 | `OPENAI_API_KEY` | enables LLM mode in `backend` | falls back to deterministic engine |
+| `TESTSPRITE_MODEL` / `TESTSPRITE_DEFAULT_MODEL` | default local LLM model | `gpt-5.3-codex` |
 
 LLM mode also reads `~/.config/jfc/credentials.toml` → `[openai].api_key`.
 Every endpoint/value is env-overridable; defaults point at production.
@@ -272,7 +273,7 @@ covered locally: `project summarize` writes `testsprite_tests/tmp/code_summary.y
 patterns and HTTP **QUERY**); `test generate --from <summary>` creates backend
 `spec` cases **on-device** when `api_endpoints` exist, falling back to the LLM
 only when no runnable surface is present. `test audit --store` is the LLM-backed
-adversarial planner (assume broken; propose edge/security/regression tests).
+adversarial planner (assume broken; propose edge/security/regression tests; `--model a,b` runs multiple models and de-dupes by title).
 Backend QA supports multi-step `steps` with `.testsprite.env` / process-env
 `${VAR}` interpolation, `form`, `save` extraction, bearer auth, GraphQL shorthand,
 `expect_body`/`expect_json`/`expect_parses`, and read-after-write `then` chains.
