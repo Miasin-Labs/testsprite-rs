@@ -29,7 +29,7 @@ flowchart LR
    `testsprite_tests/tmp/code_summary.yaml` (tech stack, features/files,
    endpoints), mirroring the official MCP bootstrap step. Then use
    `testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml`
-   (LLM PRD/plan), `test generate --doc <openapi|postman|har>` (deterministic
+   (LLM PRD/plan), `test generate --doc <openapi|postman|har|graphql>` (deterministic
    API import), `test audit --store` (LLM adversarial QA: assume the app is
    wrong and propose high-signal runnable tests), or `test add`/`test import`
    for tests you wrote yourself.

@@ -1,6 +1,6 @@
-//! Parse structured API docs — Postman collections, OpenAPI/Swagger specs, and
-//! HAR captures — into deterministic `spec` test cases (`{method, path,
-//! expect_status?}`) plus a synthesized PRD. These run via `execute_spec`
+//! Parse structured API docs — Postman collections, OpenAPI/Swagger specs, HAR
+//! captures, and simple GraphQL SDL — into deterministic `spec` test cases plus
+//! a synthesized PRD. These run via `execute_spec`
 //! (reqwest) with NO OpenAI key and NO per-run codegen, and hit the project's
 //! live target URL (`concrete_path` seeds `{id}` from `variables.json`). When
 //! the input isn't a recognized structured format, callers fall back to the LLM
@@ -43,9 +43,13 @@ pub struct Extracted {
     pub prd: Value,
 }
 
-/// Try to parse `text` as a Postman collection, OpenAPI/Swagger spec, or HAR.
+/// Try to parse `text` as a Postman collection, OpenAPI/Swagger spec, HAR, or
+/// GraphQL SDL.
 /// `None` = not a recognized structured API doc (caller should LLM-normalize).
 pub fn extract(text: &str) -> Option<Extracted> {
+    if let Some(gql) = graphql_sdl(text) {
+        return Some(gql);
+    }
     let v: Value = serde_json::from_str(text)
         .ok()
         .or_else(|| serde_yaml::from_str(text).ok())?;
@@ -64,6 +68,194 @@ pub fn extract(text: &str) -> Option<Extracted> {
         return None;
     }
     Some(build(format, &endpoints))
+}
+
+struct GqlOperation {
+    kind: &'static str,
+    field: String,
+    selection: String,
+}
+
+fn graphql_sdl(text: &str) -> Option<Extracted> {
+    let mut ops = Vec::new();
+    for kind in ["Query", "Mutation"] {
+        let Some(body) = type_body(text, kind) else {
+            continue;
+        };
+        ops.extend(gql_operations(kind, body));
+    }
+    if ops.is_empty() {
+        return None;
+    }
+    Some(build_graphql(&ops))
+}
+
+fn gql_operations(kind: &'static str, body: &str) -> Vec<GqlOperation> {
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        let name_start = i;
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let name = &body[name_start..i];
+        let args_start = i;
+        if i < bytes.len() && bytes[i] == b'(' {
+            let mut depth = 1usize;
+            i += 1;
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        let args = &body[args_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b':' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let ret_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'#' {
+            i += 1;
+        }
+        let ret = &body[ret_start..i];
+        let line = format!("{name}{args}: {ret}");
+        if let Some(op) = gql_operation(kind, &line) {
+            out.push(op);
+        }
+    }
+    out
+}
+
+fn type_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!("type {name}");
+    let start = text.find(&marker)?;
+    let after = &text[start..];
+    let open = after.find('{')?;
+    let body = &after[open + 1..];
+    let close = body.find('}')?;
+    Some(&body[..close])
+}
+
+fn gql_operation(kind: &'static str, line: &str) -> Option<GqlOperation> {
+    let line = line.split('#').next().unwrap_or("").trim();
+    if line.is_empty() || line.starts_with('@') {
+        return None;
+    }
+    let (name_part, return_part) = split_gql_field(line)?;
+    // Skip fields with required args; we cannot invent safe values.
+    if let Some(args) = name_part
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        && args.0.contains('!')
+    {
+        return None;
+    }
+    let field = name_part
+        .split_once('(')
+        .map(|(name, _)| name)
+        .unwrap_or(name_part)
+        .trim();
+    if field.is_empty() || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let ret = return_part
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('!')
+        .trim();
+    let selection = match ret {
+        "String" | "ID" | "Int" | "Float" | "Boolean" => field.to_string(),
+        _ => format!("{field} {{ __typename }}"),
+    };
+    Some(GqlOperation {
+        kind,
+        field: field.to_string(),
+        selection,
+    })
+}
+
+fn split_gql_field(line: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 => return Some((&line[..idx], &line[idx + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn build_graphql(ops: &[GqlOperation]) -> Extracted {
+    let cases: Vec<Value> = ops
+        .iter()
+        .enumerate()
+        .map(|(i, op)| {
+            let op_kw = if op.kind == "Mutation" { "mutation" } else { "query" };
+            json!({
+                "id": format!("GQL{:03}", i + 1),
+                "title": format!("GraphQL {} {} succeeds", op_kw, op.field),
+                "description": format!("Execute GraphQL {op_kw} `{}` and require a response with no GraphQL errors.", op.field),
+                "kind": "backend",
+                "spec": {
+                    "graphql": {
+                        "query": format!("{op_kw} {{ {} }}", op.selection),
+                        "expect_no_errors": true
+                    }
+                }
+            })
+        })
+        .collect();
+    let features: Vec<Value> = ops
+        .iter()
+        .map(|op| {
+            json!({
+                "name": format!("GraphQL {} {}", op.kind, op.field),
+                "description": "Generated from GraphQL SDL operation inventory.",
+                "user_flows": [format!("{} {}", op.kind, op.field)],
+            })
+        })
+        .collect();
+    Extracted {
+        format: "graphql",
+        cases,
+        prd: json!({
+            "meta": {"project": "graphql", "prepared_by": "testsprite-rs structured GraphQL import"},
+            "product_overview": format!("GraphQL API with {} operation(s).", ops.len()),
+            "core_goals": ["Declared GraphQL operations execute without GraphQL errors."],
+            "features": features,
+        }),
+    }
 }
 
 fn is_postman(v: &Value) -> bool {
@@ -602,6 +794,29 @@ mod tests {
         assert_eq!(q["spec"]["method"], "QUERY");
         assert_eq!(q["spec"]["body"]["q"], "string");
         assert_eq!(q["spec"]["expect_status"], 200);
+    }
+
+    #[test]
+    fn extracts_graphql_sdl_operations() {
+        let doc = r#"
+          type Query {
+            me: User
+            version: String
+            needsArg(id: ID!): User
+          }
+          type Mutation {
+            refresh: Boolean
+          }
+          type User { id: ID! }
+        "#;
+        let ex = extract(doc).unwrap();
+        assert_eq!(ex.format, "graphql");
+        assert_eq!(ex.cases.len(), 3);
+        let text = serde_json::to_string(&ex.cases).unwrap();
+        assert!(text.contains("query { me { __typename } }"), "{text}");
+        assert!(text.contains("query { version }"), "{text}");
+        assert!(text.contains("mutation { refresh }"), "{text}");
+        assert!(!text.contains("needsArg"), "{text}");
     }
 
     #[test]

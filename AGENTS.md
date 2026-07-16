@@ -237,7 +237,7 @@ up to `TESTSPRITE_SERVE_READY_SECS`=30), runs the cases against the LIVE server,
 tears it down (`kill_on_drop` RAII — no orphan on early return/panic/SIGINT).
 
 **Structured API-doc import** — `test generate --doc <file>` first tries
-`apidoc::extract` (`src/local/apidoc.rs`): Postman collections, OpenAPI/Swagger
+`apidoc::extract` (`src/local/apidoc.rs`): Postman collections, OpenAPI/Swagger/GraphQL SDL
 (JSON **or** YAML), and HAR → deterministic `{method,path,expect_status?}` `spec`
 cases + a synthesized PRD, with **no OpenAI key and no per-run codegen** (they run
 via `execute_spec`/reqwest against the live target; `{{id}}`/`:id`/`{id}` normalize
