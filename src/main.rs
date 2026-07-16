@@ -519,6 +519,15 @@ enum TestCmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Write stored tests into testsprite_tests/TC001_Title.{py,js,json,sh}.
+    Materialize {
+        /// Materialize only this test id (repeatable); omit to materialize all.
+        #[arg(long)]
+        id: Vec<String>,
+        /// Output directory (default: testsprite_tests/).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Rename a stored test's title (fixes munged TC000 duplicates).
     Rename {
         #[arg()]
@@ -1293,6 +1302,14 @@ async fn run_test(cmd: TestCmd) -> Result<()> {
         TestCmd::Emit { id, out } => {
             local::store::emit(&root, &id, &out).await?;
             println!("wrote {}", out.display());
+            Ok(())
+        }
+        TestCmd::Materialize { id, out } => {
+            let paths = local::store::materialize(&root, &id, out.as_deref()).await?;
+            for p in &paths {
+                println!("wrote {}", p.display());
+            }
+            println!("materialized {} test artifact(s)", paths.len());
             Ok(())
         }
         TestCmd::Rename { id, title } => {

@@ -675,6 +675,77 @@ pub async fn emit(root: &Path, id: &str, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write stored tests into `testsprite_tests/TC001_Title.ext`-style files, like
+/// the official plugin's generated test-code folder. This is intentionally dumb:
+/// it mirrors the runnable artifact shape already present in each stored case.
+pub async fn materialize(
+    root: &Path,
+    ids: &[String],
+    out_dir: Option<&Path>,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let tests = if ids.is_empty() {
+        list(root).await?
+    } else {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(load_one(root, id).await?);
+        }
+        out
+    };
+    let dir = out_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| super::ts_dir(root));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut paths = Vec::new();
+    for test in tests {
+        let Some((body, ext)) = materialized_body(&test)? else {
+            continue;
+        };
+        let path = dir.join(format!(
+            "{}_{}.{}",
+            safe_file_part(&test.id),
+            safe_file_part(&test.title),
+            ext
+        ));
+        std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn materialized_body(test: &LocalTest) -> anyhow::Result<Option<(String, &'static str)>> {
+    let kind = test.kind.unwrap_or_default();
+    if let Some(code) = test.extra.get("code").and_then(Value::as_str)
+        && !code.trim().is_empty()
+    {
+        return Ok(Some((
+            code.to_string(),
+            match kind {
+                TestKind::Frontend => "js",
+                TestKind::Mcp => "json",
+                TestKind::Rust => "rs",
+                TestKind::Command => "sh",
+                TestKind::Backend => "py",
+            },
+        )));
+    }
+    if matches!(kind, TestKind::Backend) && test.spec.is_some() {
+        return Ok(Some((emit_source(test)?, "py")));
+    }
+    if let Some(steps) = test.extra.get("planSteps").or_else(|| test.extra.get("steps")) {
+        return Ok(Some((serde_json::to_string_pretty(steps)?, "json")));
+    }
+    Ok(None)
+}
+
+fn safe_file_part(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    out.trim_matches('_').chars().take(80).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +822,55 @@ mod tests {
             .await
             .expect_err("a shell line is not Rust source");
         assert!(err.to_string().contains("shell line"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn materialize_writes_official_style_test_files() {
+        let root = crate::local::tmp_root();
+        add_value(
+            &root,
+            serde_json::json!({
+                "id": "TC001",
+                "title": "GET /health responds",
+                "kind": "backend",
+                "spec": {"method": "GET", "path": "/health", "expect_status": 200}
+            }),
+        )
+        .await
+        .unwrap();
+        add_value(
+            &root,
+            serde_json::json!({
+                "id": "TC002",
+                "title": "command gate",
+                "kind": "command",
+                "code": "cargo test --quiet"
+            }),
+        )
+        .await
+        .unwrap();
+        add_value(
+            &root,
+            serde_json::json!({
+                "id": "TC003",
+                "title": "login flow",
+                "kind": "frontend",
+                "planSteps": [{"action": "goto", "url": "/login"}]
+            }),
+        )
+        .await
+        .unwrap();
+
+        let paths = materialize(&root, &[], None).await.unwrap();
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "TC001_GET__health_responds.py"), "{names:?}");
+        assert!(names.iter().any(|n| n == "TC002_command_gate.sh"), "{names:?}");
+        assert!(names.iter().any(|n| n == "TC003_login_flow.json"), "{names:?}");
 
         std::fs::remove_dir_all(&root).ok();
     }
