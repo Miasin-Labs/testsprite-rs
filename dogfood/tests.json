@@ -24,7 +24,7 @@
     "id": "df-generation-regressions",
     "title": "generation and auth-flow regression tests stay green",
     "kind": "command",
-    "description": "Pins TestSprite PRD/test generation seams: Responses-only models route correctly, LLM planner prompts keep OAuth/env-driven runnable cases, malformed generated command cases are lint-blocked, code summaries generate deterministic specs without LLM, and command tests inherit .testsprite.env variables.",
-    "code": "cargo test responses_api --quiet && cargo test prompt --quiet && cargo test command_tests_require_code_not_steps --quiet && cargo test from_code_summary_with_endpoints_generates_deterministic_specs_without_llm --quiet && cargo test injects_testsprite_variables_into_command_env --quiet"
+    "description": "Pins TestSprite PRD/test generation seams: Responses-only models route correctly, LLM planner prompts keep OAuth/env-driven runnable cases, malformed generated command cases are lint-blocked, code summaries generate deterministic specs without LLM, executed artifacts are mirrored into testsprite_tests, and command tests inherit .testsprite.env variables.",
+    "code": "cargo test responses_api --quiet && cargo test prompt --quiet && cargo test command_tests_require_code_not_steps --quiet && cargo test from_code_summary_with_endpoints_generates_deterministic_specs_without_llm --quiet && cargo test local::run::tests --quiet && cargo test injects_testsprite_variables_into_command_env --quiet"
   }
 ]

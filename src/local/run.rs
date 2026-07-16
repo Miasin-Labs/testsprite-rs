@@ -198,7 +198,7 @@ pub async fn run_collect(
                     );
                     let kind = t.kind.unwrap_or(default_kind);
                     store::write_result(root, &t.id, &outcome, None, kind).await?;
-                    report.push(build_entry(&t, &outcome, None, None, kind));
+                    report.push(build_entry(&t, &outcome, None, None, None, kind));
                 }
                 None => to_run.push(t),
             }
@@ -211,14 +211,16 @@ pub async fn run_collect(
                     failed_caps.insert(p);
                 }
             }
-            let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
             let kind = t.kind.unwrap_or(default_kind);
+            let code_path = write_executed_artifact(root, &t, &outcome, kind);
+            let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
             store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
             report.push(build_entry(
                 &t,
                 &outcome,
                 analysis.as_ref(),
                 fix_path.as_deref(),
+                code_path.as_deref(),
                 kind,
             ));
         }
@@ -227,14 +229,16 @@ pub async fn run_collect(
     // Teardown always runs (cleanup), sequentially, regardless of failures.
     for t in teardown {
         let outcome = run_one(&t, &ctx, default_kind).await;
-        let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
         let kind = t.kind.unwrap_or(default_kind);
+        let code_path = write_executed_artifact(root, &t, &outcome, kind);
+        let (analysis, fix_path) = post_process(&t, &outcome, &llm, fix, root).await;
         store::write_result(root, &t.id, &outcome, analysis.as_ref(), kind).await?;
         report.push(build_entry(
             &t,
             &outcome,
             analysis.as_ref(),
             fix_path.as_deref(),
+            code_path.as_deref(),
             kind,
         ));
     }
@@ -243,6 +247,50 @@ pub async fn run_collect(
         w.abort();
     }
     Ok(report)
+}
+
+fn write_executed_artifact(
+    root: &Path,
+    t: &LocalTest,
+    outcome: &Outcome,
+    kind: TestKind,
+) -> Option<String> {
+    if outcome.code.trim().is_empty() {
+        return None;
+    }
+    let dir = super::ts_dir(root);
+    std::fs::create_dir_all(&dir).ok()?;
+    let ext = artifact_ext(&outcome.code, kind);
+    let name = format!(
+        "{}_{}.{}",
+        safe_file_part(&t.id),
+        safe_file_part(&t.title),
+        ext
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, &outcome.code).ok()?;
+    Some(path.display().to_string())
+}
+
+fn safe_file_part(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    out.trim_matches('_').chars().take(80).collect()
+}
+
+fn artifact_ext(code: &str, kind: TestKind) -> &'static str {
+    if serde_json::from_str::<Value>(code).is_ok() {
+        return "json";
+    }
+    match kind {
+        TestKind::Backend => "py",
+        TestKind::Frontend => "js",
+        TestKind::Mcp => "json",
+        TestKind::Rust => "rs",
+        TestKind::Command => "sh",
+    }
 }
 
 /// Spawn a task that flips `flag` on SIGINT. The handler is registered at call
@@ -387,6 +435,7 @@ fn build_entry(
     outcome: &Outcome,
     analysis: Option<&Value>,
     fix_path: Option<&str>,
+    code_path: Option<&str>,
     kind: TestKind,
 ) -> Value {
     let mut entry = serde_json::json!({
@@ -407,5 +456,30 @@ fn build_entry(
     if let Some(p) = fix_path {
         entry["fixPath"] = serde_json::json!(p);
     }
+    if let Some(p) = code_path {
+        entry["codePath"] = serde_json::json!(p);
+    }
     entry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_file_part_strips_pathy_chars() {
+        assert_eq!(
+            safe_file_part("TC001 Login/Success ✅"),
+            "TC001_Login_Success"
+        );
+    }
+
+    #[test]
+    fn artifact_ext_keeps_backend_json_artifacts_json() {
+        assert_eq!(
+            artifact_ext(r#"{"kind":"testsprite-qa-artifact"}"#, TestKind::Backend),
+            "json"
+        );
+        assert_eq!(artifact_ext("import requests\n", TestKind::Backend), "py");
+    }
 }
