@@ -22,7 +22,7 @@ struct Endpoint {
 /// The pass criterion for an imported endpoint whose response status the doc
 /// does not pin down.
 ///
-/// Reads must simply succeed. Writes get the wider [`Band::Accepted`] because
+/// Reads/QUERY must simply succeed. Writes get the wider [`Band::Accepted`] because
 /// the body we send is a best-effort reconstruction and the server rejecting it
 /// (400/422) still proves the route exists and is wired. Neither band accepts
 /// 401/403/404/405: an endpoint that is missing or auth-walled is a failure,
@@ -232,7 +232,9 @@ fn postman_endpoints(v: &Value) -> Vec<Endpoint> {
     out
 }
 
-const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+const HTTP_METHODS: &[&str] = &[
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "QUERY",
+];
 
 fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
     let mut out = Vec::new();
@@ -249,9 +251,14 @@ fn openapi_endpoints(v: &Value) -> Vec<Endpoint> {
                 continue;
             }
             let is_write = matches!(m.as_str(), "POST" | "PUT" | "PATCH");
-            // Synthesize/lift a body for write methods so POST/PUT don't send an
-            // empty payload (-> spurious 400/422).
-            let body = if is_write { openapi_body(op, v) } else { None };
+            let may_have_body = is_write || m == "QUERY";
+            // Synthesize/lift a body for methods whose contract may include a
+            // request body. QUERY is safe/idempotent but often body-bearing.
+            let body = if may_have_body {
+                openapi_body(op, v)
+            } else {
+                None
+            };
             // Prefer the status the doc declares; otherwise fall back to a band.
             // Writes stay lenient about validation (our body is a guess) but,
             // like reads, still fail on 401/403/404/405.
@@ -578,6 +585,23 @@ mod tests {
         // but the relaxation stops there. A missing or auth-walled route is
         // still a failure, never a pass.
         assert_eq!(post["spec"]["expect_status"], "accepted");
+    }
+
+    #[test]
+    fn openapi_query_is_supported_and_can_have_a_body_without_write_relaxation() {
+        let doc = r#"{
+          "openapi": "3.0.0",
+          "paths": {"/search": {"query": {
+            "requestBody": {"content": {"application/json": {"schema": {
+              "type": "object", "properties": {"q": {"type": "string"}}
+            }}}},
+            "responses": {"200": {}}}}}
+        }"#;
+        let ex = extract(doc).unwrap();
+        let q = &ex.cases[0];
+        assert_eq!(q["spec"]["method"], "QUERY");
+        assert_eq!(q["spec"]["body"]["q"], "string");
+        assert_eq!(q["spec"]["expect_status"], 200);
     }
 
     #[test]

@@ -284,11 +284,13 @@ fn exported_http_method(line: &str) -> Option<&'static str> {
     for (needle, method) in [
         ("function delete", "DELETE"),
         ("function patch", "PATCH"),
+        ("function query", "QUERY"),
         ("function post", "POST"),
         ("function put", "PUT"),
         ("function get", "GET"),
         ("const delete", "DELETE"),
         ("const patch", "PATCH"),
+        ("const query", "QUERY"),
         ("const post", "POST"),
         ("const put", "PUT"),
         ("const get", "GET"),
@@ -327,6 +329,7 @@ fn method_hint(line: &str) -> &'static str {
     for (needle, method) in [
         ("delete", "DELETE"),
         ("patch", "PATCH"),
+        ("query", "QUERY"),
         ("post", "POST"),
         ("put", "PUT"),
         ("get", "GET"),
@@ -417,6 +420,23 @@ mod tests {
             vec![EndpointHit {
                 method: "POST",
                 path: "/api/login".to_string()
+            }]
+        );
+        assert_eq!(
+            endpoint_hits(
+                "export async function QUERY() {}",
+                "app/api/search/route.ts"
+            ),
+            vec![EndpointHit {
+                method: "QUERY",
+                path: "/api/search".to_string()
+            }]
+        );
+        assert_eq!(
+            endpoint_hits("app.query('/search', handler)", "server.js"),
+            vec![EndpointHit {
+                method: "QUERY",
+                path: "/search".to_string()
             }]
         );
     }

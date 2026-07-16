@@ -134,7 +134,11 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
     let has_graphql = spec.get("graphql").is_some();
 
     match spec.get("method").and_then(Value::as_str) {
-        Some(m) if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&m) => {}
+        Some(m)
+            if [
+                "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "QUERY",
+            ]
+            .contains(&m) => {}
         Some(m) => issues.push(Issue::Hard {
             field: "method",
             msg: format!("invalid spec.method {m:?}"),
@@ -180,4 +184,27 @@ fn check_backend_spec(spec: &Value) -> Vec<Issue> {
     }
 
     issues
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_spec_allows_query_method() {
+        let issues = check_backend_spec(&serde_json::json!({
+            "method": "QUERY",
+            "path": "/search"
+        }));
+        assert!(
+            !issues.iter().any(|i| matches!(
+                i,
+                Issue::Hard {
+                    field: "method",
+                    ..
+                }
+            )),
+            "QUERY is a real HTTP method and should lint cleanly"
+        );
+    }
 }
