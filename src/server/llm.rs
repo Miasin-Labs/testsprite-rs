@@ -517,9 +517,11 @@ impl LlmClient {
     ) -> Result<Vec<Value>> {
         let system = format!(
             "You are TestSprite's coverage-driven planner. Given a JSON array of functions \
-            {{name,file,branches,source?}}, produce one test case per function that exercises its \
-            inputs/outputs and its control-flow branches. {} Respond with JSON only: \
-            {{\"plan\":[{{\"id\":\"{}001\",\"title\":...,\"description\":\"what to feed the \
+            {{name,file,branches,source?,branch_conditions?}}, produce one test case per function \
+            that exercises its inputs/outputs and its control-flow branches. When \
+            `branch_conditions` is present, choose inputs that make EACH listed condition both \
+            true and false — target the branches, not just the function. {} Respond with JSON \
+            only: {{\"plan\":[{{\"id\":\"{}001\",\"title\":...,\"description\":\"what to feed the \
             function and assert, covering its branches\"}}]}} — ids MUST use the {} prefix.",
             perspective.prompt_clause(),
             perspective.id_prefix(),

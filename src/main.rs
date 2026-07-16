@@ -787,12 +787,12 @@ async fn main() -> Result<()> {
             if regression {
                 println!(
                     "REGRESSION (threshold {:.4})",
-                    local::visual::REGRESSION_THRESHOLD
+                    local::visual::regression_threshold()
                 );
             } else {
                 println!(
                     "OK (within threshold {:.4})",
-                    local::visual::REGRESSION_THRESHOLD
+                    local::visual::regression_threshold()
                 );
             }
             std::process::exit(if regression { 1 } else { 0 });

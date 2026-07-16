@@ -226,6 +226,109 @@ fn truncate_chars(s: &str, cap: usize) -> String {
     out
 }
 
+/// The text of each control-flow CONDITION in a function body — the `if`/
+/// `while`/`match`-scrutinee expressions a test must make both true and false
+/// to cover every branch. A function is "covered" at the unit level while half
+/// its branches stay unexercised; enumerating the conditions turns generation
+/// from per-function into path-targeted (the largest single branch-coverage
+/// driver in the SBST-hybrid literature). Deduped, source order, capped.
+fn branch_conditions(node: Node, lang: Lang, src: &str) -> Vec<String> {
+    // The child node that holds the deciding expression, per construct.
+    let condition_kinds: &[&str] = match lang {
+        Lang::Rust => &["if_expression", "while_expression", "match_expression"],
+        Lang::Python => &[
+            "if_statement",
+            "elif_clause",
+            "while_statement",
+            "match_statement",
+        ],
+        Lang::Go => &[
+            "if_statement",
+            "for_statement",
+            "expression_switch_statement",
+        ],
+        Lang::JavaScript | Lang::TypeScript => {
+            &["if_statement", "while_statement", "switch_statement"]
+        }
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    visit(node, &mut |n| {
+        if !condition_kinds.contains(&n.kind()) {
+            return;
+        }
+        // The condition is the `condition`/`value` field, else the first
+        // non-block named child (grammars differ across languages).
+        let cond = n
+            .child_by_field_name("condition")
+            .or_else(|| n.child_by_field_name("value"))
+            .or_else(|| {
+                let mut cursor = n.walk();
+                n.named_children(&mut cursor)
+                    .find(|c| !c.kind().contains("block") && c.kind() != "else_clause")
+            });
+        if let Some(c) = cond
+            && let Ok(text) = c.utf8_text(src.as_bytes())
+        {
+            let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !t.is_empty() && t.len() <= 120 && seen.insert(t.clone()) {
+                out.push(t);
+            }
+        }
+    });
+    out.truncate(12);
+    out
+}
+
+/// [`branch_conditions`] for the given units, keyed by `(file, line)`. Parses
+/// each file once. Only functions with at least one condition appear.
+pub fn function_branch_conditions(
+    scan: &Path,
+    units: &[Unit],
+) -> std::collections::HashMap<(String, usize), Vec<String>> {
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&Unit>> =
+        std::collections::BTreeMap::new();
+    for u in units {
+        by_file.entry(u.file.as_str()).or_default().push(u);
+    }
+    let mut out = std::collections::HashMap::new();
+    for (file, wanted) in by_file {
+        let path = scan.join(file);
+        let Some(lang) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension)
+        else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(&lang.ts_language()).is_err() {
+            continue;
+        }
+        let Some(tree) = parser.parse(&src, None) else {
+            continue;
+        };
+        let function_kinds = lang.function_kinds();
+        visit(tree.root_node(), &mut |node| {
+            if !function_kinds.contains(&node.kind()) {
+                return;
+            }
+            let line = node.start_position().row + 1;
+            let Some(unit) = wanted.iter().find(|u| u.line == line) else {
+                return;
+            };
+            let conds = branch_conditions(node, lang, &src);
+            if !conds.is_empty() {
+                out.insert((unit.file.clone(), unit.line), conds);
+            }
+        });
+    }
+    out
+}
+
 fn units_in_file(root: &Path, path: &Path, lang: Lang, src: &str) -> anyhow::Result<Vec<Unit>> {
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
@@ -1028,6 +1131,31 @@ mod tests {
         assert!(mentions("call foo() here", "foo"));
         assert!(!mentions("foobar", "foo"));
         assert!(!mentions("", "foo"));
+    }
+
+    #[test]
+    fn branch_conditions_enumerate_each_control_flow_decision() {
+        let dir = crate::local::tmp_root();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn classify(x: i32) -> &'static str {\n\
+             \x20   if x > 0 {\n\
+             \x20       \"pos\"\n\
+             \x20   } else if x < 0 {\n\
+             \x20       \"neg\"\n\
+             \x20   } else {\n\
+             \x20       \"zero\"\n\
+             \x20   }\n\
+             }\n",
+        )
+        .unwrap();
+        let units = structural_surface(&dir).unwrap();
+        let classify = units.iter().find(|u| u.name == "classify").unwrap();
+        let conds = function_branch_conditions(&dir, &units);
+        let got = &conds[&(classify.file.clone(), classify.line)];
+        assert!(got.iter().any(|c| c == "x > 0"), "{got:?}");
+        assert!(got.iter().any(|c| c == "x < 0"), "{got:?}");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

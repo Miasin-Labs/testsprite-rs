@@ -623,6 +623,10 @@ async fn generate_for_units(
     let picked_owned: Vec<crate::local::coverage::Unit> =
         picked.iter().map(|u| (*u).clone()).collect();
     let sources = crate::local::coverage::function_sources(scan, &picked_owned, PER_FN_SOURCE_CAP);
+    // Path targeting: the explicit list of conditions each function branches on,
+    // so the prompt can ask for inputs that make each one both true and false
+    // (per-branch, not just per-function).
+    let conditions = crate::local::coverage::function_branch_conditions(scan, &picked_owned);
     let mut source_budget = TOTAL_SOURCE_CAP;
     let functions = Value::Array(
         picked
@@ -634,6 +638,9 @@ async fn generate_for_units(
                 {
                     source_budget -= src.len();
                     f["source"] = json!(src);
+                }
+                if let Some(conds) = conditions.get(&(u.file.clone(), u.line)) {
+                    f["branch_conditions"] = json!(conds);
                 }
                 f
             })
