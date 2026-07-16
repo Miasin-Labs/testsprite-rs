@@ -294,3 +294,43 @@ pub async fn code_summary_to_json(yaml_path: &Path) -> Result<String> {
     let json: Value = serde_json::to_value(value)?;
     Ok(serde_json::to_string(&json)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn dashboard_url_uses_testsprite_base() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TESTSPRITE_URL", "https://dash.example");
+        }
+        assert_eq!(
+            dashboard_url("p1", "t1"),
+            "https://dash.example/dashboard/mcp/tests/p1/t1"
+        );
+        unsafe {
+            std::env::remove_var("TESTSPRITE_URL");
+        }
+    }
+
+    #[tokio::test]
+    async fn code_summary_yaml_round_trips_to_compact_json() {
+        let root = crate::local::tmp_root();
+        let p = root.join("code_summary.yaml");
+        std::fs::write(
+            &p,
+            "project_name: demo\nfeatures:\n  - name: Login\napi_endpoints:\n  - method: GET\n    path: /health\n",
+        )
+        .unwrap();
+        let out = code_summary_to_json(&p).await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["project_name"], "demo");
+        assert_eq!(v["features"][0]["name"], "Login");
+        assert_eq!(v["api_endpoints"][0]["path"], "/health");
+        assert!(!out.contains('\n'));
+        std::fs::remove_dir_all(root).ok();
+    }
+}
