@@ -22,6 +22,7 @@ testsprite-rs test run                # exits non-zero if any gate fails
 | `df-build`  | `cargo build --quiet`                           |
 | `df-test`   | `cargo test --quiet` (in-crate `#[cfg(test)]`)  |
 | `df-clippy` | `cargo clippy --all-targets -- -D warnings`     |
+| `df-generation-regressions` | focused generation/auth-flow regression tests |
 
 `dogfood/tests.json` is the committed, reproducible source of truth (the
 `test import` format). The SQLite store it imports into (`testsprite_tests/`)

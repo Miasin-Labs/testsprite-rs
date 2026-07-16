@@ -15,4 +15,4 @@ cd "$(dirname "$0")/.."
 BIN="${TESTSPRITE_RS:-testsprite-rs}"
 
 "$BIN" test import dogfood/tests.json
-exec "$BIN" test run --id df-build --id df-test --id df-clippy
+exec "$BIN" test run --id df-build --id df-test --id df-clippy --id df-generation-regressions

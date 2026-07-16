@@ -9,9 +9,9 @@ execute_spec sent no headers/auth, so every protected endpoint on a real API
 - python_for artifact reflects headers + a Bearer <authToken> PLACEHOLDER (no
   secret embedded).
 
-Live e2e (app: GET /me needs `Authorization: Bearer secret-token-xyz`):
+Live e2e (app: GET /me needs `Authorization: Bearer ${authToken}`):
   test run --id t1                         -> 401 -> FAIL 0/1
-  project set-var authToken secret-token-xyz
+  project set-var authToken <token>
   test run --id t1                         -> Bearer sent -> 200 -> PASS 1/1
 
 Now a real authenticated API works: set the token once, every generated

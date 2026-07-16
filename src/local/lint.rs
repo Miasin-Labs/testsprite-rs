@@ -126,6 +126,26 @@ fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
         ));
     }
 
+    if kind == TestKind::Command {
+        let has_code = test
+            .extra
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_code {
+            issues.push(Issue::Hard {
+                field: "code",
+                msg: "command tests must contain non-empty code".to_string(),
+            });
+        }
+        if test.extra.get("steps").is_some() {
+            issues.push(Issue::Hard {
+                field: "steps",
+                msg: "command tests use code, not backend steps".to_string(),
+            });
+        }
+    }
+
     issues
 }
 
@@ -205,6 +225,32 @@ mod tests {
                 }
             )),
             "QUERY is a real HTTP method and should lint cleanly"
+        );
+    }
+
+    #[test]
+    fn command_tests_require_code_not_steps() {
+        let test = super::super::LocalTest {
+            id: "bad-command".to_string(),
+            title: "bad".to_string(),
+            description: String::new(),
+            kind: Some(TestKind::Command),
+            spec: None,
+            extra: serde_json::json!({"steps":[{"run":"echo nope"}]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        let issues = check(&test.id, &test);
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, Issue::Hard { field: "code", .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, Issue::Hard { field: "steps", .. }))
         );
     }
 }

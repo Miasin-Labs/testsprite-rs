@@ -69,6 +69,22 @@ impl LlmClient {
 
     /// One chat turn. `json_mode` forces a JSON object response.
     async fn chat(&self, system: &str, user: &str, json_mode: bool) -> Result<String> {
+        if uses_responses_api(&self.model) {
+            return self.responses(system, user, json_mode).await;
+        }
+        match self.chat_completions(system, user, json_mode).await {
+            Ok(out) => Ok(out),
+            Err(e)
+                if e.to_string()
+                    .contains("not supported in the v1/chat/completions") =>
+            {
+                self.responses(system, user, json_mode).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn chat_completions(&self, system: &str, user: &str, json_mode: bool) -> Result<String> {
         let mut body = json!({
             "model": self.model,
             "messages": [
@@ -113,6 +129,36 @@ impl LlmClient {
             .ok_or_else(|| anyhow!("openai returned no choices"))
     }
 
+    async fn responses(&self, system: &str, user: &str, json_mode: bool) -> Result<String> {
+        let mut body = json!({
+            "model": self.model,
+            "store": false,
+            "input": [
+                { "role": "system", "content": [{ "type": "input_text", "text": system }] },
+                { "role": "user", "content": [{ "type": "input_text", "text": user }] },
+            ],
+        });
+        if json_mode {
+            body["text"] = json!({ "format": { "type": "json_object" } });
+        }
+        let resp = self
+            .http
+            .post("https://api.openai.com/v1/responses")
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("openai responses request failed")?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("openai responses error {}: {}", status.as_u16(), text);
+        }
+        let parsed: Value =
+            serde_json::from_str(&text).context("parse openai responses response")?;
+        extract_responses_text(&parsed).ok_or_else(|| anyhow!("openai responses returned no text"))
+    }
+
     /// Generate a structured PRD JSON from a code summary.
     pub async fn generate_prd(&self, code_summary: &Value) -> Result<Value> {
         let system = "You are TestSprite's PRD generator. Given a code summary, produce a concise \
@@ -145,17 +191,7 @@ impl LlmClient {
     /// `steps` cases when enough endpoint detail exists; description-only cases
     /// remain the fallback.
     pub async fn generate_plan(&self, prd: &Value) -> Result<Vec<Value>> {
-        let system = "You are TestSprite's test planner. Given a PRD, produce backend API test \
-            cases as JSON: {\"plan\":[{\"id\":\"TC001\",\"title\":...,\"description\":...,\
-            \"kind\":\"backend\",\"spec\":{...}}]}. Prefer deterministic runnable cases: \
-            use `spec` for one HTTP assertion and `steps` for real QA flows (login/OAuth -> \
-            save token -> call protected endpoint). A step shape is {method,path,headers?,\
-            auth?,body?|form?,expect_status?,expect_json?,expect_body?,expect_parses?,save?,\
-            graphql?}. Use `${VAR}` placeholders for secrets from .testsprite.env/process env; \
-            never invent or embed real credentials. GraphQL may use `graphql`:{query,variables?,\
-            operationName?,expect_no_errors?,expect_data?}. Description-only cases are allowed \
-            only when no endpoint/payload can be inferred. Cover happy paths and key error cases. \
-            Respond with JSON only.";
+        let system = plan_prompt();
         let user = format!("PRD:\n{}", serde_json::to_string_pretty(prd)?);
         let out = self.chat(system, &user, true).await?;
         let v: Value = serde_json::from_str(&out).context("plan was not valid JSON")?;
@@ -385,18 +421,55 @@ fn adversarial_plan_prompt(context: &Value) -> Result<(String, String)> {
         default. Given code summary, existing tests, latest results, and coverage gaps, propose \
         high-signal tests that would catch real product defects, false-green checks, auth/scope \
         mistakes, broken payloads, missing UI behavior, and regression-prone edges. Prefer \
-        deterministic runnable cases: backend `spec` or `steps`, frontend `planSteps`; use \
+        deterministic runnable cases: backend `spec` or `steps`, frontend `planSteps`, command \
+        `code` (shell script). Do not put `steps` on command cases; command cases run their \
+        `code` field. Use \
         description-only only if no endpoint/selector can be inferred. Never embed secrets; use \
         ${VARS} placeholders from .testsprite.env/process env. Respond JSON only: \
         {\"plan\":[{\"id\":\"ADV001\",\"title\":\"...\",\"description\":\"...\",\
         \"kind\":\"backend|frontend|command\",\"category\":\"security|functional|edge|regression\",\
         \"priority\":\"critical|high|medium|low\",\"adversarialReason\":\"why this might be broken\",\
-        \"spec\":{...} OR \"steps\":[...] OR \"planSteps\":[...]}]}.";
+        \"spec\":{...} OR \"steps\":[...] OR \"planSteps\":[...] OR \"code\":\"...\"}]}.";
     let user = format!(
         "Project context:\n{}",
         serde_json::to_string_pretty(context)?
     );
     Ok((system.to_string(), user))
+}
+
+fn uses_responses_api(model: &str) -> bool {
+    model.contains("codex") || model.starts_with("gpt-5.3") || model.starts_with("gpt-5.5")
+}
+
+fn extract_responses_text(v: &Value) -> Option<String> {
+    if let Some(s) = v.get("output_text").and_then(Value::as_str) {
+        return Some(s.to_string());
+    }
+    let mut out = String::new();
+    for item in v.get("output")?.as_array()? {
+        for content in item.get("content")?.as_array()? {
+            if content.get("type").and_then(Value::as_str) == Some("output_text")
+                && let Some(text) = content.get("text").and_then(Value::as_str)
+            {
+                out.push_str(text);
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn plan_prompt() -> &'static str {
+    "You are TestSprite's test planner. Given a PRD, produce backend API test \
+        cases as JSON: {\"plan\":[{\"id\":\"TC001\",\"title\":...,\"description\":...,\
+        \"kind\":\"backend\",\"spec\":{...}}]}. Prefer deterministic runnable cases: \
+        use `spec` for one HTTP assertion and `steps` for real QA flows (login/OAuth -> \
+        save token -> call protected endpoint). A step shape is {method,path,headers?,\
+        auth?,body?|form?,expect_status?,expect_json?,expect_body?,expect_parses?,save?,\
+        graphql?}. Use `${VAR}` placeholders for secrets from .testsprite.env/process env; \
+        never invent or embed real credentials. GraphQL may use `graphql`:{query,variables?,\
+        operationName?,expect_no_errors?,expect_data?}. Description-only cases are allowed \
+        only when no endpoint/payload can be inferred. Cover happy paths and key error cases. \
+        Respond with JSON only."
 }
 
 /// Remove ```python ... ``` fences if the model added them.
@@ -423,7 +496,50 @@ mod tests {
         assert!(system.contains("spec"));
         assert!(system.contains("steps"));
         assert!(system.contains("planSteps"));
+        assert!(system.contains("command `code`"));
+        assert!(system.contains("Do not put `steps` on command cases"));
         assert!(system.contains("Never embed secrets") || system.contains("never embed secrets"));
         assert!(user.contains("code_summary"));
+    }
+
+    #[test]
+    fn plan_prompt_keeps_llm_generation_flow_runnable_and_env_driven() {
+        let system = plan_prompt();
+        assert!(system.contains("\"plan\""));
+        assert!(system.contains("steps"));
+        assert!(system.contains("login/OAuth"));
+        assert!(system.contains("save token"));
+        assert!(system.contains("${VAR}"));
+        assert!(system.contains(".testsprite.env"));
+        assert!(system.contains("never invent or embed real credentials"));
+        assert!(system.contains("graphql"));
+    }
+
+    #[test]
+    fn responses_api_models_are_routed_off_chat_completions() {
+        assert!(uses_responses_api("gpt-5.3-codex"));
+        assert!(uses_responses_api("gpt-5.5"));
+        assert!(!uses_responses_api("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn extracts_responses_api_text_shapes() {
+        assert_eq!(
+            extract_responses_text(&json!({"output_text":"{\"ok\":true}"})).unwrap(),
+            "{\"ok\":true}"
+        );
+        assert_eq!(
+            extract_responses_text(&json!({
+                "output": [{
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": "hello"},
+                        {"type": "output_text", "text": " world"}
+                    ]
+                }]
+            }))
+            .unwrap(),
+            "hello world"
+        );
     }
 }
