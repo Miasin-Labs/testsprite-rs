@@ -30,6 +30,7 @@ testsprite-rs project init --type backend --name "<repo>" --url <base-url>
 ```bash
 testsprite-rs project summarize                         # code_summary.yaml: stack/features/routes
 testsprite-rs test generate --from testsprite_tests/tmp/code_summary.yaml  # on-device specs (+ boundary probes) if api_endpoints exist
+testsprite-rs project ingest-prd standard_prd.json --persist  # normalize ANY real TestSprite PRD shape -> recover endpoints (from features/security/etc.) -> re-plan; seeds testCredentials/test_environment into variables.json
 testsprite-rs test generate --doc openapi.json           # Postman/OpenAPI/HAR/GraphQL SDL -> deterministic specs
 testsprite-rs test generate --cover --iterate=3          # one test per uncovered function (rust/py/js/ts/go), re-measuring coverage each round
 testsprite-rs test explore --depth 1 --store             # frontend: discover planSteps from live app
@@ -42,7 +43,7 @@ excluded from suite runs until you `test release <id>` it). Deterministic
 `--from`/`--doc` cases are never gated. `--cover` fans each function through
 normal/boundary/exception views, so the seed suite exercises error paths, not
 just the happy path.
-Or from your coding agent over MCP: **`testsprite_generate_code_summary`**, **`testsprite_generate`**, **`testsprite_explore`**, and **`testsprite_audit`**. If you (the
+Or from your coding agent over MCP: **`testsprite_generate_code_summary`**, **`testsprite_generate`**, **`testsprite_ingest_prd`** (tolerant PRD ingestion + credential/env seeding — the MCP twin of `project ingest-prd`), **`testsprite_explore`**, and **`testsprite_audit`**. An MCP-only agent bootstraps the project with **`testsprite_project_init`** / **`testsprite_project_set_var`** / **`testsprite_project_set_start`** (the MCP equivalents of `project init`/`set-var`/`set-start`). If you (the
 coding agent) can already write the test yourself, prefer **`testsprite_store_test`**
 (hand over your `spec`, `steps`, `planSteps`, or `code`) + `testsprite_run` — it runs deterministically
 with no OpenAI key. Aim for
@@ -70,7 +71,12 @@ body, form, or path. Put local secrets in `.testsprite.env` (gitignored) or CI
 env; never store passwords/tokens in SQLite. A single static bearer still works
 with `testsprite-rs project set-var authToken <token>` or `spec.headers`, but a
 multi-step flow is the right shape when you need to prove login/OAuth/session
-behavior. Use `graphql:{query,variables?,expect_no_errors?,expect_data?}` for GraphQL; it is just a shorthand on the same HTTP QA runner. GraphQL SDL docs import directly (`test generate --doc schema.graphql`) when fields need no required args. HTTP `QUERY` endpoints are supported.
+behavior. Ingesting a real PRD (`project ingest-prd` / `test generate --from
+standard_prd.json`, or `testsprite_ingest_prd`) auto-seeds its `testCredentials`
+(per role, e.g. `${adminUser_username}` / `${adminUser_password}`) and
+`test_environment` (`${frontend_url}` / `${backend_api}`) into `variables.json`
+**without overwriting** any value you already set — so generated flows can
+reference seeded roles/URLs immediately. Use `graphql:{query,variables?,expect_no_errors?,expect_data?}` for GraphQL; it is just a shorthand on the same HTTP QA runner. GraphQL SDL docs import directly (`test generate --doc schema.graphql`) when fields need no required args. HTTP `QUERY` endpoints are supported. Plain natural-language `planSteps` in official phrasing ("Navigate to /path", "Input Email: ${EMAIL}", "Click Sign In", "Verify: Dashboard") now compile deterministically to Playwright with no per-run LLM, so `test explore --store` output and hand-written NL steps run directly.
 
 ### 4. Review then smoke-run
 ```bash
@@ -88,6 +94,11 @@ testsprite-rs test report --out testsprite_tests/testsprite-report.pdf
 testsprite-rs test dashboard --out testsprite_tests/dashboard.html
 testsprite-rs test replay <frontend-id> --out testsprite_tests/replay.html
 ```
+`test report` (and MCP `testsprite_report`) emit TestSprite's official format:
+a **Requirement Validation Summary** grouped by each result's requirement,
+per-failure **Severity** (HIGH/MEDIUM/LOW from `failureKind`), a per-requirement
+**Coverage & Matching Metrics** matrix, and a **Key Gaps / Risks** section — so
+the report is traceable by requirement, not a flat pass/fail list.
 Tell the user plainly: "N tests covering <flows>; smoke-ran M — <pass/fail>; artifacts at <paths>; run the rest with `testsprite-rs test run`, or gate CI with `testsprite-rs gate` (`testsprite-rs ci init` drops a ready pull_request workflow)."
 
 ## Don'ts

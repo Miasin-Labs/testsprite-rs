@@ -271,13 +271,21 @@ fn recover_endpoints(prd: &Value) -> Vec<Value> {
         }
     };
 
-    // (a) code_summary.features[].endpoints — string or object.
-    if let Some(features) = dig(prd, &["code_summary", "features"]).and_then(Value::as_array) {
-        for f in features {
-            if let Some(eps) = f.get("endpoints").and_then(Value::as_array) {
-                for e in eps {
-                    if let Some((m, p)) = endpoint_entry(e) {
-                        push(&m, &p);
+    // (a) features[].endpoints — string or object. Scanned both nested under
+    // `code_summary` (full PRD) and at the top level (an unwrapped code summary,
+    // e.g. what the serve stand-in's `code_summary_from_prd` produces).
+    for features_path in [
+        &["code_summary", "features"][..],
+        &["features"],
+        &["key_features"],
+    ] {
+        if let Some(features) = dig(prd, features_path).and_then(Value::as_array) {
+            for f in features {
+                if let Some(eps) = f.get("endpoints").and_then(Value::as_array) {
+                    for e in eps {
+                        if let Some((m, p)) = endpoint_entry(e) {
+                            push(&m, &p);
+                        }
                     }
                 }
             }

@@ -39,6 +39,12 @@ pub struct AppState {
     pub kind: TestKind,
     /// Target surface: HTTP/browser base URL, mcp command, or rust crate path.
     pub target_base: Arc<RwLock<Option<String>>>,
+    /// Variables seeded from an ingested PRD's `testCredentials` /
+    /// `test_environment` (Wave D). Populated during PRD/plan generation and
+    /// injected into every run's `ExecCtx`, so the account-free FLOW resolves
+    /// `${adminUser_password}` / `${frontend_url}` the same way the local
+    /// `project ingest-prd` pipeline does.
+    pub variables: Arc<RwLock<HashMap<String, String>>>,
     /// Optional OpenAI client. When present, the backend behaves like the real
     /// cloud (LLM PRD/plan/code-gen). When absent, the deterministic engine runs.
     pub llm: Option<LlmClient>,
@@ -52,6 +58,7 @@ impl AppState {
             prd: Arc::new(RwLock::new(json!({}))),
             kind,
             target_base: Arc::new(RwLock::new(None)),
+            variables: Arc::new(RwLock::new(HashMap::new())),
             llm,
         }
     }
@@ -123,18 +130,58 @@ async fn generate_prd(State(state): State<AppState>, mut mp: Multipart) -> impl 
         *state.target_base.write().await = Some(base.to_string());
     }
 
+    // Wave D: if the summary has no runnable top-level api_endpoints, run the
+    // tolerant ingester to recover endpoints (from features/security/etc.) and
+    // seed testCredentials/test_environment into the run variables. This gives
+    // the account-free FLOW parity with the local `project ingest-prd` path.
+    let (effective, seeds) = ingest_summary(&cs);
+    seed_variables(&state, seeds).await;
+
     let prd = match &state.llm {
-        Some(llm) => match llm.generate_prd(&cs).await {
+        Some(llm) => match llm.generate_prd(&effective).await {
             Ok(prd) => prd,
             Err(e) => {
                 tracing::warn!("LLM PRD failed ({e}); using deterministic engine");
-                engine::prd_from_code_summary(&cs)
+                engine::prd_from_code_summary(&effective)
             }
         },
-        None => engine::prd_from_code_summary(&cs),
+        None => engine::prd_from_code_summary(&effective),
     };
     *state.prd.write().await = prd.clone();
     (StatusCode::CREATED, Json(prd)).into_response()
+}
+
+/// If a code summary lacks a runnable top-level `api_endpoints`, run the Wave D
+/// tolerant ingester to recover a plannable summary (endpoints pulled from
+/// `code_summary.features` / `security.*_endpoints` / `apis` / per-feature
+/// `api_doc`) and extract `testCredentials` / `test_environment` variable
+/// seeds. Returns `(effective_summary, seeds)`; a summary that already has
+/// endpoints passes through untouched with no seeds.
+fn ingest_summary(cs: &Value) -> (Value, Vec<(String, String)>) {
+    if cs
+        .get("api_endpoints")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        return (cs.clone(), Vec::new());
+    }
+    match crate::local::prd_ingest::ingest(cs) {
+        Some(ing) => (ing.summary.clone(), ing.variable_seeds()),
+        None => (cs.clone(), Vec::new()),
+    }
+}
+
+/// Merge PRD-derived variable seeds into the shared run variables without
+/// overwriting values already present (non-clobbering, like the local
+/// `seed_variables_missing`).
+async fn seed_variables(state: &AppState, seeds: Vec<(String, String)>) {
+    if seeds.is_empty() {
+        return;
+    }
+    let mut vars = state.variables.write().await;
+    for (k, v) in seeds {
+        vars.entry(k).or_insert(v);
+    }
 }
 
 // --- plans ---
@@ -177,6 +224,12 @@ async fn frontend_plan(
 async fn build_plan(state: &AppState, prd: &Value) -> Vec<Value> {
     *state.prd.write().await = prd.clone();
 
+    // The plan step receives the PRD back from the client (with the original
+    // code summary re-attached), so recover endpoints + seed credentials here
+    // too — the FLOW may call plan without our generate_prd having run first.
+    let (_, seeds) = ingest_summary(&code_summary_from_prd(prd));
+    seed_variables(state, seeds).await;
+
     let cases = match &state.llm {
         Some(llm) => match llm.generate_plan(prd).await {
             Ok(plan) => plan,
@@ -203,7 +256,8 @@ async fn build_plan(state: &AppState, prd: &Value) -> Vec<Value> {
 /// HTTP executor runs directly (no LLM).
 fn deterministic_cases(prd: &Value) -> Vec<Value> {
     let cs = code_summary_from_prd(prd);
-    engine::plan_from_code_summary(&cs)
+    let (effective, _) = ingest_summary(&cs);
+    engine::plan_from_code_summary(&effective)
         .into_iter()
         .map(|c| {
             json!({
@@ -267,7 +321,7 @@ async fn backend_run(State(state): State<AppState>, Json(body): Json<Value>) -> 
         browser: None,
         shots_dir: None,
         root: std::env::current_dir().unwrap_or_default(),
-        variables: std::collections::HashMap::new(),
+        variables: state.variables.read().await.clone(),
     };
     store::spawn_execution(state.store.clone(), executor, ctx, to_run);
     (StatusCode::CREATED, Json(json!({ "testIds": ids })))
@@ -749,6 +803,63 @@ mod tests {
 
         // No endpoints -> no cases.
         assert!(deterministic_cases(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn ingest_summary_recovers_hidden_endpoints_and_credential_seeds() {
+        // Wave D: a loose PRD with endpoints under code_summary.features and
+        // testCredentials — the shape the account-free FLOW must salvage.
+        let loose = json!({
+            "projectName": "Demo",
+            "code_summary": { "features": [
+                { "name": "Auth", "endpoints": ["POST /api/login", "GET /api/me"] }
+            ]},
+            "testCredentials": { "adminUser": {"username":"admin","password":"pw","role":"admin"} }
+        });
+        let (eff, seeds) = ingest_summary(&loose);
+        assert_eq!(eff["api_endpoints"].as_array().unwrap().len(), 2);
+        assert!(seeds.contains(&("adminUser_username".to_string(), "admin".to_string())));
+
+        // A summary that already has endpoints passes through untouched, no seeds.
+        let ready = json!({ "api_endpoints": [{"method":"GET","path":"/x"}] });
+        let (eff2, seeds2) = ingest_summary(&ready);
+        assert_eq!(eff2, ready);
+        assert!(seeds2.is_empty());
+    }
+
+    #[test]
+    fn deterministic_cases_recovers_endpoints_from_loose_prd() {
+        // No top-level api_endpoints; endpoints hidden under features.
+        let prd = json!({ "code_summary": { "features": [
+            { "name": "F", "endpoints": ["GET /health", "POST /api/todos"] }
+        ]}});
+        let cases = deterministic_cases(&prd);
+        let paths: Vec<&str> = cases
+            .iter()
+            .map(|c| c["spec"]["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"/health") && paths.contains(&"/api/todos"));
+    }
+
+    #[tokio::test]
+    async fn seed_variables_is_non_clobbering() {
+        let state = AppState::new(None, TestKind::Backend);
+        state
+            .variables
+            .write()
+            .await
+            .insert("adminUser_password".into(), "user-set".into());
+        seed_variables(
+            &state,
+            vec![
+                ("adminUser_password".into(), "seed-should-lose".into()),
+                ("frontend_url".into(), "http://localhost:3000".into()),
+            ],
+        )
+        .await;
+        let vars = state.variables.read().await;
+        assert_eq!(vars["adminUser_password"], "user-set");
+        assert_eq!(vars["frontend_url"], "http://localhost:3000");
     }
 
     #[tokio::test]

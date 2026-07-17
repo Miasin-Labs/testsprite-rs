@@ -30,6 +30,12 @@ generate-if-uncovered → run → triage → surface in one call and returns
 (auth/network/infra) is counted apart from real `failed`. Use the explicit steps
 below when you need finer control.
 
+Concurrent `test run` / `loop` invocations against one project **serialize
+automatically** via an advisory `testsprite_tests/tmp/execution.lock` (a stale
+lock is stolen after a TTL or when its recorded pid is dead), so parallel
+CI/agent runs no longer race the shared app/auth/DB — you don't need to
+hand-sequence them.
+
 ### 1. See what changed — and test only that (Code Diff Mode)
 ```bash
 testsprite-rs test changed                # changed functions (git) + which stored tests they affect
@@ -78,7 +84,7 @@ Pass `--no-gate` to skip screening, `--budget <tokens>` to cap LLM spend, and
 `--cover --iterate[=N]` to regenerate against still-uncovered functions until a
 plateau. Deterministic (`--from`/`--doc`/hand-written) cases are never gated —
 they carry no hallucinated oracle.
-Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL/QUERY call) and `planSteps` for frontend browser flows. Use `.testsprite.env`/process env placeholders, not hard-coded secrets. Prefer a single self-contained test; assert concrete, observable outcomes.
+Use `steps` for real QA flows (login/OAuth -> save token -> REST/GraphQL/QUERY call) and `planSteps` for frontend browser flows. Use `.testsprite.env`/process env placeholders, not hard-coded secrets — and note that a PRD ingested via `project ingest-prd` / `test generate` (or MCP `testsprite_ingest_prd`) auto-seeds its `testCredentials`/`test_environment` into `variables.json`, so `${adminUser_password}` / `${frontend_url}` etc. are available as `${var}` (never clobbering values you set). Plain natural-language `planSteps` in official phrasing ("Navigate to /path", "Input Email: ${EMAIL}", "Click Sign In", "Verify: X") compile deterministically to Playwright with no per-run LLM, complementing object-form `selectors:[...]` healing. Prefer a single self-contained test; assert concrete, observable outcomes.
 For a repo with its own test runner (cargo/pytest/jest), the best flow is
 `testsprite_coverage_gaps` to find uncovered functions, write/extend the repo's
 own tests for them, then register a `kind:"command"` test (code = the run command,
@@ -141,6 +147,11 @@ testsprite-rs coverage --mutation         # ORACLE STRENGTH: cargo-mutants kill 
 testsprite-rs test report --out testsprite_tests/testsprite-report.pdf
 testsprite-rs test dashboard --out testsprite_tests/dashboard.html
 ```
+`test report` (and MCP `testsprite_report`) produce TestSprite's official
+requirement-grouped format — a **Requirement Validation Summary**, per-failure
+**Severity** (HIGH/MEDIUM/LOW from `failureKind`), a per-requirement **Coverage &
+Matching Metrics** matrix, and **Key Gaps / Risks** — so on failure you can triage
+by requirement and severity rather than reading a flat list.
 Coverage says a line *ran*; mutation says a test would *catch a bug* in it — the
 two dissociate, so treat a high coverage number with a low kill score as a suite
 of weak oracles, and strengthen the assertions on the surviving mutants it lists.

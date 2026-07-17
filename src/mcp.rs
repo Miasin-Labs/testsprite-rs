@@ -16,13 +16,34 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// conversational-agent tools. (Cloud tools that need a TestSprite account are
 /// intentionally not advertised.)
 fn tool_list() -> Value {
-    json!({
-        "tools": [
+    let mut tools = base_tool_list();
+    tools.extend(local_extension_tools());
+    if flow_backend_configured() {
+        tools.extend(cloud_flow_tools());
+    }
+    json!({ "tools": tools })
+}
+
+/// Whether a TestSprite backend is configured — cloud (an API key is set) or
+/// the local `testsprite-rs backend` stand-in (a non-production `API_URL`).
+/// When neither is present the account-gated official-flow tools stay hidden,
+/// so a local no-account client only sees tools that actually work. This is
+/// the discoverable version of the old "cloud tools intentionally not
+/// advertised" policy: the moment a backend exists, the whole flow appears in
+/// tools/list with real schemas instead of being callable only by name.
+fn flow_backend_configured() -> bool {
+    crate::envs::api_key().is_some()
+        || std::env::var("API_URL").is_ok_and(|u| !u.contains("api.testsprite.com"))
+}
+
+/// The always-available local tool surface (no TestSprite account required).
+fn base_tool_list() -> Vec<Value> {
+    let Value::Array(tools) = json!([
             { "name": "testsprite_generate_code_summary",
               "description": "Scan the repo and write TestSprite's code summary (tech_stack, features/files, api_endpoints) to testsprite_tests/tmp/code_summary.yaml by default. This is the official first step before normalized PRD/test-plan generation.",
               "inputSchema": obj_schema(&[("path","string"),("out","string")]) },
             { "name": "testsprite_generate",
-              "description": "Generate local test cases. doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref.",
+              "description": "Generate local test cases. from=<file>: a runnable code summary (top-level api_endpoints) → deterministic backend spec cases with NO OpenAI key; OR any real/loose TestSprite standard_prd.json → tolerant ingestion that recovers endpoints hidden under code_summary.features / security.*_endpoints / apis and auto-seeds testCredentials + test_environment into variables.json (non-clobbering). doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref.",
               "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
             { "name": "testsprite_explore",
               "description": "Autonomous exploratory frontend QA: open a live page with Playwright, inventory visible inputs/buttons/links/headings, and generate deterministic frontend planSteps candidates. Set store=true to add them to the local test DB. interactions=true also clicks visible controls on fresh pages and generates action+assertion candidates (opt-in because clicks can mutate state).",
@@ -96,7 +117,7 @@ fn tool_list() -> Value {
               "description": "Export one run's evidence bundle by numeric run_id (from testsprite_run_history): run.json, qa-artifact.json/executed-artifact.txt, and screenshots when present.",
               "inputSchema": obj_schema(&[("run_id","number"),("out","string")]) },
             { "name": "testsprite_report",
-              "description": "Write a latest-results report summarizing pass/fail, failures, and clusters. Markdown by default, PDF when out ends with .pdf, JSON when json=true.",
+              "description": "Write a latest-results report in TestSprite's official format: a Requirement Validation Summary grouped by each result's requirement, per-failure Severity (HIGH/MEDIUM/LOW derived from failureKind), a per-requirement Coverage & Matching Metrics matrix, and a Key Gaps / Risks section. Markdown by default, PDF when out ends with .pdf, JSON when json=true.",
               "inputSchema": obj_schema(&[("out","string"),("json","boolean")]) },
             { "name": "testsprite_dashboard",
               "description": "Write a static local dashboard HTML: pass counts, stored test list, latest status, and failure clusters.",
@@ -113,8 +134,69 @@ fn tool_list() -> Value {
             { "name": "testsprite_replay",
               "description": "Write a visual replay HTML for a frontend test's stored planSteps and screenshots.",
               "inputSchema": obj_schema(&[("id","string"),("out","string")]) },
-        ]
-    })
+    ]) else {
+        unreachable!("base_tool_list literal is a JSON array")
+    };
+    tools
+}
+
+/// Local tools that need no TestSprite account and are always advertised:
+/// Wave D tolerant PRD ingestion plus the project-config surface an MCP-only
+/// agent needs to bootstrap a project (create project.json, seed route/credential
+/// variables, set the app start command) — capabilities that previously existed
+/// only on the CLI.
+fn local_extension_tools() -> Vec<Value> {
+    let Value::Array(tools) = json!([
+            { "name": "testsprite_ingest_prd",
+              "description": "Ingest a loose/real TestSprite standard_prd.json of ANY shape: normalize it, recover endpoints hidden under code_summary.features / security.*_endpoints / apis / per-feature api_doc, and seed testCredentials ({role}_username/password/role) + test_environment (frontend_url/backend_api) into testsprite_tests/variables.json WITHOUT overwriting existing values. persist=true also stores the normalized PRD + recovered deterministic plan so test run/report work against it immediately. This is the local, no-account version of the official generate-PRD step for third-party PRDs.",
+              "inputSchema": obj_schema(&[("file","string"),("persist","boolean")]) },
+            { "name": "testsprite_project_init",
+              "description": "Create/update testsprite_tests/project.json: the modality (type: backend|frontend|mcp|rust), project name, and target URL tests run against. Required before test run/loop can resolve a base URL.",
+              "inputSchema": obj_schema(&[("type","string"),("name","string"),("url","string")]) },
+            { "name": "testsprite_project_show",
+              "description": "Print the current testsprite_tests/project.json (name, kind, targetUrl, startCommand).",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_project_set_var",
+              "description": "Set a variable in testsprite_tests/variables.json — a path-param ({id}->value), a credential, or any ${VAR} a spec/planStep interpolates. Values here override .testsprite.env. Use this to seed auth tokens or route ids an MCP-driven suite needs.",
+              "inputSchema": obj_schema(&[("key","string"),("value","string")]) },
+            { "name": "testsprite_project_set_start",
+              "description": "Set the shell command that starts the target app, used by testsprite_run/testsprite_loop with serve=true to bring up a live server before backend/spec cases run.",
+              "inputSchema": obj_schema(&[("command","string")]) },
+    ]) else {
+        unreachable!("local_extension_tools literal is a JSON array")
+    };
+    tools
+}
+
+/// The official TestSprite FLOW tools. They route through the backend
+/// (cloud api.testsprite.com, or the local `testsprite-rs backend` stand-in),
+/// so they are advertised only when [`flow_backend_configured`] is true. The
+/// canonical order is bootstrap -> generate_code_summary -> generate_standardized_prd
+/// -> generate_{frontend,backend}_test_plan -> generate_code_and_execute -> report.
+fn cloud_flow_tools() -> Vec<Value> {
+    let Value::Array(tools) = json!([
+            { "name": "testsprite_bootstrap",
+              "description": "FLOW step 1: initialize a project for the official TestSprite pipeline — write testsprite_tests/tmp/config.json (status/scope/type/localEndpoint) and the .gitignore entry. Returns a next_action to generate the code summary. localPort is the port the app under test listens on; type is frontend|backend; testScope is codebase|diff.",
+              "inputSchema": obj_schema(&[("localPort","number"),("pathname","string"),("type","string"),("testScope","string"),("projectPath","string")]) },
+            { "name": "testsprite_check_account_info",
+              "description": "Verify the configured TestSprite backend/account (GET /api/me). Returns firstName/lastName/email/subPlan/credits; the local stand-in returns a fixed local account. Use it to confirm the FLOW backend is reachable before running the pipeline.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_generate_standardized_prd",
+              "description": "FLOW step 3: generate the normalized standard_prd.json from the code summary (+ any raw PRDs dropped in testsprite_tests/tmp/prd_files). Requires the code summary to exist (run testsprite_generate_code_summary first). Returns a next_action to the matching test-plan generator.",
+              "inputSchema": obj_schema(&[("projectPath","string")]) },
+            { "name": "testsprite_generate_frontend_test_plan",
+              "description": "FLOW step 4 (frontend): generate testsprite_frontend_test_plan.json (an array of UI test cases) from the standardized PRD via the backend.",
+              "inputSchema": obj_schema(&[("projectPath","string")]) },
+            { "name": "testsprite_generate_backend_test_plan",
+              "description": "FLOW step 4 (backend): generate testsprite_backend_test_plan.json (an array of API test cases with per-endpoint specs) from the standardized PRD via the backend.",
+              "inputSchema": obj_schema(&[("projectPath","string")]) },
+            { "name": "testsprite_generate_code_and_execute",
+              "description": "FLOW step 5: run the generated test plan through the backend (tunnel -> dispatch -> poll), writing testsprite_tests/tmp/test_results.json + raw_report.md. Returns a next_action steering the host to run the execute subcommand. Follow with testsprite_report for the requirement-grouped report.",
+              "inputSchema": obj_schema(&[("projectPath","string")]) },
+    ]) else {
+        unreachable!("cloud_flow_tools literal is a JSON array")
+    };
+    tools
 }
 
 fn obj_schema(fields: &[(&str, &str)]) -> Value {
@@ -171,6 +253,69 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             Ok(json!({ "path": path, "summary": summary }))
         }
         "testsprite_bootstrap" => bootstrap(&project_path, args).await,
+        "testsprite_ingest_prd" => {
+            let root = std::env::current_dir()?;
+            let file = args
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: file"))?;
+            let persist = args
+                .get("persist")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let r =
+                crate::local::generate::ingest_prd_file(&root, std::path::Path::new(file), persist)
+                    .await?;
+            Ok(json!({
+                "endpoints": r.endpoints,
+                "requirements": r.requirements,
+                "credentials": r.credentials,
+                "timingRules": r.timing_rules,
+                "hasTestDataStrategy": r.has_test_data_strategy,
+                "seededVars": r.seeded_vars,
+                "prdId": r.prd_id,
+                "planIds": r.plan_ids,
+            }))
+        }
+        "testsprite_project_init" => {
+            let root = std::env::current_dir()?;
+            let kind = args
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(crate::server::executors::TestKind::parse)
+                .unwrap_or(crate::server::executors::TestKind::Backend);
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("local");
+            let url = args.get("url").and_then(|v| v.as_str());
+            let path = crate::local::project::init(&root, kind, name, url).await?;
+            Ok(json!({ "wrote": path }))
+        }
+        "testsprite_project_show" => {
+            let root = std::env::current_dir()?;
+            let project = crate::local::project::load(&root).await?;
+            Ok(serde_json::to_value(project)?)
+        }
+        "testsprite_project_set_var" => {
+            let root = std::env::current_dir()?;
+            let key = args
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: key"))?;
+            let value = args
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: value"))?;
+            let vars = crate::local::project::set_variable(&root, key, value)?;
+            Ok(json!({ "key": key, "value": value, "total": vars.len() }))
+        }
+        "testsprite_project_set_start" => {
+            let root = std::env::current_dir()?;
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: command"))?;
+            crate::local::project::set_start(&root, command).await?;
+            Ok(json!({ "startCommand": command }))
+        }
         "testsprite_generate" => {
             let model = arg_model(args);
             let root = std::env::current_dir()?;
@@ -736,15 +881,98 @@ pub async fn serve() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn tool_list_exposes_bulk_materialize() {
-        let tools = super::tool_list();
-        let names: Vec<_> = tools["tools"]
+    /// The account-gated official-flow tools, advertised only when a backend
+    /// (cloud key or local stand-in `API_URL`) is configured.
+    const CLOUD_FLOW: &[&str] = &[
+        "testsprite_bootstrap",
+        "testsprite_check_account_info",
+        "testsprite_generate_standardized_prd",
+        "testsprite_generate_frontend_test_plan",
+        "testsprite_generate_backend_test_plan",
+        "testsprite_generate_code_and_execute",
+    ];
+
+    fn advertised() -> Vec<String> {
+        super::tool_list()["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        assert!(names.contains(&"testsprite_materialize_tests"));
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn local_surface_always_advertised_including_wave_d_and_project_tools() {
+        let _g = crate::testutil::env_guard(&[
+            ("API_KEY", None),
+            ("TSMCP_API_KEY", None),
+            ("API_URL", None),
+        ]);
+        let names = advertised();
+        // Pre-existing local tools.
+        assert!(names.contains(&"testsprite_materialize_tests".to_string()));
+        // Wave D + project-config tools are unconditional (no account needed).
+        for t in [
+            "testsprite_ingest_prd",
+            "testsprite_project_init",
+            "testsprite_project_show",
+            "testsprite_project_set_var",
+            "testsprite_project_set_start",
+        ] {
+            assert!(
+                names.contains(&t.to_string()),
+                "{t} must always be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_flow_hidden_without_a_backend() {
+        let _g = crate::testutil::env_guard(&[
+            ("API_KEY", None),
+            ("TSMCP_API_KEY", None),
+            ("API_URL", None),
+        ]);
+        let names = advertised();
+        for t in CLOUD_FLOW {
+            assert!(
+                !names.contains(&t.to_string()),
+                "{t} should be hidden when no backend is configured"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_flow_advertised_with_api_key() {
+        let _g = crate::testutil::env_guard(&[("API_KEY", Some("sk-user-test"))]);
+        let names = advertised();
+        for t in CLOUD_FLOW {
+            assert!(
+                names.contains(&t.to_string()),
+                "{t} should be advertised once a backend is configured"
+            );
+        }
+    }
+
+    #[test]
+    fn local_stand_in_api_url_advertises_the_flow() {
+        let _g = crate::testutil::env_guard(&[
+            ("API_KEY", None),
+            ("TSMCP_API_KEY", None),
+            ("API_URL", Some("http://127.0.0.1:8787")),
+        ]);
+        let names = advertised();
+        assert!(names.contains(&"testsprite_generate_standardized_prd".to_string()));
+    }
+
+    #[test]
+    fn production_api_url_alone_does_not_unhide_flow() {
+        // A production API_URL with no key is not a usable backend.
+        let _g = crate::testutil::env_guard(&[
+            ("API_KEY", None),
+            ("TSMCP_API_KEY", None),
+            ("API_URL", Some("https://api.testsprite.com")),
+        ]);
+        assert!(!advertised().contains(&"testsprite_bootstrap".to_string()));
     }
 }
