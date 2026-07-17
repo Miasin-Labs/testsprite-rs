@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use super::ts_dir;
@@ -19,12 +20,41 @@ pub struct GateOpts<'a> {
     pub min_mutation: Option<f64>,
 }
 
-/// Run every stored test, write `testsprite_tests/junit.xml` and
-/// `testsprite_tests/gate-summary.json`, best-effort comment on the current
-/// PR (via `gh`), and return `0` if every test passed, `1` otherwise. The
-/// exit code depends only on test results and the optional mutation floor —
-/// `gh` failures never propagate.
+/// The result of a gate run — returned to MCP callers and, via [`gate`],
+/// printed for the CLI. Carries the pass/fail tally, the exit code the CI
+/// gate uses, an optional mutation measurement, and the human-readable log.
+#[derive(Debug, Serialize)]
+pub struct GateOutcome {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<Value>,
+    /// Summary lines the CLI prints; also returned so an MCP caller sees the
+    /// same narration (smoke short-circuit, artifact write, PR-comment status).
+    pub log: Vec<String>,
+}
+
+/// Run the gate and PRINT its log (CLI entry point). Writes
+/// `testsprite_tests/junit.xml` + `gate-summary.json`, best-effort comments on
+/// the current PR (via `gh`), and returns `0` if every test passed (and the
+/// optional mutation floor is met), `1` otherwise. `gh` failures never
+/// propagate. The exact same computation is available data-only via
+/// [`gate_run`] for the `testsprite_gate` MCP tool.
 pub async fn gate(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<i32> {
+    let out = gate_run(root, opts).await?;
+    for line in &out.log {
+        println!("{line}");
+    }
+    Ok(out.exit_code)
+}
+
+/// Run the gate and RETURN its outcome without touching stdout (the MCP-safe
+/// core `gate` prints from). Same side effects (artifacts, PR comment).
+pub async fn gate_run(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<GateOutcome> {
+    let mut log = Vec::new();
+
     // Fast pre-gate: a representative case per group / failure cluster. A cheap
     // red here short-circuits the full run — the inner CI loop stays sub-suite
     // fast when something obvious broke.
@@ -40,18 +70,25 @@ pub async fn gate(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<i32> {
                 .filter(|r| !r.get("passed").and_then(Value::as_bool).unwrap_or(false))
                 .count();
             if smoke_failed > 0 {
-                println!(
+                log.push(format!(
                     "gate --smoke: {smoke_failed}/{} representative case(s) failed — \
                      skipping the full suite",
                     smoke.len()
-                );
+                ));
                 write_artifacts(root, &smoke)?;
-                return Ok(1);
+                return Ok(GateOutcome {
+                    total: smoke.len(),
+                    passed: smoke.len() - smoke_failed,
+                    failed: smoke_failed,
+                    exit_code: 1,
+                    mutation: None,
+                    log,
+                });
             }
-            println!(
+            log.push(format!(
                 "gate --smoke: {} representative case(s) passed — running the full suite",
                 smoke.len()
-            );
+            ));
         }
     }
 
@@ -68,17 +105,20 @@ pub async fn gate(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<i32> {
 
     write_artifacts(root, &results)?;
 
-    println!(
+    log.push(format!(
         "gate: {passed}/{total} passed ({failed} failed) — junit.xml + gate-summary.json written"
-    );
+    ));
 
     let body = comment_body(&results, total, passed, failed);
-    try_gh_comment(root, &body);
+    if let Some(msg) = try_gh_comment(root, &body) {
+        log.push(msg);
+    }
 
     // Oracle-strength floor: a green, high-coverage suite can still catch zero
     // bugs, so `--min-mutation` fails the gate on weak assertions, not just on
     // failing tests.
     let mut exit = if failed == 0 { 0 } else { 1 };
+    let mut mutation = None;
     if let Some(floor) = opts.min_mutation {
         let scan = root.to_path_buf();
         let report =
@@ -86,26 +126,36 @@ pub async fn gate(root: &Path, opts: GateOpts<'_>) -> anyhow::Result<i32> {
                 .await?;
         match report.kill_score {
             Some(score) if score < floor => {
-                println!(
+                log.push(format!(
                     "gate --min-mutation: kill score {score:.1}% is below the {floor:.1}% floor \
                      ({} mutant(s) survived)",
                     report.missed
-                );
+                ));
                 exit = 1;
             }
             Some(score) => {
-                println!("gate --min-mutation: kill score {score:.1}% meets the {floor:.1}% floor");
+                log.push(format!(
+                    "gate --min-mutation: kill score {score:.1}% meets the {floor:.1}% floor"
+                ));
             }
             None => {
-                println!(
+                log.push(format!(
                     "gate --min-mutation: no mutation measurement available ({}), floor not enforced",
                     report.unavailable.as_deref().unwrap_or("unknown")
-                );
+                ));
             }
         }
+        mutation = Some(serde_json::to_value(&report)?);
     }
 
-    Ok(exit)
+    Ok(GateOutcome {
+        total,
+        passed,
+        failed,
+        exit_code: exit,
+        mutation,
+        log,
+    })
 }
 
 /// One representative stored test per group (falling back to per-modality) —
@@ -209,16 +259,16 @@ fn comment_body(results: &[Value], total: usize, passed: usize, failed: usize) -
 
 /// Best-effort: if `gh` is installed and `root` is on a PR, post `body` as a
 /// PR comment. Any missing tool, non-repo, non-PR, or command failure is
-/// swallowed with a printed note — never propagated to the caller.
-fn try_gh_comment(root: &Path, body: &str) {
+/// swallowed and returned as a status line (never propagated); `None` means
+/// the comment posted cleanly and there is nothing to report.
+fn try_gh_comment(root: &Path, body: &str) -> Option<String> {
     let gh_ok = std::process::Command::new("gh")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !gh_ok {
-        println!("gh: not on a PR (or gh unavailable) — skipping PR comment");
-        return;
+        return Some("gh: not on a PR (or gh unavailable) — skipping PR comment".to_string());
     }
 
     let pr_view = std::process::Command::new("gh")
@@ -234,8 +284,7 @@ fn try_gh_comment(root: &Path, body: &str) {
         _ => false,
     };
     if !on_pr {
-        println!("gh: not on a PR (or gh unavailable) — skipping PR comment");
-        return;
+        return Some("gh: not on a PR (or gh unavailable) — skipping PR comment".to_string());
     }
 
     let commented = std::process::Command::new("gh")
@@ -244,8 +293,10 @@ fn try_gh_comment(root: &Path, body: &str) {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    if !commented {
-        println!("gh: failed to post PR comment — skipping");
+    if commented {
+        None
+    } else {
+        Some("gh: failed to post PR comment — skipping".to_string())
     }
 }
 

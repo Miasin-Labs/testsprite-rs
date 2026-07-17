@@ -77,6 +77,31 @@ pub async fn lint(root: &Path, json: bool) -> anyhow::Result<i32> {
     Ok(if hard_found { VALIDATION_ERROR } else { 0 })
 }
 
+/// Data-only lint for the `testsprite_lint` MCP tool: the same
+/// `{checked, valid, issues}` object `--json` prints (hard issues only),
+/// without touching stdout.
+pub async fn lint_data(root: &Path) -> anyhow::Result<Value> {
+    let tests = store::list(root).await?;
+    let mut valid = 0usize;
+    let mut issues = Vec::new();
+    for test in &tests {
+        let found = check(&test.id, test);
+        if !found.iter().any(|i| matches!(i, Issue::Hard { .. })) {
+            valid += 1;
+        }
+        for issue in found {
+            if let Issue::Hard { field, msg } = issue {
+                issues.push(serde_json::json!({
+                    "file": test.id, "field": field, "reason": msg,
+                }));
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "checked": tests.len(), "valid": valid, "issues": issues,
+    }))
+}
+
 fn check(id: &str, test: &super::LocalTest) -> Vec<Issue> {
     let mut issues = Vec::new();
 

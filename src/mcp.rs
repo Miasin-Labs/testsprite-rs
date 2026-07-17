@@ -43,8 +43,8 @@ fn base_tool_list() -> Vec<Value> {
               "description": "Scan the repo and write TestSprite's code summary (tech_stack, features/files, api_endpoints) to testsprite_tests/tmp/code_summary.yaml by default. This is the official first step before normalized PRD/test-plan generation.",
               "inputSchema": obj_schema(&[("path","string"),("out","string")]) },
             { "name": "testsprite_generate",
-              "description": "Generate local test cases. from=<file>: a runnable code summary (top-level api_endpoints) → deterministic backend spec cases with NO OpenAI key; OR any real/loose TestSprite standard_prd.json → tolerant ingestion that recovers endpoints hidden under code_summary.features / security.*_endpoints / apis and auto-seeds testCredentials + test_environment into variables.json (non-clobbering). doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref.",
-              "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string")]) },
+              "description": "Generate local test cases. from=<file>: a runnable code summary (top-level api_endpoints) → deterministic backend spec cases with NO OpenAI key; OR any real/loose TestSprite standard_prd.json → tolerant ingestion that recovers endpoints hidden under code_summary.features / security.*_endpoints / apis and auto-seeds testCredentials + test_environment into variables.json (non-clobbering). doc=<file-or-URL>: a Postman collection, OpenAPI/Swagger spec (incl. a utoipa/served /api-docs/openapi.json URL), or HAR → deterministic spec cases with NO OpenAI key; README/notes/Jira → LLM PRD. changed=true (since, default HEAD) generates only for functions changed since a git ref. cover=true generates one test per uncovered function under path (default repo root); iterate>1 re-measures coverage each round.",
+              "inputSchema": obj_schema(&[("instruction","string"),("from","string"),("doc","string"),("type","string"),("model","string"),("changed","boolean"),("since","string"),("cover","boolean"),("path","string"),("iterate","number")]) },
             { "name": "testsprite_explore",
               "description": "Autonomous exploratory frontend QA: open a live page with Playwright, inventory visible inputs/buttons/links/headings, and generate deterministic frontend planSteps candidates. Set store=true to add them to the local test DB. interactions=true also clicks visible controls on fresh pages and generates action+assertion candidates (opt-in because clicks can mutate state).",
               "inputSchema": obj_schema(&[("url","string"),("store","boolean"),("depth","number"),("limit","number"),("interactions","boolean")]) },
@@ -52,8 +52,8 @@ fn base_tool_list() -> Vec<Value> {
               "description": "Use TestSprite's LLM to adversarially propose high-signal QA tests from code summary, stored tests, latest results, and coverage gaps. Set store=true to persist proposed cases. `model` may be comma-separated (e.g. gpt-5.3-codex,gpt-5.5) to run side-by-side and merge.",
               "inputSchema": obj_schema(&[("path","string"),("model","string"),("store","boolean")]) },
             { "name": "testsprite_run",
-              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server.",
-              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean"),("require_approved_prd","boolean")]) },
+              "description": "Run local tests: execute + LLM failure analysis; set fix=true to also write a repair patch. Set changed=true to run ONLY the tests affected by files changed since a git ref (since, default HEAD). Set serve=true to start the target app (`project set-start`) before running so backend/spec cases hit a live server. url overrides the project target URL for this run; browser picks the Playwright browser (chromium|firefox|webkit); group runs only a named list; jobs sets run concurrency.",
+              "inputSchema": obj_schema(&[("id","string"),("model","string"),("fix","boolean"),("changed","boolean"),("since","string"),("serve","boolean"),("require_approved_prd","boolean"),("url","string"),("browser","string"),("group","string"),("jobs","number")]) },
             { "name": "testsprite_loop",
               "description": "The regression loop in ONE call — the agent-facing 'run the whole surface after every change and hand the breaks back'. Optionally generates tests for changed functions (generate:true + changed:true), runs the suite (the changed subset when changed:true, else all — and on an unattributable change it runs everything rather than reporting an empty green), triages failures into root-cause clusters, and returns one actionable report: {selection, total, passed, failed, blocked, failures:[{id,title,verdict,failureKind,cause}], clusters, next_action, green}. `blocked` (auth/network/infra) is counted apart from real `failed`. Prefer this over calling generate/run/triage separately.",
               "inputSchema": obj_schema(&[("changed","boolean"),("since","string"),("generate","boolean"),("model","string"),("fix","boolean"),("serve","boolean"),("require_approved_prd","boolean")]) },
@@ -162,6 +162,48 @@ fn local_extension_tools() -> Vec<Value> {
             { "name": "testsprite_project_set_start",
               "description": "Set the shell command that starts the target app, used by testsprite_run/testsprite_loop with serve=true to bring up a live server before backend/spec cases run.",
               "inputSchema": obj_schema(&[("command","string")]) },
+            { "name": "testsprite_gate",
+              "description": "Run the stored suite as a CI gate: writes junit.xml + gate-summary.json, best-effort posts a PR comment via gh, and returns {total,passed,failed,exit_code,mutation?,log}. smoke=true runs one representative case per group first and only escalates on green. min_mutation=<0-100> also fails the gate when the mutation kill score is below that floor (weak oracles, not just failing tests).",
+              "inputSchema": obj_schema(&[("url","string"),("model","string"),("smoke","boolean"),("min_mutation","number")]) },
+            { "name": "testsprite_lint",
+              "description": "Validate every stored test offline (no network/LLM): flags malformed backend specs, empty/unrunnable cases, and vacuous oracles. Returns {checked,valid,issues:[{file,field,reason}]}.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_changed",
+              "description": "Code Diff Mode report: which functions changed since a git ref (since, default HEAD) and which stored tests they affect. Returns {since,changedUnits,selection,affected}. Read-only — does not run anything.",
+              "inputSchema": obj_schema(&[("since","string")]) },
+            { "name": "testsprite_diff",
+              "description": "Compare two stored test results (latest run per id) offline: returns {runA,runB,verdictChanged,failureKindChanged}. Use it to check whether a fix changed a test's verdict.",
+              "inputSchema": obj_schema(&[("a","string"),("b","string")]) },
+            { "name": "testsprite_coverage",
+              "description": "Structural (tree-sitter) + Rust (cargo llvm-cov) coverage surface: returns {languages,functions,uncovered,rust}. This is the full report; testsprite_coverage_gaps is the name-matched worklist subset.",
+              "inputSchema": obj_schema(&[("path","string")]) },
+            { "name": "testsprite_mutation",
+              "description": "ORACLE STRENGTH: run cargo-mutants over the Rust crate at path and return the kill score {caught,missed,unviable,timeout,kill_score,survivors}. A green, high-coverage suite can still catch zero seeded bugs — surviving mutants name the assertions to strengthen.",
+              "inputSchema": obj_schema(&[("path","string")]) },
+            { "name": "testsprite_scaffold",
+              "description": "Emit a schema-correct starter test (kind: backend → a pytest requests file; frontend → a plan-input JSON) so you have a valid shape to fill in. Returns the scaffold object.",
+              "inputSchema": obj_schema(&[("kind","string")]) },
+            { "name": "testsprite_release",
+              "description": "Reinstate a quarantined test (clear its suspect-oracle marker) so it runs with the whole suite again. The counterpart to the acceptance gate's quarantine.",
+              "inputSchema": obj_schema(&[("id","string")]) },
+            { "name": "testsprite_revisions",
+              "description": "Show a stored test's prior definitions (pre-heal rewrites), newest-first: {revId,createdAt,reason,body}. Use it to see how --heal or re-generation changed a test.",
+              "inputSchema": obj_schema(&[("id","string")]) },
+            { "name": "testsprite_prune",
+              "description": "Prune run history, keeping the latest `keep` runs per test (bounds testsprite.db). Pass id to prune one test's history, omit it to prune every test. Returns the number of run rows deleted.",
+              "inputSchema": obj_schema(&[("id","string"),("keep","number")]) },
+            { "name": "testsprite_export",
+              "description": "Export every stored test definition as a JSON array (for committing the suite to version control). Returns {count,tests}.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_import",
+              "description": "Import test definitions (upsert by id) from an inline `tests` array or a `file` path to a JSON array. Returns the imported ids.",
+              "inputSchema": obj_schema(&[("file","string"),("tests","array")]) },
+            { "name": "testsprite_prd_list",
+              "description": "List generated PRDs newest-first: {id,features,cases,createdAt,approvedAt,source}. Map a prdId stamped on a generated test back to the PRD it came from.",
+              "inputSchema": obj_schema(&[]) },
+            { "name": "testsprite_prd_show",
+              "description": "Show one stored PRD's full JSON (requirements + attached plan). id optional — defaults to the latest PRD.",
+              "inputSchema": obj_schema(&[("id","string")]) },
     ]) else {
         unreachable!("local_extension_tools literal is a JSON array")
     };
@@ -316,6 +358,149 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             crate::local::project::set_start(&root, command).await?;
             Ok(json!({ "startCommand": command }))
         }
+        "testsprite_gate" => {
+            let root = std::env::current_dir()?;
+            let model = arg_model(args);
+            let out = crate::local::gate::gate_run(
+                &root,
+                crate::local::gate::GateOpts {
+                    url: args.get("url").and_then(|v| v.as_str()),
+                    model: model.as_ref(),
+                    smoke: args.get("smoke").and_then(|v| v.as_bool()).unwrap_or(false),
+                    min_mutation: args.get("min_mutation").and_then(|v| v.as_f64()),
+                },
+            )
+            .await?;
+            Ok(serde_json::to_value(out)?)
+        }
+        "testsprite_lint" => {
+            let root = std::env::current_dir()?;
+            crate::local::lint::lint_data(&root).await
+        }
+        "testsprite_changed" => {
+            let root = std::env::current_dir()?;
+            let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
+            let cs = crate::local::changed::changed_surface(&root, since)?;
+            let affected = crate::local::changed::affected_test_ids(&root, &cs).await?;
+            let units: Vec<&str> = cs.units.iter().map(|u| u.name.as_str()).collect();
+            Ok(json!({
+                "since": cs.since,
+                "changedFiles": cs.files,
+                "changedUnits": units,
+                "fileLevel": cs.file_level,
+                "affected": affected,
+            }))
+        }
+        "testsprite_diff" => {
+            let root = std::env::current_dir()?;
+            let a = args
+                .get("a")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: a"))?;
+            let b = args
+                .get("b")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: b"))?;
+            crate::local::diff::diff_data(&root, a, b).await
+        }
+        "testsprite_coverage" => {
+            let root = std::env::current_dir()?;
+            let scan = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| root.clone());
+            crate::local::coverage::coverage_data(&scan).await
+        }
+        "testsprite_mutation" => {
+            let root = std::env::current_dir()?;
+            let scan = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or(root);
+            let report =
+                tokio::task::spawn_blocking(move || crate::local::mutation::run_rust(&scan, 300))
+                    .await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "testsprite_scaffold" => {
+            let kind = args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("backend");
+            crate::local::scaffold::scaffold_data(kind)
+        }
+        "testsprite_release" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            crate::local::store::set_quarantine(&root, id, None).await?;
+            Ok(json!({ "id": id, "released": true }))
+        }
+        "testsprite_revisions" => {
+            let root = std::env::current_dir()?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+            Ok(json!({
+                "id": id,
+                "revisions": crate::local::store::revisions(&root, id).await?,
+            }))
+        }
+        "testsprite_prune" => {
+            let root = std::env::current_dir()?;
+            let keep = args.get("keep").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+            let deleted = match args.get("id").and_then(|v| v.as_str()) {
+                Some(id) => crate::local::store::prune_runs(&root, id, keep).await?,
+                None => crate::local::store::prune_all(&root, keep).await?,
+            };
+            Ok(json!({ "deleted": deleted, "keep": keep }))
+        }
+        "testsprite_export" => {
+            let root = std::env::current_dir()?;
+            let tests = crate::local::store::export_all(&root).await?;
+            Ok(json!({ "count": tests.len(), "tests": tests }))
+        }
+        "testsprite_import" => {
+            let root = std::env::current_dir()?;
+            let tests: Vec<Value> = if let Some(arr) = args.get("tests").and_then(|v| v.as_array())
+            {
+                arr.clone()
+            } else if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+                let body = std::fs::read_to_string(file)
+                    .map_err(|e| anyhow::anyhow!("reading {file}: {e}"))?;
+                serde_json::from_str(&body)
+                    .map_err(|e| anyhow::anyhow!("{file} is not a JSON array of tests: {e}"))?
+            } else {
+                anyhow::bail!(
+                    "testsprite_import needs `tests` (inline array) or `file` (path to a JSON array)"
+                )
+            };
+            let ids = crate::local::store::import_values(&root, &tests).await?;
+            Ok(json!({ "imported": ids.len(), "ids": ids }))
+        }
+        "testsprite_prd_list" => {
+            let root = std::env::current_dir()?;
+            let prds = crate::local::store::list_prds(&root).await?;
+            Ok(json!({ "count": prds.len(), "prds": prds }))
+        }
+        "testsprite_prd_show" => {
+            let root = std::env::current_dir()?;
+            let id = match args.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => crate::local::store::latest_prd_id(&root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no PRDs yet — generate one first"))?,
+            };
+            let prd = crate::local::store::load_prd(&root, &id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no PRD with id {id}"))?;
+            Ok(json!({ "id": id, "prd": prd }))
+        }
         "testsprite_generate" => {
             let model = arg_model(args);
             let root = std::env::current_dir()?;
@@ -329,7 +514,16 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                     .unwrap_or(1),
                 ..Default::default()
             };
-            let out = if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
+            let out = if args.get("cover").and_then(|v| v.as_bool()) == Some(true) {
+                // One test per uncovered function under `path` (repo root by
+                // default); `iterate` re-measures coverage each round.
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| root.clone());
+                crate::local::generate::generate_cover(&root, &path, model.as_ref(), &opts).await?
+            } else if args.get("changed").and_then(|v| v.as_bool()) == Some(true) {
                 let since = args.get("since").and_then(|v| v.as_str()).unwrap_or("HEAD");
                 if args.get("fault_check").and_then(|v| v.as_bool()) == Some(true) {
                     crate::local::generate::generate_changed_fault_checked(
@@ -452,6 +646,14 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
                         Vec::new()
                     }
                 }
+            } else if let Some(group) = args.get("group").and_then(|v| v.as_str()) {
+                // Run only a named list/group (else fall back to id / all).
+                crate::local::store::list(&root)
+                    .await?
+                    .into_iter()
+                    .filter(|t| t.group() == Some(group))
+                    .map(|t| t.id)
+                    .collect()
             } else {
                 match args.get("id").and_then(|v| v.as_str()) {
                     Some(id) => vec![id.to_string()],
@@ -466,14 +668,15 @@ async fn call_tool(name: &str, args: &Value) -> Result<Value> {
             {
                 crate::local::store::assert_prds_approved(&root, &ids).await?;
             }
+            let jobs = args.get("jobs").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             let results = crate::local::run::run_collect(
                 &root,
                 &ids,
-                None,
+                args.get("url").and_then(|v| v.as_str()),
                 model.as_ref(),
                 fix,
-                None,
-                1,
+                args.get("browser").and_then(|v| v.as_str()),
+                jobs.max(1),
                 serve,
             )
             .await?;
@@ -918,6 +1121,21 @@ mod tests {
             "testsprite_project_show",
             "testsprite_project_set_var",
             "testsprite_project_set_start",
+            // Backfilled CLI-parity tools (all local, no account).
+            "testsprite_gate",
+            "testsprite_lint",
+            "testsprite_changed",
+            "testsprite_diff",
+            "testsprite_coverage",
+            "testsprite_mutation",
+            "testsprite_scaffold",
+            "testsprite_release",
+            "testsprite_revisions",
+            "testsprite_prune",
+            "testsprite_export",
+            "testsprite_import",
+            "testsprite_prd_list",
+            "testsprite_prd_show",
         ] {
             assert!(
                 names.contains(&t.to_string()),

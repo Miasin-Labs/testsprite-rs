@@ -70,6 +70,21 @@ fn verdict_str(verdict: Option<Verdict>) -> &'static str {
     }
 }
 
+/// Data-only comparison for the `testsprite_diff` MCP tool: the same object
+/// `--json` prints, without touching stdout.
+pub async fn diff_data(root: &Path, id_a: &str, id_b: &str) -> anyhow::Result<Value> {
+    let a = load(root, id_a).await?;
+    let b = load(root, id_b).await?;
+    Ok(serde_json::json!({
+        "runA": { "id": id_a, "verdict": verdict_str(a.verdict), "failureKind": a.failure_kind },
+        "runB": { "id": id_b, "verdict": verdict_str(b.verdict), "failureKind": b.failure_kind },
+        "verdictChanged": a.verdict != b.verdict,
+        "failureKindChanged": a.failure_kind != b.failure_kind,
+        "crossTest": false,
+        "changedSteps": [],
+    }))
+}
+
 /// Print a compact comparison of two stored results. Returns `0` when both
 /// verdicts match, `1` when they differ.
 pub async fn diff(root: &Path, id_a: &str, id_b: &str, json: bool) -> anyhow::Result<i32> {

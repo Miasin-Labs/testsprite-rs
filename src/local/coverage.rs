@@ -615,7 +615,10 @@ pub fn rust_llvm_cov(root: &Path) -> anyhow::Result<Option<serde_json::Value>> {
 /// Compute the structural surface (+ Rust real coverage when applicable),
 /// print a human report or one JSON object, and return the process exit
 /// code (always 0 — this is a report, not a pass/fail gate).
-pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
+/// Data-only structural + Rust coverage for the `testsprite_coverage` MCP tool:
+/// the same `{languages, functions, uncovered, rust}` object `--json` prints,
+/// without touching stdout.
+pub async fn coverage_data(root: &Path) -> anyhow::Result<serde_json::Value> {
     let root = root.to_path_buf();
     let units = {
         let root = root.clone();
@@ -642,28 +645,31 @@ pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
     }
 
     let uncovered: Vec<String> = uncovered_names(&units, rust_summary.as_ref());
+    let languages: serde_json::Map<String, serde_json::Value> = by_lang
+        .iter()
+        .map(|(lang, (files, functions, branches))| {
+            (
+                (*lang).to_string(),
+                serde_json::json!({
+                    "files": files,
+                    "functions": functions,
+                    "branches": branches,
+                }),
+            )
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "languages": languages,
+        "functions": units,
+        "uncovered": uncovered,
+        "rust": rust_summary,
+    }))
+}
 
+pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
+    let data = coverage_data(root).await?;
     if json {
-        let languages: serde_json::Map<String, serde_json::Value> = by_lang
-            .iter()
-            .map(|(lang, (files, functions, branches))| {
-                (
-                    (*lang).to_string(),
-                    serde_json::json!({
-                        "files": files,
-                        "functions": functions,
-                        "branches": branches,
-                    }),
-                )
-            })
-            .collect();
-        let out = serde_json::json!({
-            "languages": languages,
-            "functions": units,
-            "uncovered": uncovered,
-            "rust": rust_summary,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(0);
     }
 
@@ -672,11 +678,18 @@ pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
         "{:<12} {:>8} {:>10} {:>10}",
         "language", "files", "functions", "branches"
     );
-    for (lang, (files, functions, branches)) in &by_lang {
-        println!("{lang:<12} {files:>8} {functions:>10} {branches:>10}");
+    if let Some(langs) = data["languages"].as_object() {
+        for (lang, m) in langs {
+            println!(
+                "{lang:<12} {:>8} {:>10} {:>10}",
+                m["files"].as_u64().unwrap_or(0),
+                m["functions"].as_u64().unwrap_or(0),
+                m["branches"].as_u64().unwrap_or(0),
+            );
+        }
     }
 
-    match &rust_summary {
+    match data["rust"].as_object() {
         Some(s) => {
             let f = s.get("functionPercent").and_then(|v| v.as_f64());
             let l = s.get("linePercent").and_then(|v| v.as_f64());
@@ -695,9 +708,10 @@ pub async fn coverage(root: &Path, json: bool) -> anyhow::Result<i32> {
         }
     }
 
+    let uncovered = data["uncovered"].as_array().cloned().unwrap_or_default();
     println!();
     println!("Uncovered/target functions: {}", uncovered.len());
-    for name in uncovered.iter().take(20) {
+    for name in uncovered.iter().filter_map(|v| v.as_str()).take(20) {
         println!("  {name}");
     }
     if uncovered.len() > 20 {

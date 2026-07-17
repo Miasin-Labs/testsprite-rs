@@ -29,38 +29,37 @@ if __name__ == "__main__":
     print("ok")
 "#;
 
+/// The scaffold object for `kind` (`backend` | `frontend`) — the `--json`
+/// shape, without touching stdout. Shared by the CLI and the
+/// `testsprite_scaffold` MCP tool.
+pub fn scaffold_data(kind: &str) -> anyhow::Result<serde_json::Value> {
+    match kind {
+        "backend" => Ok(json!({
+            "type": "backend",
+            "language": "python",
+            "framework": "pytest",
+            "code": BACKEND_TEMPLATE,
+        })),
+        "frontend" => Ok(json!({
+            "title": "Frontend smoke test",
+            "description": "Verify the app loads and renders successfully.",
+            "steps": [
+                {"description": "navigate to the app"},
+                {"description": "assert the page loaded"},
+            ],
+        })),
+        other => anyhow::bail!("unknown scaffold type {other:?}; expected backend | frontend"),
+    }
+}
+
 /// Emit a starter test for `kind` (`backend` | `frontend`). Prints the code
 /// (backend) or plan JSON (frontend), as text or as a `--json` object.
 /// Returns `0` on success.
 pub fn scaffold(kind: &str, json: bool) -> anyhow::Result<i32> {
+    let obj = scaffold_data(kind)?;
     match kind {
-        "backend" => {
-            if json {
-                let obj = serde_json::json!({
-                    "type": "backend",
-                    "language": "python",
-                    "framework": "pytest",
-                    "code": BACKEND_TEMPLATE,
-                });
-                println!("{}", serde_json::to_string_pretty(&obj)?);
-            } else {
-                print!("{BACKEND_TEMPLATE}");
-            }
-            Ok(0)
-        }
-        "frontend" => {
-            let plan = json!({
-                "title": "Frontend smoke test",
-                "description": "Verify the app loads and renders successfully.",
-                "steps": [
-                    {"description": "navigate to the app"},
-                    {"description": "assert the page loaded"},
-                ],
-            });
-            // A plan IS JSON; text and --json output are identical here.
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-            Ok(0)
-        }
-        other => anyhow::bail!("unknown scaffold type {other:?}; expected backend | frontend"),
+        "backend" if !json => print!("{BACKEND_TEMPLATE}"),
+        _ => println!("{}", serde_json::to_string_pretty(&obj)?),
     }
+    Ok(0)
 }
