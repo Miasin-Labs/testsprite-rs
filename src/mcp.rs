@@ -1,13 +1,30 @@
-//! Minimal stdio MCP server (JSON-RPC 2.0 over newline-delimited stdin/stdout).
-//! Mirrors the tool surface registered in the plugin's `index.ts`.
+//! Stdio MCP server built on the official `rmcp` SDK. The SDK owns the
+//! JSON-RPC framing, the initialize/version handshake, ping, and error
+//! envelope; this module supplies the tool list ([`tool_list`]) and the
+//! dispatch ([`call_tool`]). The tool surface mirrors the plugin's `index.ts`.
 
 use anyhow::Result;
+use rmcp::model::{
+    CallToolRequestParams,
+    CallToolResponse,
+    CallToolResult,
+    ContentBlock,
+    ErrorData,
+    Implementation,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ProtocolVersion,
+    ServerCapabilities,
+    ServerInfo,
+    Tool,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::stdio;
+use rmcp::{ServerHandler, ServiceExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::tools;
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "testsprite-rs-mcp-server";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1020,65 +1037,89 @@ async fn bootstrap(project_path: &str, args: &Value) -> Result<Value> {
     tools::init::initialization(init_args).await
 }
 
-/// Wrap a tool result as MCP `content`.
-fn as_content(v: Value) -> Value {
-    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] })
+/// Convert the JSON tool definitions ([`tool_list`]) into rmcp [`Tool`]s for
+/// the SDK's `tools/list` response — schema and all.
+fn rmcp_tools() -> Vec<Tool> {
+    tool_list()["tools"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(json_to_tool).collect())
+        .unwrap_or_default()
 }
 
-/// Route a single method to its result. `None` = notification (no response).
-async fn route(method: &str, req: &Value) -> Option<Result<Value>> {
-    match method {
-        "initialize" => Some(Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
-        }))),
-        "tools/list" => Some(Ok(tool_list())),
-        "tools/call" => {
-            let params = req.get("params").cloned().unwrap_or(json!({}));
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            Some(call_tool(name, &args).await.map(as_content))
-        }
-        "notifications/initialized" => None,
-        _ => Some(Err(anyhow::anyhow!("method not found: {method}"))),
+fn json_to_tool(v: &Value) -> Option<Tool> {
+    let name = v.get("name")?.as_str()?.to_string();
+    let description = v
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let schema = v
+        .get("inputSchema")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    Some(Tool::new(name, description, std::sync::Arc::new(schema)))
+}
+
+/// The testsprite-rs MCP server on the official `rmcp` SDK. `list_tools` is
+/// gated by [`flow_backend_configured`] (via [`tool_list`]), while `call_tool`
+/// still dispatches names that may be absent from the listing — preserving the
+/// "advertised locally, callable once a backend is configured" policy that the
+/// hand-rolled server had.
+#[derive(Clone)]
+struct TestSpriteServer;
+
+impl ServerHandler for TestSpriteServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(SERVER_NAME, SERVER_VERSION))
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions(
+                "Local, no-account TestSprite: generate/run/report tests offline. The official \
+                 cloud flow (bootstrap -> code_summary -> standardized_prd -> test_plan -> \
+                 code_and_execute -> report) becomes discoverable once a backend (an API key, or \
+                 the local `testsprite-rs backend` stand-in) is configured."
+                    .to_string(),
+            )
     }
-}
 
-/// Handle one JSON-RPC request, returning the response value (or None for notifications).
-async fn handle(req: &Value) -> Option<Value> {
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    let result = route(method, req).await?;
-    let id = req.get("id").cloned()?; // notifications carry no id → no response
-    Some(match result {
-        Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-        Err(e) => json!({
-            "jsonrpc": "2.0", "id": id,
-            "result": { "isError": true, "content": [{ "type": "text", "text": e.to_string() }] }
-        }),
-    })
-}
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult::with_all_items(rmcp_tools()))
+    }
 
-/// Run the stdio MCP server loop.
-pub async fn serve() -> Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
-    eprintln!("[testsprite-rs] MCP server started");
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else {
-            tracing::warn!("bad JSON-RPC line");
-            continue;
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
+        // Preserve the original envelope: success -> one pretty-printed JSON
+        // text block; failure -> an isError result carrying the message (a
+        // tool error, never a protocol error, so the caller reads the reason).
+        let result = match call_tool(request.name.as_ref(), &args).await {
+            Ok(v) => CallToolResult::success(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&v).unwrap_or_default(),
+            )]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
         };
-        if let Some(resp) = handle(&req).await {
-            let mut bytes = serde_json::to_vec(&resp)?;
-            bytes.push(b'\n');
-            stdout.write_all(&bytes).await?;
-            stdout.flush().await?;
-        }
+        Ok(result.into())
     }
+}
+
+/// Run the stdio MCP server on the rmcp transport (handshake, framing, and the
+/// read/dispatch/write loop are the SDK's; logs go to stderr so stdout stays
+/// pure JSON-RPC).
+pub async fn serve() -> Result<()> {
+    eprintln!("[testsprite-rs] MCP server started");
+    let service = TestSpriteServer.serve(stdio()).await?;
+    service.waiting().await?;
     Ok(())
 }
 
