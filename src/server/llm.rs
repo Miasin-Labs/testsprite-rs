@@ -78,12 +78,28 @@ fn dirs_credentials() -> Option<std::path::PathBuf> {
 
 /// OpenAI-compatible API base. `OPENAI_BASE_URL` overrides it (a proxy, a
 /// local stand-in, or a compatible provider); default is the real endpoint.
+///
+/// Callers append `/v1/chat/completions` / `/v1/responses` themselves, but the
+/// official SDKs document base URLs *with* a trailing `/v1`
+/// (`https://api.openai.com/v1`), so environments routinely carry that form.
+/// Accept both: trim trailing slashes, then one trailing `/v1` — otherwise the
+/// SDK-convention base yields `/v1/v1/responses` → 404.
 fn api_base() -> String {
     std::env::var("OPENAI_BASE_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim_end_matches('/').to_string())
+        .map(|s| normalize_base(&s))
         .unwrap_or_else(|| "https://api.openai.com".to_string())
+}
+
+/// Strip trailing slashes and at most one trailing `/v1` path segment.
+fn normalize_base(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 #[derive(Deserialize)]
@@ -1333,6 +1349,45 @@ mod tests {
                 .contains("hello there")
         );
         handle.abort();
+    }
+
+    #[test]
+    fn api_base_accepts_sdk_convention_v1_suffix() {
+        // SDK-style base (with /v1) and repo-style base (without) must both
+        // land on ONE /v1 in the final URL — the /v1/v1 double-up was a real
+        // 404 in the field.
+        assert_eq!(
+            normalize_base("https://api.openai.com/v1"),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            normalize_base("https://api.openai.com/v1/"),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            normalize_base("https://api.openai.com"),
+            "https://api.openai.com"
+        );
+        // Proxy with a path: /v1 is stripped from the end only.
+        assert_eq!(
+            normalize_base("https://proxy.example/openai/v1"),
+            "https://proxy.example/openai"
+        );
+        // Only ONE /v1 is stripped, and inner /v1 segments are untouched.
+        assert_eq!(
+            normalize_base("https://h.example/v1/v1"),
+            "https://h.example/v1"
+        );
+        assert_eq!(
+            normalize_base("https://v1.example/api"),
+            "https://v1.example/api"
+        );
+    }
+
+    #[test]
+    fn api_base_env_override_normalizes() {
+        let _g = env_guard(&[("OPENAI_BASE_URL", Some("https://api.openai.com/v1"))]);
+        assert_eq!(api_base(), "https://api.openai.com");
     }
 
     #[test]

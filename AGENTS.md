@@ -23,7 +23,7 @@ It is a research reimplementation, not affiliated with TestSprite. See
 
 ```bash
 cargo build            # edition 2024
-cargo test             # 10 unit tests (server/coverage.rs + src/local/) — must stay green
+cargo test             # 360 tests (349 in-module unit + 11 CLI integration) — must stay green
 cargo clippy --all-targets   # keep at 0 warnings (project standard)
 ```
 
@@ -92,7 +92,8 @@ Two halves, one shared type layer (`types.rs`, `envs.rs`, `paths.rs`).
 
 | Module | Role |
 |---|---|
-| `main.rs` | clap CLI + subcommand dispatch |
+| `main.rs` | clap CLI tree + top-level subcommand routing |
+| `cli/*` | per-group dispatch split out of `main.rs` (today: `cli/test.rs`, the `test` group) |
 | `mcp.rs` | stdio JSON-RPC MCP server: `initialize` / `tools/list` / `tools/call` |
 | `tools/*` | the 7 MCP tool handlers, incl. the `generate_code_and_execute` orchestrator (`execute.rs`) |
 | `tunnel/{protocol,client,mod}.rs` | yamux-v2 reverse tunnel: frame codec, control WS, data plane |
@@ -140,31 +141,33 @@ API / planner — that defeats the seam.
 
 ## Cleanup & modularization findings
 
-Grounded assessment (codegraph + `cargo build/test/clippy`, 2026-07):
-the codebase is **genuinely well-factored** — do not invent a large refactor.
+Grounded assessment (`cargo build/test/clippy`, refreshed 2026-07): the codebase
+is **well-factored and now well-tested** — do not invent a large refactor.
 
-- **No monoliths.** Largest source files: `api.rs` 346, `backend.rs` 296,
-  `execute.rs` 293, `tunnel/client.rs` 277, `llm.rs` 220 lines. All are single-
-  responsibility and cohesive.
-- **Clean signals.** `cargo build` + `cargo clippy` at 0 warnings; `cargo test`
-  4/4; codegraph vuln scan 0 findings across 592 functions.
+- **Clean signals.** `cargo build` + `cargo clippy --all-targets` at 0 warnings;
+  `cargo test` **360 green** (349 in-module unit + 11 CLI integration), 0 failing.
+- **Large but cohesive files** (~29.5k lines, 73 files). The biggest are
+  `server/llm.rs` 1450, `server/store.rs` 1375, `local/store.rs` 1357, `mcp.rs`
+  1237, `local/coverage.rs` 1202, `local/generate.rs` 1130 — the two stores
+  (cloud stand-in vs local lifecycle), the LLM client, and the MCP server. Watch
+  them as they grow, but they are single-responsibility, not tangled. The CLI
+  dispatch is split: `main.rs` (846) parses + routes; the large `test` subcommand
+  tree and its dispatch live in `src/cli/test.rs`.
 
 Minor, optional items (in priority order):
 
-1. **Thin test coverage is the real gap.** Only `coverage.rs` has unit tests.
-   Highest-value work: add pure-function unit tests for `tunnel/protocol.rs`
-   (frame encode/decode round-trip), `engine.rs::concrete_path` (`{param}`
-   templating), `execute.rs::parse_endpoint` (host/port parsing), and
-   `account.rs::mask_api_key` / `execute.rs::redact` (secret masking). These are
-   deterministic and currently unverified.
+1. **Test coverage is now a strength — keep the bar.** 60 of 73 files carry
+   in-module `#[cfg(test)]` tests (it was once just `coverage.rs`), plus black-box
+   CLI tests in `tests/cli.rs`. New pure functions ship with unit tests; don't let
+   this regress.
 2. **`parse_endpoint` name collision.** Two unrelated functions share the name —
    `tools/execute.rs` (URL → `(host, port)`) and `server/engine.rs`
    (JSON → `EndpointSpec`). Not duplication, but consider renaming to
    `parse_host_port` / `parse_endpoint_spec` for clarity.
-3. **`api.rs` split — only if it grows.** At 346 lines it's fine. Handlers are
-   already grouped by comment banners (account/tunnel, PRD, plans, run, poll,
-   coverage, sinks); a natural split into `api/{plan,run,coverage}.rs` submodules
-   is available but not warranted at the current size.
+3. **`server/api.rs` has grown to ~891 lines.** Handlers are grouped by comment
+   banners (account/tunnel, PRD, plans, run, poll, coverage, sinks); a split into
+   `api/{plan,run,coverage}.rs` submodules is available and increasingly worth it
+   as it keeps growing.
 4. **Not slop:** `log_sink` / `test_summary` in `api.rs` are intentional no-op
    acks for endpoints the client calls but a local backend needn't process.
    Leave them.
@@ -177,6 +180,13 @@ Minor, optional items (in priority order):
    (host-independent rescue). All three verified against a live page (webkit/
    chromium/firefox PASS; dead URL → real Playwright error). The `rust` executor
    still has only the deterministic `cargo build` fallback exercised.
+
+Repo hygiene (2026-07): the two vendored deps are now **pinned git deps**
+(`rmcp` → `modelcontextprotocol/rust-sdk` rev `2e2c791`, `serenity` →
+`serenity-rs/serenity` rev `db6c7e1`) instead of absolute `path=` deps, so the
+repo builds anywhere (`cargo build` and `--features discord` both verified). The
+460-line `run_test` dispatch moved out of `main.rs` into `src/cli/test.rs`
+(`main.rs` 1742 → 846 lines).
 
 Recently landed (branch `feat/cli-v3-parity`): UTF-8-safe head+tail output
 truncation (`clip`); `test history` + MCP `testsprite_run_history`; **webkit via
