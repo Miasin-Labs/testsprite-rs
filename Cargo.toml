@@ -16,11 +16,11 @@ hmac = "0.13.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rand = "0.10.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "stream", "socks", "rustls", "charset", "http2"] }
-rmcp = { path = "/home/cole/RustProjects/forks/rust-sdk/crates/rmcp", features = ["transport-io"] }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", rev = "2e2c79173cafb7b7966eeab91f60a241c440b640", features = ["transport-io"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
-serenity = { path = "/home/cole/RustProjects/forks/serenity", optional = true, default-features = false, features = ["builder", "client", "gateway", "model", "http", "utils", "rustls_backend"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", rev = "db6c7e188717c957c7051570dda60d314b6afe2d", optional = true, default-features = false, features = ["builder", "client", "gateway", "model", "http", "utils", "rustls_backend"] }
 sha2 = "0.11.0"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.18"

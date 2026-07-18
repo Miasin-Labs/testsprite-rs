@@ -357,8 +357,9 @@ pub(crate) fn strategy_vars(prd: &Value) -> Vec<(String, StrategyVar)> {
             None => (k.clone(), StrategyVar::Literal(s.to_string())),
         };
         let alias = snake_to_camel(&name);
+        let alias_differs = alias != name;
         out.push((name, var.clone()));
-        if alias != *out.last().unwrap().0 {
+        if alias_differs {
             out.push((alias, var));
         }
     }
